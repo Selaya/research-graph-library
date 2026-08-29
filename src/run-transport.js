@@ -156,6 +156,29 @@ export function createRunTransport(internals, opts = {}) {
     return t;
   }
 
+  /** Re-seat the compile inputs and the clock IN PLACE (a storyboard restore, G2). Same
+   *  transport object, same event bus — so `g.run()` identity and every listener a page
+   *  registered on it survive a backward seek, which tearing the transport down and
+   *  building a new one silently broke. */
+  function reset(o = {}, time = 0) {
+    if (destroyed) return t;
+    if (playing) { playing = false; ticker.remove(frame); }
+    until = null;
+    const p = pending;
+    pending = null;
+    if (p) p.resolve({ canceled: true }); // whatever was awaiting the old position is void
+    for (const k of Object.keys(base)) delete base[k];
+    if (o.iterations) base.iterations = { ...o.iterations };
+    if (Number.isFinite(o.hopMs)) base.hopMs = o.hopMs;
+    if (typeof o.dwell === "function") base.dwell = o.dwell;
+    rates = (o.rates || []).map((r) => ({ ...r }));
+    t = 0;
+    recompile();
+    advanceTo(time, false); // silent: a restore is a state jump, not a re-run (D8)
+    bus.emit("seek", { time: t, duration: current().duration });
+    return t;
+  }
+
   /** First moment `nodeId` is finished — what a `play({until})` step is worth on a
    *  storyboard's cumulative timeline. Falls back to the whole run. */
   function timeOf(nodeId) {
@@ -195,7 +218,7 @@ export function createRunTransport(internals, opts = {}) {
   }
 
   return {
-    play, pause, seek, speed, step, timeOf,
+    play, pause, seek, speed, step, timeOf, reset,
     /** Force a recompile against the live spec (used after a storyboard restore). */
     reload() { dirty = true; return current().duration; },
     get playing() { return playing; },

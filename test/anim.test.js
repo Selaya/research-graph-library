@@ -68,6 +68,27 @@ test("createTicker: multiple callbacks all receive the same tick", () => {
   ticker.destroy();
 });
 
+test("destroy() settles onDestroy waiters — nothing suspended on the clock is stranded", () => {
+  const ticker = createTicker({ manual: true });
+  let fired = 0;
+  ticker.onDestroy(() => fired++);
+  const off = ticker.onDestroy(() => fired++);
+  off();                       // an already-completed waiter unsubscribes
+  assert.equal(fired, 0, "not called before teardown");
+  ticker.destroy();
+  assert.equal(fired, 1, "the live waiter is notified exactly once");
+  ticker.destroy();            // idempotent
+  assert.equal(fired, 1);
+});
+
+test("onDestroy on an already-destroyed ticker fires immediately", () => {
+  const ticker = createTicker({ manual: true });
+  ticker.destroy();
+  let fired = 0;
+  ticker.onDestroy(() => fired++);
+  assert.equal(fired, 1, "a late registration cannot wait for a teardown that already happened");
+});
+
 test("prefersReducedMotion is false under Node (no window)", () => {
   assert.equal(prefersReducedMotion(), false);
 });

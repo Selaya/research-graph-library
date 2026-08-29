@@ -91,6 +91,38 @@ test("mutations: update on a missing id throws", () => {
   assert.throws(() => s.update("nope", { data: {} }), isCode("missing"));
 });
 
+test("update: rejects a dangling parent and a containment cycle, leaving the record untouched", () => {
+  const s = new Store({
+    nodes: [{ id: "A" }, { id: "B", parent: "A" }, { id: "X" }],
+    edges: [{ id: "e1", source: "X", target: "B" }],
+  });
+  // Re-parenting a container under its own child would close a cycle the view walks forever.
+  assert.throws(() => s.update("A", { parent: "B" }), isCode("parent-cycle"));
+  assert.throws(() => s.update("A", { parent: "A" }), isCode("parent-cycle"));
+  assert.throws(() => s.update("B", { parent: "nope" }), isCode("dangling"));
+  assert.equal(s.node("A").parent, undefined, "a rejected patch must not have been written");
+  assert.equal(s.node("B").parent, "A");
+
+  // A legal reparent still goes through.
+  s.update("X", { parent: "A" });
+  assert.equal(s.node("X").parent, "A");
+});
+
+test("update: rejects a dangling edge source/target", () => {
+  const s = new Store({
+    nodes: [{ id: "A" }, { id: "B" }, { id: "C" }],
+    edges: [{ id: "e1", source: "A", target: "B" }],
+  });
+  assert.throws(() => s.update("e1", { target: "ZZZ" }), isCode("dangling"));
+  assert.throws(() => s.update("e1", { source: "ZZZ" }), isCode("dangling"));
+  assert.equal(s.edge("e1").target, "B", "a rejected patch must not have been written");
+  s.update("e1", { target: "C" });
+  assert.equal(s.edge("e1").target, "C");
+  // …and the store still round-trips, which a dangling endpoint would have broken.
+  s.restore(s.snapshot());
+  assert.equal(s.edge("e1").target, "C");
+});
+
 test("removeNode: cascades to descendants and their incident edges", () => {
   const s = new Store({
     nodes: [
@@ -199,6 +231,75 @@ test("condense: a single-fanin edge is not weighted (weight stays undefined)", (
   const { newEdges } = s.condense(["B"], { id: "B2" });
   assert.equal(newEdges.length, 2);
   for (const e of newEdges) assert.equal(e.weight, undefined);
+});
+
+test("condense: a container's boundary edges redirect through its swallowed children", () => {
+  // The demo topology: `clean` is a container; every edge crossing its boundary is
+  // attached to a CHILD, so condensing the container must redirect those, not drop them.
+  const s = new Store({
+    nodes: [
+      { id: "ingest" },
+      { id: "clean" },
+      { id: "clean.dedupe", parent: "clean" },
+      { id: "clean.validate", parent: "clean" },
+      { id: "clean.normalize", parent: "clean" },
+      { id: "collect" },
+    ],
+    edges: [
+      { id: "e1", source: "ingest", target: "clean.dedupe" },
+      { id: "e2", source: "clean.dedupe", target: "clean.validate" },
+      { id: "e3", source: "clean.validate", target: "clean.normalize" },
+      { id: "e4", source: "clean.normalize", target: "collect" },
+    ],
+  });
+
+  const { removedNodes, newEdges } = s.condense(["clean"], { id: "clean.auto" });
+  assert.deepEqual(new Set(removedNodes), new Set(["clean", "clean.dedupe", "clean.validate", "clean.normalize"]));
+  assert.deepEqual(
+    newEdges.map((e) => `${e.source}->${e.target}`).sort(),
+    ["clean.auto->collect", "ingest->clean.auto"],
+  );
+  assert.deepEqual(
+    [...s.edges.values()].map((e) => `${e.source}->${e.target}`).sort(),
+    ["clean.auto->collect", "ingest->clean.auto"],
+    "the pipeline must stay connected, not fall into islands",
+  );
+  for (const e of newEdges) assert.equal(e.weight, undefined, "one edge per side, so no weight");
+});
+
+test("condense: convexity is judged on the containment closure too", () => {
+  // The path ingest -> C(c1) -> mid -> C(c2) leaves the set and re-enters through children.
+  const s = new Store({
+    nodes: [
+      { id: "C" }, { id: "c1", parent: "C" }, { id: "c2", parent: "C" }, { id: "mid" },
+    ],
+    edges: [
+      { id: "a", source: "c1", target: "mid" },
+      { id: "b", source: "mid", target: "c2" },
+    ],
+  });
+  assert.throws(() => s.condense(["C"], { id: "M" }), isCode("non-convex"));
+  assert.ok(s.hasNode("c1") && s.hasNode("c2"), "a rejected condense must not mutate");
+  assert.equal(s.edges.size, 2);
+});
+
+test("condense: an unsatisfiable merged node is rejected BEFORE anything is deleted", () => {
+  const s = new Store({
+    nodes: [{ id: "C" }, { id: "c1", parent: "C" }, { id: "c2", parent: "C" }, { id: "X" }],
+    edges: [{ id: "e1", source: "X", target: "c1" }],
+  });
+  // `c1` is swallowed by this very condense, so it can never be the merged node's parent.
+  assert.throws(() => s.condense(["C"], { id: "M", parent: "c1" }), isCode("dangling"));
+  assert.throws(() => s.condense(["C"], { id: "M", parent: "nope" }), isCode("dangling"));
+  assert.throws(() => s.condense(["C"], { id: "" }), isCode("node-id"));
+
+  // The store is exactly as it was — no half-destroyed graph.
+  assert.deepEqual([...s.nodes.keys()].sort(), ["C", "X", "c1", "c2"]);
+  assert.deepEqual([...s.edges.keys()], ["e1"]);
+  assert.equal(s.hasNode("M"), false);
+  // …and a legal condense on the same store still works.
+  const { merged } = s.condense(["C"], { id: "M" });
+  assert.equal(merged.id, "M");
 });
 
 test("condense: throws on a missing source id or a duplicate target id", () => {

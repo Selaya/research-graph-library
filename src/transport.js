@@ -92,7 +92,9 @@ export function createTransport(rootEl, controller) {
     else if (act === "prev") controller.prev();
     update();
   };
-  const onScrubStart = () => { scrubbing = true; };
+  // Grabbing the thumb takes the transport out of the story's hands: playing on while the
+  // user drags would race every seek the drag issues.
+  const onScrubStart = () => { scrubbing = true; if (controller.pause) controller.pause(); };
   const onScrubInput = () => {
     const tl = (controller.timeline && controller.timeline()) || {};
     const total = tl.total > 0 ? tl.total : 1;

@@ -186,6 +186,59 @@ test("a mutation mid-converge cancels the run cleanly (D9), leaving the merge in
   assert.equal(h.scene.transition, null, "nothing keeps writing");
 });
 
+/** Resolve to "PENDING" instead of hanging, so a stranded promise fails an assertion. */
+const within = (p, ms = 50) => Promise.race([p, new Promise((r) => setTimeout(() => r("PENDING"), ms))]);
+
+test("an overlapping condense is canceled at phase 2, never thrown into the void", async () => {
+  const h = host();
+  // The double-clicked "automate" button: both calls pass g.condense()'s synchronous
+  // guards because neither has touched the store yet.
+  const first = runCondense(h.g, h.internals, ["m1", "m2"], { id: "auto" });
+  const second = runCondense(h.g, h.internals, ["m1", "m2"], { id: "auto" });
+
+  await advance(h.ticker, CONDENSE_PHASES.highlight + 1);
+  assert.deepEqual(await within(second.promise), { canceled: true }, "the loser is canceled, not rejected");
+
+  await advance(h.ticker, CONDENSE_PHASES.converge + 1);
+  await advance(h.ticker, CONDENSE_PHASES.reveal + 1);
+  assert.deepEqual(await within(first.promise), { canceled: false }, "the winner still finishes");
+  assert.equal(h.store.hasNode("auto"), true);
+  assert.deepEqual([...h.store.nodes.keys()].sort(), ["A", "Z", "auto", "m3"], "merged exactly once");
+});
+
+test("tearing the clock down mid-phase settles the run instead of stranding it", async () => {
+  const h = host();
+  const run = runCondense(h.g, h.internals, ["m1", "m2"], { id: "auto5" });
+  await advance(h.ticker, 32); // inside the highlight phase
+  h.ticker.destroy();          // what g.destroy() does under a live condense
+  assert.deepEqual(await within(run.promise), { canceled: true });
+});
+
+test("cancel() mid-converge lands the merged state instead of freezing it half-entered", async () => {
+  const h = host();
+  const run = runCondense(h.g, h.internals, ["m1", "m2", "m3"], MERGED);
+  await advance(h.ticker, CONDENSE_PHASES.highlight + 1);
+  await advance(h.ticker, CONDENSE_PHASES.converge / 2);
+
+  assert.equal(h.store.hasNode("auto"), true, "phase 2 already merged the store");
+  const midway = h.scene.visual.nodes.get("auto").opacity;
+  assert.ok(midway > 0 && midway < 1, "the merged node is halfway into its entrance");
+
+  // An explicit cancel (§5.3's handle) — unlike a D9 retarget there is NO follow-up commit.
+  run.cancel();
+  assert.deepEqual(await run.promise, { canceled: true });
+  await advance(h.ticker, 200);
+
+  assert.deepEqual(
+    [...h.scene.visual.nodes.keys()].sort(), ["A", "Z", "auto"],
+    "the merged-away sources are gone from the picture, not stranded",
+  );
+  const m = h.scene.visual.nodes.get("auto");
+  assert.equal(m.opacity, 1, "…and the node the store DOES have is visible, not stuck at 11%");
+  assert.equal(m.w, h.internals.lastLayout().nodes.auto.w, "…at its real size, not 60%");
+  assert.equal(h.scene.transition, null, "nothing keeps writing");
+});
+
 test("cancel() before converge stops the run and clears the highlight", async () => {
   const h = host();
   const run = runCondense(h.g, h.internals, ["m1", "m2"], { id: "auto3" });

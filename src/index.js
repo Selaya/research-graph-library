@@ -5,7 +5,7 @@
 // cancels-and-retargets instead of queueing or double-writing (D9).
 
 import { emitter } from "./events.js";
-import { Store, GraphError, isConvex } from "./store.js";
+import { Store, GraphError, isConvex, containmentClosure } from "./store.js";
 import { layout } from "./layout.js";
 import { createTicker, EASE, prefersReducedMotion } from "./anim.js";
 import { createScene } from "./scene.js";
@@ -211,19 +211,33 @@ export function mount(el, spec = {}, opts = {}) {
 
   const ensureRun = () => runCtl || createRun(runOpts);
 
-  /** A storyboard `wait` on the shared clock — never a setTimeout racing the ticker (D1). */
+  /** A storyboard `wait` on the shared clock — never a setTimeout racing the ticker (D1).
+   *  Settles `{canceled:true}` if the clock is torn down under it, so g.destroy() during a
+   *  wait never strands the storyboard's awaitable. */
   function waitMs(ms) {
     const d = reduced ? 1 : Math.max(0, ms || 0);
     return new Promise((res) => {
       const t0 = ticker.now();
-      const tickWait = (now) => {
-        if (now - t0 < d) return;
+      let off = null, done = false;
+      const finish = (canceled) => {
+        if (done) return;
+        done = true;
         ticker.remove(tickWait);
-        res({ canceled: false });
+        if (off) { off(); off = null; }
+        res({ canceled });
       };
+      const tickWait = (now) => { if (now - t0 >= d) finish(false); };
       ticker.add(tickWait);
+      if (typeof ticker.onDestroy === "function") off = ticker.onDestroy(() => finish(true));
     });
   }
+
+  /** A `run.play` step's stop node, written either way: `{op,until}` by hand, or
+   *  `{op,args:[{until}]}` by the `timeline()` builder. applyStep and stepSlices MUST read
+   *  it the same way, or a builder-written story is measured as a full run and its
+   *  scrubber is mis-scaled and mis-seeked (the same double-count the base subtraction below
+   *  exists to prevent). */
+  const untilOf = (s) => (s.until != null ? s.until : (s.args && s.args[0] && s.args[0].until));
 
   /** The storyboard's op dispatch (§5.5). Mutation ops are just the public API. */
   function applyStep(step) {
@@ -233,7 +247,8 @@ export function mount(el, spec = {}, opts = {}) {
         return waitMs(step.ms ?? args[0] ?? 0);
       case "run.play": {
         const r = ensureRun();
-        r.play(step.until != null ? { until: step.until } : (args[0] || {}));
+        const u = untilOf(step);
+        r.play(u != null ? { until: u } : (args[0] || {}));
         return { run: r }; // the sequencer awaits r.promise; play/pause stay the run's job
       }
       case "run.step": {
@@ -262,6 +277,7 @@ export function mount(el, spec = {}, opts = {}) {
       return {
         spec: store.snapshot(),
         collapsed: [...vs.collapsed],
+        reversals: [...pinnedReversals],
         runTime: runCtl ? runCtl.time() : 0,
         runOpts: runCtl ? runCtl.options() : null,
       };
@@ -271,9 +287,19 @@ export function mount(el, spec = {}, opts = {}) {
       store.restore(snap.spec);
       vs.collapsed.clear();
       for (const id of snap.collapsed || []) vs.collapsed.add(id);
+      // FAS pins belong to the topology that produced them, so they are part of what a
+      // step moves and part of what a snapshot owns (G2). Carrying the CURRENT ones into a
+      // restored spec pins an edge reversed that this state never reversed — a phantom
+      // dashed back-edge arc and wrong ranks in a graph with no cycle, or the wrong edge
+      // cut in one that has. Restore the pins the snapshot was taken with instead.
+      pinnedReversals = new Set(snap.reversals || []);
       const tr = relayout({});
-      if (snap.runOpts) createRun(snap.runOpts).seek(snap.runTime || 0);
-      else disposeRun();
+      // Re-seat the SAME transport in place: g.run() identity (and every listener on it)
+      // has to survive a backward seek.
+      if (snap.runOpts) {
+        if (runCtl) { runOpts = { ...snap.runOpts }; runCtl.reset(snap.runOpts, snap.runTime || 0); }
+        else createRun(snap.runOpts).seek(snap.runTime || 0);
+      } else disposeRun();
       notify();
       return tr;
     },
@@ -288,17 +314,28 @@ export function mount(el, spec = {}, opts = {}) {
     return sb;
   }
 
-  /** Every step's share of the transport's cumulative timeline. A `run.play {until}` is
-   *  worth exactly the time that node finishes at, so the scrubber tracks the story. */
-  function stepDurations() {
+  /** Every step's share of the transport's cumulative timeline, as `{dur, base}`.
+   *  `runCtl.timeOf()`/`duration` are ABSOLUTE times on the one run clock, which keeps
+   *  climbing across successive `run.play` steps — so a step's own share is what is left
+   *  between where the run already stood when the step began (`base`) and where it stops.
+   *  Without that subtraction two run.play steps double-count the first one's time (a
+   *  total longer than the run, a thumb that jumps at every step boundary, and a scrub
+   *  that rewinds the engine). `base` is also what maps a position inside the step back
+   *  onto the run's own clock. */
+  function stepSlices() {
+    let base = 0; // absolute run time at the start of the step being measured
     return (sbSteps || []).map((s) => {
-      if (s.op === undefined) return 0; // label markers are zero-duration positions
-      if (s.op === "wait") return Math.max(0, s.ms ?? (s.args && s.args[0]) ?? 0);
+      if (s.op === undefined) return { dur: 0, base }; // labels are zero-duration positions
+      if (s.op === "wait") return { dur: Math.max(0, s.ms ?? (s.args && s.args[0]) ?? 0), base };
       if (s.op === "run.play") {
-        if (!runCtl) return NOMINAL_STEP_MS;
-        return s.until != null ? runCtl.timeOf(s.until) : runCtl.duration;
+        if (!runCtl) return { dur: NOMINAL_STEP_MS, base };
+        const u = untilOf(s);
+        const end = u != null ? runCtl.timeOf(u) : runCtl.duration;
+        const slice = { dur: Math.max(0, end - base), base };
+        base = Math.max(base, end);
+        return slice;
       }
-      return NOMINAL_STEP_MS;
+      return { dur: NOMINAL_STEP_MS, base };
     });
   }
 
@@ -310,14 +347,16 @@ export function mount(el, spec = {}, opts = {}) {
         label: null, index: 0, steps: 0, playing: !!(runCtl && runCtl.playing),
       };
     }
-    const durs = stepDurations();
+    const slices = stepSlices();
+    const durs = slices.map((s) => s.dur);
     let acc = 0;
     const offsets = durs.map((d) => { const o = acc; acc += d; return o; });
     const pos = sb.position();
     const i = Math.min(pos.index, Math.max(0, durs.length - 1));
     const step = sbSteps[i];
     const inRun = !!(step && step.op === "run.play" && runCtl);
-    const time = pos.done ? acc : (offsets[i] || 0) + (inRun ? Math.min(runCtl.time(), durs[i]) : 0);
+    const within = inRun ? Math.min(Math.max(0, runCtl.time() - slices[i].base), durs[i]) : 0;
+    const time = pos.done ? acc : (offsets[i] || 0) + within;
     return {
       total: acc || 1, time, label: pos.label, index: pos.index, steps: durs.length,
       playing: sbPlaying || !!(runCtl && runCtl.playing),
@@ -331,7 +370,12 @@ export function mount(el, spec = {}, opts = {}) {
       notify();
       return Promise.resolve();
     }
-    const durs = stepDurations();
+    // A scrub is a state restore, not a nudge: stop the story before moving its head, so
+    // the step still in flight cannot land on top of the restored snapshot.
+    sbPlaying = false;
+    sb.pause();
+    const slices = stepSlices();
+    const durs = slices.map((s) => s.dur);
     if (!durs.length) return Promise.resolve();
     let acc = 0;
     const offsets = durs.map((d) => { const o = acc; acc += d; return o; });
@@ -344,7 +388,8 @@ export function mount(el, spec = {}, opts = {}) {
     const off = Math.max(0, ms - offsets[idx]);
     return Promise.resolve(sb.seek(idx)).then(() => {
       const step = sbSteps[idx];
-      if (step && step.op === "run.play" && runCtl) runCtl.seek(Math.max(0, off));
+      // `off` is story-relative; the run's clock is absolute, hence + the step's base.
+      if (step && step.op === "run.play" && runCtl) runCtl.seek(slices[idx].base + Math.max(0, off));
       notify();
     });
   }
@@ -465,7 +510,10 @@ export function mount(el, spec = {}, opts = {}) {
       for (const id of list) if (!store.hasNode(id)) throw new GraphError("missing", `node "${id}" does not exist`);
       if (!node || node.id == null || node.id === "") throw new GraphError("node-id", "condense needs a new node with a non-empty id");
       if (store.hasNode(node.id)) throw new GraphError("dup-id", `duplicate node id "${node.id}"`);
-      if (!isConvex(store, new Set(list))) {
+      // Judged on the containment closure, exactly as store.condense() will judge it —
+      // otherwise condensing a container passes here and throws 150ms later, out of
+      // condense-anim's async phase 2, as an unhandled rejection.
+      if (!isConvex(store, containmentClosure(store, list))) {
         throw new GraphError("non-convex", `condense set [${list.join(", ")}] is not convex: a path leaves the set and re-enters`);
       }
       const run = runCondense(g, internals, list, node);
@@ -481,14 +529,23 @@ export function mount(el, spec = {}, opts = {}) {
     /** The transport-facing view of where the story is (also what the bar renders from). */
     timeline,
 
+    /** One relayout for many ops. An op that throws mid-batch still has to leave through
+     *  the drain: the ops that DID land are in the store and must be rendered, the
+     *  awaitables already handed out must settle, and batchDefer/batchFocal/batchExtra
+     *  must not leak into the next, unrelated batch. */
     batch(fn) {
       batching++;
-      try { fn(g); } finally { batching--; }
-      if (batching > 0) return settled();
+      let failure = null;
+      try { fn(g); } catch (err) { failure = err; } finally { batching--; }
+      if (batching > 0) {
+        if (failure) throw failure; // an outer batch owns the drain
+        return settled();
+      }
       const d = batchDefer, focal = batchFocal, extra = batchExtra;
       batchDefer = null; batchFocal = null; batchExtra = null;
       const tr = relayout({ focal, ...extra });
       if (d) d.resolve(tr);
+      if (failure) throw failure;
       return tr;
     },
 

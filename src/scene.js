@@ -176,7 +176,16 @@ export function createScene(ticker) {
     const tr = {
       t0: ticker.now(), duration, easing, nodes: nodeOps, edges: edgeOps,
       resolve, promise, done: false,
-      cancel() { if (live === tr) interrupt(); },
+      /** An EXPLICIT cancel has no follow-up commit to re-diff, so anything mid-exit would
+       *  sit in `visual` forever (showing deleted elements). Finish those exits here.
+       *  commit()-driven retargeting deliberately does NOT (D9 keeps exiting elements so
+       *  the next diff can continue or revive them). */
+      cancel() {
+        if (live !== tr) return;
+        interrupt();
+        settle(tr);
+        fire();
+      },
     };
     live = tr;
 

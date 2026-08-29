@@ -205,7 +205,7 @@ export function runOdometer(ticker, textEl, fromSec, toSec, { reduced = false, m
  *  ticker (not a CSS transition) so it composes with reduced-motion the same way as the
  *  rest of the choreography. */
 function popDeltaBadge(ticker, doc, host, text, reduced) {
-  if (!doc || !host || !text || typeof doc.createElementNS !== "function") return;
+  if (!doc || !host || !text || typeof doc.createElementNS !== "function") return { cancel() {} };
   const el = doc.createElementNS(SVG_NS, "text");
   el.setAttribute("class", "smv-delta-badge");
   el.setAttribute("x", "0");
@@ -214,16 +214,48 @@ function popDeltaBadge(ticker, doc, host, text, reduced) {
   host.appendChild(el);
   const ms = reduced ? 1 : DELTA_BADGE_MS;
   const t0 = ticker.now();
-  function step(now) {
-    if (now - t0 < ms) return;
-    ticker.remove(step);
+  let done = false;
+  function remove() {
     if (el.parentNode && typeof el.parentNode.removeChild === "function") el.parentNode.removeChild(el);
   }
+  function step(now) {
+    if (now - t0 < ms) return;
+    done = true;
+    ticker.remove(step);
+    remove();
+  }
   ticker.add(step);
+  return {
+    cancel() {
+      if (done) return;
+      done = true;
+      ticker.remove(step);
+      remove();
+    },
+  };
+}
+
+/** Finds an already-appended `<div class="cls">` among `root`'s direct children — used so a
+ *  destroy()-less re-apply (or a re-mount of the preset onto the same instance) reuses the
+ *  existing total bar instead of stacking a second one. */
+function findChildByClass(root, cls) {
+  if (!root || !root.children) return null;
+  for (const c of root.children) {
+    const className = typeof c.getAttribute === "function" ? c.getAttribute("class") : null;
+    if (className === cls) return c;
+  }
+  return null;
 }
 
 function ensureTotalBar(doc, root) {
   if (!doc || typeof doc.createElement !== "function" || !root) return null;
+  const existingWrap = findChildByClass(root, "smv-totalbar");
+  if (existingWrap) {
+    const track = findChildByClass(existingWrap, "smv-totalbar-track");
+    const fill = track && findChildByClass(track, "smv-totalbar-fill");
+    const label = findChildByClass(existingWrap, "smv-totalbar-label");
+    if (track && fill && label) return { wrap: existingWrap, fill, label, maxSec: 0 };
+  }
   const wrap = doc.createElement("div");
   wrap.setAttribute("class", "smv-totalbar");
   const track = doc.createElement("div");
@@ -250,6 +282,7 @@ export function applyPipelinePreset(g) {
 
   const parts = new Map(); // id -> {host, chip, status, mode}
   const bar = ensureTotalBar(doc, g.el);
+  const liveTimers = new Set(); // in-flight runOdometer()/popDeltaBadge() cancel handles
 
   function partsFor(id) {
     const host = g.renderer && g.renderer.node && g.renderer.node(id);
@@ -303,15 +336,25 @@ export function applyPipelinePreset(g) {
     updateTotalBar(hasTotal ? total : null);
   }
 
+  /** Tracks a runOdometer()/popDeltaBadge() cancel handle so destroy() can stop it — wraps
+   *  cancel() so a handle that has already run to completion (or been canceled) is dropped
+   *  from the live set instead of accumulating forever. */
+  function track(handle) {
+    liveTimers.add(handle);
+    const cancel = handle.cancel;
+    handle.cancel = () => { liveTimers.delete(handle); cancel(); };
+    return handle;
+  }
+
   function onCondense({ sources, target, sourceData, targetData }) {
     const p = partsFor(target);
     if (!p) return;
     const sourceSec = aggregateDuration((sourceData || []).map((d) => parseDuration(d && d.data && d.data.duration)), "sum");
     const targetSec = parseDuration(targetData && targetData.data && targetData.data.duration);
     const reduced = prefersReducedMotion();
-    runOdometer(g.ticker, p.chip, sourceSec, targetSec, { reduced });
+    track(runOdometer(g.ticker, p.chip, sourceSec, targetSec, { reduced }));
     const text = deltaBadgeText(sourceSec, targetSec);
-    if (text) popDeltaBadge(g.ticker, doc, p.host, text, reduced);
+    if (text) track(popDeltaBadge(g.ticker, doc, p.host, text, reduced));
   }
 
   const offCommit = g.on("commit", onCommit);
@@ -323,10 +366,17 @@ export function applyPipelinePreset(g) {
       else g.off("commit", onCommit);
       if (typeof offCondense === "function") offCondense();
       else g.off("condense", onCondense);
+      for (const handle of [...liveTimers]) handle.cancel();
+      liveTimers.clear();
+      for (const p of parts.values()) {
+        for (const el of [p.chip, p.status, p.mode]) {
+          if (el.parentNode && typeof el.parentNode.removeChild === "function") el.parentNode.removeChild(el);
+        }
+      }
+      parts.clear();
       if (bar && bar.wrap.parentNode && typeof bar.wrap.parentNode.removeChild === "function") {
         bar.wrap.parentNode.removeChild(bar.wrap);
       }
-      parts.clear();
     },
   };
 }

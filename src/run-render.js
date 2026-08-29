@@ -155,9 +155,9 @@ export function createRunRender(internals, run) {
       const prev = traversedAt.get(id);
       const rounded = Math.round(v * 100) / 100;
       if (prev === rounded) continue;
-      traversedAt.set(id, rounded);
       const el = renderer.edge(id);
       if (!el) continue;
+      traversedAt.set(id, rounded);
       if (rounded > 0) {
         el.setAttribute("data-traversed", "");
         el.style.setProperty("--smv-traversed", String(rounded));
@@ -323,7 +323,18 @@ export function createRunRender(internals, run) {
     run.on("pause", draw),
     run.on("remap", onRemap),
   ];
-  if (internals.bus) offs.push(internals.bus.on("commit", (ev) => { indexView(ev && ev.meta); draw(); }));
+  // A commit can destroy and recreate the very elements these caches remember writing to
+  // (collapse/expand, storyboard restore) — a fresh <g> starts with no data-run/data-traversed
+  // of its own, so the memoized "already wrote this value" state must not survive it, or the
+  // decoration silently never reappears on the new element (it looks identical to the cache).
+  if (internals.bus) {
+    offs.push(internals.bus.on("commit", (ev) => {
+      indexView(ev && ev.meta);
+      traversedAt.clear();
+      runStatusAt.clear();
+      draw();
+    }));
+  }
 
   // A run is usually created after the first commit, so seed the view index rather than
   // waiting for the next one — otherwise tokens inside a collapsed container have nowhere

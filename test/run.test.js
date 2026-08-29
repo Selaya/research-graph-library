@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseDuration, compileRun } from "../src/run.js";
 import { Store } from "../src/store.js";
+import { createViewState } from "../src/viewstate.js";
 
 const near = (a, b, eps = 1e-6) =>
   assert.ok(Math.abs(a - b) <= eps, `expected ${a} ≈ ${b}`);
@@ -504,14 +505,17 @@ test("degenerate specs compile to an inert sim rather than throwing", () => {
   near(lone.duration, 600);
   assert.equal(lone.stateAt(300).nodes.only.status, "active");
 
-  // A pure cycle has no source node: nothing to start, so nothing runs.
+  // A pure (untagged) cycle still runs: its back edge is broken like the layout breaks it,
+  // so the head of the cycle is a source and seeds one token.
   const cyclic = compileRun({
     nodes: [{ id: "a" }, { id: "b" }],
     edges: [{ id: "ab", source: "a", target: "b" }, { id: "ba", source: "b", target: "a" }],
   });
-  assert.equal(cyclic.duration, 0);
-  assert.deepEqual(cyclic.stateAt(0).tokens, []);
-  assert.equal(cyclic.stateAt(0).nodes.a.status, "pending");
+  near(cyclic.duration, 1500);
+  assert.equal(cyclic.stateAt(0).tokens.length, 1);
+  assert.equal(cyclic.stateAt(0).nodes.a.status, "active");
+  assert.equal(cyclic.stateAt(cyclic.duration).nodes.b.status, "done");
+  assert.equal(cyclic.stateAt(cyclic.duration).done, true);
 });
 
 test("a self-loop is a loop edge, not an in-edge: the node still starts as a source", () => {
@@ -525,6 +529,105 @@ test("a self-loop is a loop edge, not an in-edge: the node still starts as a sou
   near(firstEv(sim, "start", (e) => e.nodeId === "a").t, 0);
   assert.deepEqual(evs(sim, "loop").map((e) => e.iteration), [1, 2]);
   assert.equal(sim.stateAt(sim.duration).done, true);
+});
+
+// ---- containers ----------------------------------------------------------
+
+/** `clean` is a container of c1->c2; the pipeline is wired to the CONTAINER, not its kids. */
+function containerSpec() {
+  return {
+    nodes: [
+      { id: "ingest" },
+      { id: "clean" },
+      { id: "c1", parent: "clean" },
+      { id: "c2", parent: "clean" },
+      { id: "collect" },
+      { id: "deploy" },
+    ],
+    edges: [
+      { id: "e1", source: "ingest", target: "clean" },
+      { id: "i1", source: "c1", target: "c2" },
+      { id: "e4", source: "clean", target: "collect" },
+      { id: "d1", source: "collect", target: "deploy" },
+    ],
+  };
+}
+
+test("containers: an edge incident to a container gates/feeds its interior entry/exit child", () => {
+  const sim = compileRun(containerSpec());
+
+  // The token flows straight through the container's interior — nothing is stranded.
+  const enter = (id) => firstEv(sim, "enter", (e) => e.nodeId === id);
+  near(enter("ingest").t, 0);
+  near(enter("c1").t, 900);
+  assert.equal(enter("c1").edgeId, "e1", "the container's in-edge gates its ENTRY child");
+  near(enter("c2").t, 1800);
+  near(enter("collect").t, 2700);
+  assert.equal(enter("collect").edgeId, "e4", "the container's out-edge is fed by its EXIT child");
+  near(enter("deploy").t, 3600);
+
+  // The container itself never seeds a phantom token (D5) and never starts early.
+  assert.equal(sim.stateAt(0).tokens.length, 1, "only `ingest` is a source");
+  assert.equal(sim.stateAt(0).nodes.clean.status, "pending");
+  assert.equal(sim.stateAt(0).nodes.c1.status, "pending");
+  assert.equal(evs(sim, "start").filter((e) => e.nodeId === "clean").length, 0);
+
+  near(sim.duration, 4200);
+  const end = sim.stateAt(sim.duration);
+  assert.equal(end.done, true);
+  for (const id of ["collect", "deploy", "clean"]) assert.equal(end.nodes[id].status, "done", `${id} never ran`);
+  assert.equal(sim.events.find((e) => e.type === "done").stalled, false);
+});
+
+test("containers: the engine's attachment points are the same ones the view draws", () => {
+  const spec = containerSpec();
+  const view = createViewState(new Store(spec)).view();
+  const viewEdge = (id) => view.edges.find((e) => e.id === id);
+  // viewstate re-attaches the container-incident edges for layout…
+  assert.deepEqual([viewEdge("e1").source, viewEdge("e1").target], ["ingest", "c1"]);
+  assert.deepEqual([viewEdge("e4").source, viewEdge("e4").target], ["c2", "collect"]);
+
+  // …and the engine must token them across exactly the same pair of nodes.
+  const sim = compileRun(spec);
+  for (const id of ["e1", "e4", "i1", "d1"]) {
+    const ve = viewEdge(id);
+    const arrival = firstEv(sim, "enter", (e) => e.edgeId === id);
+    assert.ok(arrival, `edge ${id} never carried a token`);
+    assert.equal(arrival.nodeId, ve.target, `${id} landed somewhere the view does not draw it`);
+  }
+});
+
+// ---- untagged cycles -----------------------------------------------------
+
+test("untagged cycle: a back edge is not an implicit AND-join arm (no deadlock)", () => {
+  // S->A, A->B, B->A with no `loop: true` anywhere: `A` must NOT wait for two arrivals.
+  const sim = compileRun({
+    nodes: [{ id: "S" }, { id: "A" }, { id: "B" }],
+    edges: [
+      { id: "sa", source: "S", target: "A" },
+      { id: "ab", source: "A", target: "B" },
+      { id: "ba", source: "B", target: "A" },
+    ],
+  });
+  assert.deepEqual(sim.stateAt(0).joins, {}, "the back edge must not fabricate a join on A");
+  assert.equal(sim.events.find((e) => e.type === "done").stalled, false);
+  near(sim.duration, 2400);
+  const end = sim.stateAt(sim.duration);
+  assert.equal(end.nodes.B.status, "done", "B is downstream of the deadlocked join");
+  assert.equal(end.done, true);
+});
+
+test("untagged cycle: an untagged self-loop leaves its node a source", () => {
+  const sim = compileRun({
+    nodes: [{ id: "a" }, { id: "b" }],
+    edges: [
+      { id: "self", source: "a", target: "a" },
+      { id: "ab", source: "a", target: "b" },
+    ],
+  });
+  near(firstEv(sim, "start", (e) => e.nodeId === "a").t, 0);
+  assert.equal(sim.stateAt(sim.duration).done, true);
+  assert.equal(sim.stateAt(sim.duration).nodes.b.status, "done");
 });
 
 // ---- opts ----------------------------------------------------------------

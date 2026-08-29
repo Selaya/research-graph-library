@@ -176,6 +176,41 @@ test("holdOpacity keeps an element's opacity untouched", () => {
   ticker.destroy();
 });
 
+test("an explicit cancel() finishes exits — deleted elements never strand in visual", async () => {
+  const { ticker, scene } = setup();
+  seed(scene, ticker, nodesOnly({ a: N(0), b: N(60) }));
+
+  const tr = scene.commit(nodesOnly({ a: N(0) }), { duration: 100, easing: EASE.linear });
+  ticker.tick(40);
+  assert.ok(scene.visual.nodes.has("b"), "mid-fade, still on screen");
+
+  tr.cancel(); // no follow-up commit will ever re-diff this
+  assert.deepEqual(await tr.promise, { canceled: true });
+  assert.equal(scene.visual.nodes.has("b"), false, "the exiting element is gone, not frozen at 60% opacity");
+  assert.equal(scene.visual.nodes.get("a").x, 0, "everything else holds its sampled state");
+  ticker.tick(1000);
+  assert.equal(scene.visual.nodes.has("b"), false);
+  ticker.destroy();
+});
+
+test("a commit-driven retarget still keeps a mid-exit element alive (D9)", () => {
+  const { ticker, scene } = setup();
+  seed(scene, ticker, nodesOnly({ a: N(0), b: N(60) }));
+
+  scene.commit(nodesOnly({ a: N(0) }), { duration: 100, easing: EASE.linear });
+  ticker.tick(50);
+  const faded = scene.visual.nodes.get("b").opacity;
+  assert.ok(faded > 0 && faded < 1, "b is halfway out");
+
+  // The retarget brings b back: it must still be there to be picked up by the new diff.
+  scene.commit(nodesOnly({ a: N(0), b: N(60) }), { duration: 100, easing: EASE.linear });
+  assert.equal(scene.visual.nodes.has("b"), true, "cancel-and-retarget does not settle exits");
+  assert.equal(scene.visual.nodes.get("b").opacity, faded, "…it resumes from the sampled state");
+  ticker.tick(100);
+  assert.equal(scene.visual.nodes.get("b").opacity, 1, "and fades back in");
+  ticker.destroy();
+});
+
 test("cancel() resolves the transition as canceled and leaves visual state put", async () => {
   const { ticker, scene } = setup();
   seed(scene, ticker, nodesOnly({ a: N(0) }));

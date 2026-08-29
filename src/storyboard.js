@@ -35,12 +35,20 @@ export function createStoryboard(host, steps) {
   let playing = false;
   let playPromise = null;
   let activeRun = null;        // the {run} a live run.play step handed back, for pause/resume
+  // Two generation counters keep the single-writer invariant across suspension points.
+  // `stepGen` invalidates an in-flight advanceOne() (a seek moved the ground under it, so
+  // its cursor write and its "step" event are void). `loopGen` retires a play loop, so a
+  // pause()+play() can never leave two loops walking one `cursor`.
+  let stepGen = 0;
+  let loopGen = 0;
+  let inFlight = null;         // the advanceOne() currently owning `cursor`, if any
 
   const isLabelOnly = (step) => step.op === undefined;
   const labelAt = (idx) => (steps[idx] && steps[idx].label !== undefined ? steps[idx].label : null);
 
   async function advanceOne() {
     if (cursor >= steps.length) return { canceled: false };
+    const myGen = stepGen;
     const idx = cursor;
     const step = steps[idx];
     if (!snapshots.has(idx)) snapshots.set(idx, host.snapshot());
@@ -55,6 +63,9 @@ export function createStoryboard(host, steps) {
       } else if (result && typeof result.then === "function") {
         await result;
       }
+      // A seek landed while this step was suspended: the restored snapshot is the truth
+      // now, so this step must not advance the cursor or announce itself.
+      if (myGen !== stepGen) return { canceled: true };
       activeRun = null;
     }
     cursor = idx + 1;
@@ -63,8 +74,22 @@ export function createStoryboard(host, steps) {
     return { canceled: false };
   }
 
+  /** At most ONE advanceOne() is ever in flight: a resumed play joins the suspended step
+   *  instead of applying it a second time. */
+  function runOne() {
+    if (inFlight) return inFlight;
+    const p = advanceOne().then(
+      (r) => { if (inFlight === p) inFlight = null; return r; },
+      (e) => { if (inFlight === p) inFlight = null; throw e; },
+    );
+    inFlight = p;
+    return p;
+  }
+
   async function loop() {
-    while (playing && cursor < steps.length) await advanceOne();
+    const myGen = ++loopGen;
+    while (playing && loopGen === myGen && cursor < steps.length) await runOne();
+    if (loopGen !== myGen) return;   // retired by pause()/seek(); the live loop owns the flags
     playing = false;
     playPromise = null;
   }
@@ -78,6 +103,19 @@ export function createStoryboard(host, steps) {
 
   async function seek(indexOrLabel) {
     const idx = resolveIndex(indexOrLabel);
+    // A seek is a state restore, not a nudge to the play head: stop the loop and void the
+    // step that is still in flight FIRST, so nothing writes `cursor` behind the restore.
+    // The storyboard stays paused afterwards — the caller (or the transport) resumes.
+    const wasPlaying = playing;
+    playing = false;
+    loopGen++;
+    playPromise = null;
+    if (wasPlaying || inFlight) {
+      stepGen++;
+      inFlight = null;
+      if (activeRun && typeof activeRun.run.pause === "function") activeRun.run.pause();
+      activeRun = null;
+    }
     if (snapshots.has(idx)) {
       // Backward (or revisited) seek: restore the pre-step snapshot and let the host's
       // own keyed diff animate from the current visual state (D8) — no replay needed.
@@ -86,7 +124,8 @@ export function createStoryboard(host, steps) {
     } else {
       // Forward seek past ground never covered: there is no snapshot to restore *to*
       // yet, so reach it the only way ops are valid — apply steps in order.
-      while (cursor < idx) await advanceOne();
+      const myGen = stepGen;
+      while (cursor < idx && stepGen === myGen) await runOne();
     }
     bus.emit("seek", { index: idx, label: labelAt(idx) });
   }
@@ -101,12 +140,17 @@ export function createStoryboard(host, steps) {
 
   function pause() {
     playing = false;
+    // Retire the loop coroutine too: it may be suspended inside a step, and a later play()
+    // must not leave it walking `cursor` alongside the loop it starts (the in-flight step
+    // itself survives — play() rejoins it rather than applying it twice).
+    loopGen++;
+    playPromise = null;
     if (activeRun && typeof activeRun.run.pause === "function") activeRun.run.pause();
   }
 
   return {
     play, pause,
-    next: () => advanceOne(),
+    next: () => runOne(),
     prev: () => seek(Math.max(0, cursor - 1)),
     seek,
     labels: () => steps.map((s, index) => ({ label: s.label, index })).filter((e) => e.label !== undefined),

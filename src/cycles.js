@@ -44,11 +44,22 @@ export function breakCycles(nodes, edges, pinned = new Set()) {
       color.set(u, BLACK);
     };
     for (const n of nodes) if (color.get(n.id) === WHITE) visit(n.id);
-    return reversed;
+    return { reversed, cut };
   };
 
-  let reversed = attempt(preferred);
-  if (!isAcyclic(nodes, real, reversed)) reversed = attempt(new Set()); // pins conflicted; fall back to pure DFS
+  let { reversed, cut } = attempt(preferred);
+  if (!isAcyclic(nodes, real, reversed)) ({ reversed, cut } = attempt(new Set())); // pins conflicted; fall back to pure DFS
+  // Release stale pins. A pinned edge is pre-reversed before the DFS runs, so the DFS
+  // cannot see whether it is still load-bearing: once the cycle it was breaking is gone
+  // (an edge removed elsewhere), it would stay reversed forever and keep a plain forward
+  // edge out of ranking. Drop any pin the DFS did not itself re-cut when the graph stays
+  // acyclic without it — the exact mirror of the loop:true forcing below.
+  for (const e of real) {
+    if (e.loop || !preferred.has(e.id) || cut.has(e.id) || !reversed.has(e.id)) continue;
+    const without = new Set(reversed);
+    without.delete(e.id);
+    if (isAcyclic(nodes, real, without)) reversed = without;
+  }
   // loop:true edges must stay tagged for styling/token semantics even if the
   // un-reverse path above touched them — force them reversed unless that breaks acyclicity.
   for (const e of real) {

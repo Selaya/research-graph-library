@@ -339,3 +339,23 @@ zero errors; 3 concurrent tokens observed with distinct branch progress; join fi
 all 3; loop badge reaches 3/5; expand adds 3 substeps; condense leaves 1 node + odometer
 text lands on "8s"; scrub to "before automation" restores the 3 substeps then scrub to
 end re-condenses; no NaN anywhere.
+
+---
+
+# Post-review contract additions (M1 hardening)
+
+- `anim.js`: `ticker.onDestroy(fn) → off` — teardown notification; any awaitable that
+  suspends on the clock (condense phases, storyboard waits) must register one so
+  `g.destroy()` settles it (resolving `{canceled: true}`) instead of stranding it.
+- `run-transport.js`: `run.reset(opts, time)` — in-place re-seat (recompile + silent
+  resync) preserving the transport's identity and listeners; used by storyboard restore.
+- `storyboard.js`: generation counters (`stepGen`/`loopGen`) make play/pause/seek safe
+  under interleaving; `seek()` always leaves the storyboard paused; the transport bar and
+  `seekTimeline` pause before moving the head.
+- `store.js`: exports `containmentClosure(store, ids)`; condense convexity + edge
+  redirection judge the closure (children of condensed containers), and the synchronous
+  guard in `index.js`/`condense-anim.js` asks the same question.
+- Storyboard `host.snapshot()` carries `reversals: [...pinnedReversals]`; restore
+  re-seats them (G2 fidelity: pins are part of the state a step moves).
+- `run.js` runs `breakCycles` over its (container-remapped) edges: untagged back edges
+  are zero-iteration loops — excluded from join arity and from token re-fly.

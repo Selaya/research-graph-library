@@ -152,6 +152,100 @@ test("a run.play step's {run} completion is awaited before advancing", async () 
   assert.equal(calledApply, 2);
 });
 
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+/** A host whose ops land immediately but whose awaitables are resolved by hand, so a step
+ *  can be held "in flight" exactly the way a real transition or run is. */
+function slowHost() {
+  const applied = [];
+  const gates = [];
+  let state = [];
+  return {
+    applied,
+    ids: () => [...state],
+    release: (i) => gates[i](),
+    snapshot() { return [...state]; },
+    restore(snap) { state = [...snap]; return Promise.resolve(); },
+    apply(step) {
+      applied.push(step);
+      if (step.op === "addNode") state.push(step.args[0].id);
+      return new Promise((r) => gates.push(() => r({ canceled: false })));
+    },
+  };
+}
+
+test("play() after pause() mid-run rejoins the suspended step instead of starting a second loop", async () => {
+  const applied = [];
+  let resolveRun;
+  const run = {
+    promise: new Promise((r) => { resolveRun = r; }),
+    play() {}, pause() {},
+  };
+  const host = {
+    snapshot: () => ({}),
+    restore: () => Promise.resolve(),
+    apply(step) {
+      applied.push(step.op);
+      return step.op === "run.play" ? { run } : Promise.resolve();
+    },
+  };
+  const sb = createStoryboard(host, [
+    { op: "run.play" },
+    { op: "addNode", args: [{ id: "n1" }] },
+    { op: "addNode", args: [{ id: "n2" }] },
+  ]);
+  const events = [];
+  sb.on("step", (e) => events.push(e.index));
+
+  sb.play();
+  await flush();
+  assert.deepEqual(applied, ["run.play"], "the run step is live and the loop is suspended on it");
+
+  sb.pause();                 // ⏸ while the run is mid-flight
+  const resumed = sb.play();  // ▶ again — the old loop is still inside the run step
+  await flush();
+  assert.deepEqual(applied, ["run.play"], "resuming must not apply the suspended step a second time");
+
+  resolveRun({ canceled: false });
+  await resumed;
+  assert.deepEqual(applied, ["run.play", "addNode", "addNode"], "each remaining step ran exactly once");
+  assert.deepEqual(events, [0, 1, 2], "…and announced itself exactly once");
+  assert.equal(sb.position().index, 3);
+});
+
+test("seek() during play stops the loop and voids the step still in flight", async () => {
+  const host = slowHost();
+  const sb = createStoryboard(host, [
+    { label: "start" },
+    { op: "addNode", args: [{ id: "n1" }] },
+    { op: "addNode", args: [{ id: "n2" }] },
+    { op: "addNode", args: [{ id: "n3" }] },
+  ]);
+  const events = [];
+  sb.on("step", (e) => events.push(e.index));
+
+  sb.play();
+  await flush();
+  assert.deepEqual(host.ids(), ["n1"], "step 1 landed and is waiting on its animation");
+
+  const seeking = sb.seek("start"); // scrub back while that step is still in flight
+  host.release(0);                  // …and only now does the in-flight step's await resolve
+  await seeking;
+  await flush();
+
+  assert.deepEqual(host.ids(), [], "the restored snapshot stands — the in-flight step did not re-land");
+  assert.deepEqual(host.applied.length, 1, "the play loop stopped instead of marching past the seek target");
+  assert.deepEqual(sb.position(), { index: 0, total: 4, done: false, label: "start" });
+  assert.deepEqual(events, [0], "the label step announced itself; the voided one never did");
+
+  // The storyboard is left paused, and playing again replays forward from the seek target.
+  const replay = sb.play();
+  for (const gate of [1, 2, 3]) { await flush(); host.release(gate); }
+  await replay;
+  assert.deepEqual(host.ids(), ["n1", "n2", "n3"], "replaying forward re-lands every step, once");
+  assert.equal(sb.position().done, true);
+});
+
 test("events: on('step'|'seek'|'done') fire as the sequencer moves", async () => {
   const host = fakeHost();
   const sb = createStoryboard(host, [step("a"), step("b")]);

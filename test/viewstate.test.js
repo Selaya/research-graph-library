@@ -145,3 +145,22 @@ test("nodes added with collapsed:true after their children land still collapse",
   assert.deepEqual(ids(vs.view().nodes), ["A", "G"]);
   assert.deepEqual([...vs.collapsed], ["G"]);
 });
+
+test("attach(): a malformed containment cycle degrades instead of blowing the stack", () => {
+  // Store validation rejects a containment cycle at every legitimate entry point, so the
+  // only way in is a store mutilated behind its own API. attach() is the one walk here
+  // that recurses through the child index; without a guard it recurses until the stack
+  // blows, which kills the whole instance rather than just drawing a poorer picture.
+  const store = new Store({
+    nodes: [{ id: "A" }, { id: "B", parent: "A" }, { id: "X" }],
+    edges: [{ id: "e1", source: "X", target: "B" }],
+  });
+  store.nodes.get("A").parent = "B"; // A <-> B, straight past validateSpec
+
+  const vs = createViewState(store);
+  let view;
+  assert.doesNotThrow(() => { view = vs.view(); }, "view() must not overflow the stack");
+  const e1 = view.edges.find((e) => e.id === "e1");
+  assert.ok(e1, "the edge is still drawn somewhere sane");
+  assert.ok(["A", "B"].includes(e1.target), `e1 attached to ${e1.target}`);
+});

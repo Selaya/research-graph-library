@@ -402,3 +402,90 @@ test("applyPipelinePreset: destroy() stops updating chips on further commits", (
   g.emit("commit", { nodes: rectsFrom(spec) });
   assert.equal(chip.textContent, "1m"); // unchanged — listener was removed
 });
+
+test("applyPipelinePreset: destroy() removes per-node chip/status/mode adornments and cancels an in-flight condense timer", () => {
+  const before = {
+    nodes: [
+      { id: "clean.dedupe", data: { duration: "30m" } },
+      { id: "clean.validate", data: { duration: "1h" } },
+      { id: "clean.normalize", data: { duration: "30m" } },
+    ],
+    edges: [],
+  };
+  const g = fakeInstance(before);
+  const handle = applyPipelinePreset(g);
+  g.emit("commit", { nodes: rectsFrom(before) });
+
+  const after = { nodes: [{ id: "clean.auto", data: { duration: "8s", mode: "automated" } }], edges: [] };
+  g.setSpec(after);
+  g.emit("commit", { nodes: rectsFrom(after) });
+  g.emit("condense", {
+    sources: ["clean.dedupe", "clean.validate", "clean.normalize"],
+    target: "clean.auto",
+    sourceData: before.nodes,
+    targetData: after.nodes[0],
+  });
+
+  const host = g.renderer.node("clean.auto");
+  const chip = host.children.find((c) => c.attrs.class === "smv-chip");
+  const status = host.children.find((c) => c.attrs.class === "smv-status-glyph");
+  const mode = host.children.find((c) => c.attrs.class === "smv-mode-badge");
+  const badge = host.children.find((c) => c.attrs.class === "smv-delta-badge");
+  assert.ok(chip && status && mode && badge, "sanity: all four adornments were injected");
+
+  g.ticker.tick(300); // mid odometer roll (default 600ms) — the condense is still in flight
+  assert.notEqual(chip.textContent, "8s", "sanity: the odometer has not landed yet");
+
+  handle.destroy();
+
+  // The injected elements are actually removed from the host, not just orphaned in place.
+  assert.equal(host.children.includes(chip), false, "chip removed from its host on destroy");
+  assert.equal(host.children.includes(status), false, "status glyph removed from its host on destroy");
+  assert.equal(host.children.includes(mode), false, "mode badge removed from its host on destroy");
+  assert.equal(host.children.includes(badge), false, "in-flight delta badge is canceled and removed, not left to pop later");
+
+  // The odometer's ticker callback was actually canceled (removed), not just orphaned:
+  // ticking the shared clock further must not write into the now-detached chip again.
+  const chipTextAtDestroy = chip.textContent;
+  g.ticker.tick(10000);
+  assert.equal(chip.textContent, chipTextAtDestroy, "no further writes into the orphaned chip after destroy()");
+});
+
+test("applyPipelinePreset: destroy() then re-applying the preset leaves exactly one chip per node (no stacking)", () => {
+  const spec = { nodes: [{ id: "a", data: { duration: "1m" } }], edges: [] };
+  const g = fakeInstance(spec);
+  const h1 = applyPipelinePreset(g);
+  g.emit("commit", { nodes: rectsFrom(spec) });
+  h1.destroy();
+
+  const h2 = applyPipelinePreset(g);
+  g.emit("commit", { nodes: rectsFrom(spec) });
+
+  const host = g.renderer.node("a");
+  const chips = host.children.filter((c) => c.attrs.class === "smv-chip");
+  const statuses = host.children.filter((c) => c.attrs.class === "smv-status-glyph");
+  assert.equal(chips.length, 1, "no duplicate chip left behind by the first, destroyed instance");
+  assert.equal(statuses.length, 1);
+  assert.equal(chips[0].textContent, "1m");
+
+  h2.destroy();
+});
+
+test("applyPipelinePreset: re-applying without destroying first reuses the existing total-duration bar instead of stacking a second one", () => {
+  const spec = { nodes: [{ id: "a", data: { duration: "1m" } }], edges: [] };
+  const g = fakeInstance(spec);
+  const h1 = applyPipelinePreset(g);
+  g.emit("commit", { nodes: rectsFrom(spec) });
+  assert.equal(g.el.children.filter((c) => c.attrs.class === "smv-totalbar").length, 1);
+
+  const h2 = applyPipelinePreset(g); // no destroy() in between
+  g.emit("commit", { nodes: rectsFrom(spec) });
+  assert.equal(
+    g.el.children.filter((c) => c.attrs.class === "smv-totalbar").length,
+    1,
+    "ensureTotalBar must reuse the existing bar rather than appending a duplicate",
+  );
+
+  h2.destroy();
+  h1.destroy();
+});

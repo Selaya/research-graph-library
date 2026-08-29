@@ -7,6 +7,8 @@
 //
 // The engine never mutates the graph: it decorates it from stateAt(t).
 
+import { breakCycles } from "./cycles.js";
+
 /** Loop iterations after the first are compressed in-place ticks, not re-flights (D4). */
 const LOOP_TICK_MS = 250;
 const DEFAULT_HOP_MS = 300;
@@ -54,16 +56,7 @@ function holds(seg, t) {
 export function compileRun(spec = {}, opts = {}) {
   const nodes = new Map();
   for (const n of spec.nodes || []) if (n && n.id != null) nodes.set(n.id, n);
-  const edges = (spec.edges || []).filter((e) => e && nodes.has(e.source) && nodes.has(e.target));
-
-  const outNormal = new Map();
-  const outLoop = new Map();
-  const inNonLoop = new Map();
-  for (const id of nodes.keys()) { outNormal.set(id, []); outLoop.set(id, []); inNonLoop.set(id, []); }
-  for (const e of edges) {
-    (e.loop ? outLoop : outNormal).get(e.source).push(e);
-    if (!e.loop) inNonLoop.get(e.target).push(e);
-  }
+  const rawEdges = (spec.edges || []).filter((e) => e && nodes.has(e.source) && nodes.has(e.target));
 
   // D5 — a container is not an executable step: its activation IS its children's. It never
   // seeds a source token (otherwise every compound node fabricates a phantom one), and its
@@ -74,6 +67,78 @@ export function compileRun(spec = {}, opts = {}) {
     if (n.parent == null || !nodes.has(n.parent)) continue;
     if (!childrenOf.has(n.parent)) childrenOf.set(n.parent, []);
     childrenOf.get(n.parent).push(n.id);
+  }
+
+  // ---- container attachment ----
+  // An edge incident to a container means, here, exactly what it means for layout: it
+  // gates (target) or is fed by (source) that container's interior entry/exit child.
+  // viewstate.js does this remap for the picture; without the same remap the engine would
+  // read the raw spec, never token a container, and silently strand everything downstream
+  // of it. This is a deliberate local copy of viewstate.js's `attach()` semantics —
+  // run.js is the pure engine and imports nothing from the view layer (D4), and the two
+  // must be kept in step by hand. Only the collapse notion is dropped: run.js has no
+  // collapsed set, and a container is never executable, so it always resolves to a leaf.
+  const attachCache = new Map();
+  /** The direct child of `cid` that `x` lives under, or undefined if x is outside. */
+  const branchOf = (x, cid) => {
+    const seenUp = new Set();
+    let c = x;
+    while (c !== undefined && nodes.has(c) && !seenUp.has(c)) {
+      const p = nodes.get(c).parent;
+      if (p === cid) return c;
+      seenUp.add(c);
+      c = p;
+    }
+    return undefined;
+  };
+  function attach(id, kind) {
+    const key = `${id} ${kind}`;
+    if (attachCache.has(key)) return attachCache.get(key);
+    attachCache.set(key, id); // also stops a malformed containment cycle recursing forever
+    const list = childrenOf.get(id) || [];
+    let out = id;
+    if (list.length) {
+      // entry = a branch nothing inside points at; exit = a branch that points at nothing inside.
+      const blocked = new Set();
+      for (const e of rawEdges) {
+        const bs = branchOf(e.source, id), bt = branchOf(e.target, id);
+        if (bs === undefined || bt === undefined || bs === bt) continue;
+        blocked.add(kind === "entry" ? bt : bs);
+      }
+      const pick = list.find((c) => !blocked.has(c));
+      out = attach(pick !== undefined ? pick : (kind === "entry" ? list[0] : list[list.length - 1]), kind);
+    }
+    attachCache.set(key, out);
+    return out;
+  }
+  const edges = rawEdges.map((e) => {
+    const source = attach(e.source, "exit");
+    const target = attach(e.target, "entry");
+    return source === e.source && target === e.target ? e : { ...e, source, target };
+  });
+
+  // ---- untagged cycles ----
+  // The store accepts a cycle that carries no `loop: true` (cycles.js renders one as a
+  // loop-back arc), so the engine must not read its back edge as an ordinary in-edge:
+  // that would inflate the target's implicit AND-join arity into a permanent deadlock and
+  // suppress the seeding of every node on the cycle. Break the cycle the same way the
+  // layout does and treat the back edge as a zero-iteration loop — out of `inNonLoop`, and
+  // out of the token flow. Explicit `loop: true` edges keep their own (iterating) path.
+  const back = new Set();
+  for (const id of breakCycles([...nodes.values()], edges)) {
+    const e = edges.find((x) => x.id === id);
+    if (e && !e.loop) back.add(id);
+  }
+  for (const e of edges) if (!e.loop && e.source === e.target) back.add(e.id); // cycles.js ignores self-loops
+
+  const outNormal = new Map();
+  const outLoop = new Map();
+  const inNonLoop = new Map();
+  for (const id of nodes.keys()) { outNormal.set(id, []); outLoop.set(id, []); inNonLoop.set(id, []); }
+  for (const e of edges) {
+    if (back.has(e.id)) continue;
+    (e.loop ? outLoop : outNormal).get(e.source).push(e);
+    if (!e.loop) inNonLoop.get(e.target).push(e);
   }
 
   // ---- pacing ----

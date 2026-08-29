@@ -113,6 +113,7 @@ function findAll(node, pred, out = []) {
 const byClass = (node, cls) => findAll(node, (n) => (n.attrs.class || "").split(/\s+/).includes(cls));
 
 const { mount } = await import("../src/index.js");
+const { timeline: tl } = await import("../src/storyboard.js");
 
 // ---------------------------------------------------------------------------
 // The §6 pipeline: a collapsed container of 3 substeps, a 3-way fan-out into an
@@ -487,6 +488,246 @@ test("opts.preset:'pipeline' is wired in, and presetPipeline is on the default e
   assert.equal(byClass(root, "smv-totalbar").length, 1, "the total-duration bar exists");
   g.destroy();
   assert.equal(byClass(root, "smv-totalbar").length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Lifecycle regressions: batch failure, restore fidelity, timeline arithmetic.
+// ---------------------------------------------------------------------------
+
+function mountBare(spec, opts = {}) {
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, spec, { layout: { dir: "LR" }, animation: { duration: 40 }, ...opts });
+  return { root, g };
+}
+
+test("an op that throws mid-batch still drains: what landed renders, the awaitable settles", async () => {
+  const { g } = mountBare({ nodes: [{ id: "a" }] });
+
+  let inner = null;
+  assert.throws(() => {
+    g.batch(() => {
+      inner = g.addNode({ id: "x" });  // lands
+      g.addNode({ id: "x" });          // throws dup-id, aborting the batch
+    });
+  }, (err) => err.code === "dup-id");
+
+  let settledInner = null;
+  Promise.resolve(inner).then((v) => { settledInner = v; });
+  await pumpUntil(() => settledInner !== null, 60);
+  assert.ok(settledInner, "the awaitable handed out by the op that succeeded settled");
+  assert.deepEqual(Object.keys(g.layoutResult().nodes).sort(), ["a", "x"], "the store and the layout agree");
+
+  // …and nothing from the aborted batch leaks into the next, unrelated one.
+  await settle(g.batch(() => { g.addNode({ id: "y" }); }));
+  assert.deepEqual(Object.keys(g.layoutResult().nodes).sort(), ["a", "x", "y"]);
+  g.destroy();
+});
+
+test("a backward seek restores the FAS pins the snapshot was taken with (D3/G2)", async () => {
+  // A plain cycle. Which edge is cut depends on the node order the DFS walks, so the
+  // rebuild below legitimately lands on a different back edge than the original layout.
+  const spec = {
+    nodes: [{ id: "a" }, { id: "b" }, { id: "c" }],
+    edges: [
+      { id: "e1", source: "a", target: "b" },
+      { id: "e2", source: "b", target: "c" },
+      { id: "e3", source: "c", target: "a" },
+    ],
+  };
+  const steps = [
+    { label: "cycle" },
+    { op: "removeNode", args: ["a"] },
+    { op: "addNode", args: [{ id: "a" }] },
+    { op: "addEdge", args: [{ id: "e1", source: "a", target: "b" }] },
+    { op: "addEdge", args: [{ id: "e3", source: "c", target: "a" }] },
+  ];
+  const { g } = mountBare(spec, { storyboard: steps });
+  const revs = () => [...g.layoutResult().reversedEdgeIds];
+
+  assert.deepEqual(revs(), ["e3"], "the first layout cuts e3");
+  await settle(g.storyboard().play(), 3000);
+  assert.deepEqual(revs(), ["e1"], "the rebuilt graph cuts e1 instead");
+
+  await settle(g.storyboard().seek("cycle"));
+  await pump(10);
+  assert.deepEqual(revs(), ["e3"], "the restored picture draws the back edge it had, not the later one");
+
+  // Same shape with no cycle left at all: nothing may stay pinned reversed.
+  const chain = {
+    nodes: [{ id: "c" }, { id: "a" }, { id: "b" }],
+    edges: [{ id: "e1", source: "a", target: "b" }, { id: "e2", source: "b", target: "c" }],
+  };
+  const two = mountBare(chain, {
+    storyboard: [{ label: "chain" }, { op: "addEdge", args: [{ id: "e3", source: "c", target: "a" }] }],
+  });
+  await settle(two.g.storyboard().play(), 3000);
+  assert.ok([...two.g.layoutResult().reversedEdgeIds].length > 0, "closing the cycle reverses something");
+  await settle(two.g.storyboard().seek("chain"));
+  await pump(10);
+  assert.deepEqual([...two.g.layoutResult().reversedEdgeIds], [], "the restored chain has no back edge");
+
+  g.destroy();
+  two.g.destroy();
+});
+
+test("a backward seek keeps ONE run transport: g.run() identity and its listeners survive", async () => {
+  const steps = [
+    { label: "start" },
+    { op: "run.play", until: "clean.dedupe" },
+    { label: "after" },
+    { op: "wait", ms: 20 },
+  ];
+  const { g } = mountPipeline({ storyboard: steps });
+  const run = g.run({});
+  const seen = [];
+  run.on("seek", (e) => seen.push(e));
+
+  await settle(g.storyboard().play(), 6000);
+  await settle(g.storyboard().seek("after"));
+  await pump(10);
+
+  assert.equal(g.run(), run, "the restore re-seats the transport in place");
+  assert.ok(seen.length > 0, "a listener registered before the seek is still alive after it");
+  assert.equal(seen.at(-1).time, run.time(), "…and it saw the restore land on the snapshot's run position");
+  g.destroy();
+});
+
+test("successive run.play steps partition the run instead of double-counting it", async () => {
+  const chain = {
+    nodes: [
+      { id: "a", data: { duration: "1s" } },
+      { id: "b", data: { duration: "1s" } },
+      { id: "c", data: { duration: "1s" } },
+    ],
+    edges: [{ id: "ab", source: "a", target: "b" }, { id: "bc", source: "b", target: "c" }],
+  };
+  const steps = [
+    { op: "run.play", until: "a" },
+    { op: "run.play", until: "b" },
+    { op: "run.play" },
+  ];
+  const { root, g } = mountBare(chain, { controls: true, storyboard: steps });
+  const run = g.run({});
+
+  assert.equal(g.timeline().total, run.duration, "three run steps are worth exactly one run");
+
+  // The reported position climbs monotonically across step boundaries (no jump when the
+  // story moves from one run.play to the next).
+  let prev = -1;
+  const monotonic = () => {
+    const t = g.timeline().time;
+    assert.ok(t >= prev - 1e-9 && t <= g.timeline().total + 1e-9, `timeline time ${t} left the story`);
+    prev = t;
+  };
+  const play = g.storyboard().play();
+  let done = false;
+  Promise.resolve(play).then(() => { done = true; });
+  await pumpUntil(() => { monotonic(); return done; }, 4000);
+
+  // Scrubbing to the middle of the story lands the engine in the middle of the run.
+  const scrub = byClass(root, "smv-transport-scrub")[0];
+  const half = g.timeline().total / 2;
+  fire(scrub, "pointerdown", {});
+  scrub.value = "500";
+  fire(scrub, "input", {});
+  await pump(20);
+  fire(scrub, "change", {});
+
+  assert.ok(Math.abs(run.time() - half) < 1, `the run clock follows the scrub (got ${run.time()}, want ${half})`);
+  assert.ok(Math.abs(g.timeline().time - half) < 1, "…and the readout agrees with it");
+  g.destroy();
+});
+
+test("grabbing the scrubber takes a live story out of play instead of racing it", async () => {
+  const steps = [
+    { label: "start" },
+    { op: "run.play", until: "clean.dedupe" },
+    { label: "expand" },
+    { op: "expand", args: ["clean"] },
+  ];
+  const { root, g } = mountPipeline({ controls: true, storyboard: steps });
+  const bar = byClass(root, "smv-transport")[0];
+  const scrub = byClass(bar, "smv-transport-scrub")[0];
+  const playBtn = bar.children.find((c) => c.attrs["data-act"] === "play");
+
+  fire(playBtn, "click", { currentTarget: playBtn });
+  await pumpUntil(() => g.run().playing, 400);
+  assert.equal(g.timeline().playing, true, "the story is live, mid-run");
+
+  fire(scrub, "pointerdown", {});
+  assert.equal(g.timeline().playing, false, "the story stops the moment the thumb is grabbed");
+
+  scrub.value = "0";
+  fire(scrub, "input", {});
+  await pump(30);
+  fire(scrub, "change", {});
+  assert.equal(g.storyboard().position().index, 0, "the scrub target holds");
+  await pump(40);
+  assert.equal(g.storyboard().position().index, 0, "…and no leftover loop marches past it");
+  assert.equal(g.timeline().playing, false);
+  g.destroy();
+});
+
+test("g.destroy() during a storyboard wait settles the awaitable instead of stranding it", async () => {
+  const { g } = mountBare({ nodes: [{ id: "a" }] }, { storyboard: [{ op: "wait", ms: 5000 }] });
+  let settledPlay = false;
+  Promise.resolve(g.storyboard().play()).then(() => { settledPlay = true; });
+  await pump(2);
+  assert.equal(settledPlay, false, "still waiting on the clock");
+  g.destroy();
+  await pump(3);
+  assert.equal(settledPlay, true, "tearing the clock down settles everything suspended on it");
+});
+
+test("condense's synchronous guard judges convexity on the containment closure, like the store does", async () => {
+  // `C` owns no edges of its own, so the LITERAL set {C} looks convex; the closure
+  // {C, c1, c2} is not (c1 -> X -> c2 leaves and re-enters). If the guard asks the easier
+  // question, g.condense() returns happily and store.condense() throws 150ms later, inside
+  // condense-anim's async phase 2 — an unhandled rejection on a fire-and-forget call.
+  const { g } = mountBare({
+    nodes: [{ id: "C" }, { id: "c1", parent: "C" }, { id: "c2", parent: "C" }, { id: "X" }],
+    edges: [{ id: "a", source: "c1", target: "X" }, { id: "b", source: "X", target: "c2" }],
+  });
+  await pump(2);
+
+  const rejections = [];
+  const onRejection = (e) => rejections.push(e);
+  process.on("unhandledRejection", onRejection);
+  assert.throws(() => g.condense(["C"], { id: "M" }), (err) => err.code === "non-convex");
+  await pump(80); // well past highlight + converge + reveal
+  await new Promise((r) => setTimeout(r, 20));
+  process.off("unhandledRejection", onRejection);
+
+  assert.deepEqual(rejections, [], "no rejection escapes the choreography");
+  assert.deepEqual(g.spec().nodes.map((n) => n.id).sort(), ["C", "X", "c1", "c2"], "the graph is untouched");
+  g.destroy();
+});
+
+test("a `run.play` step written by the timeline() builder is measured like a hand-written one", async () => {
+  // applyStep honours `{op:'run.play', args:[{until}]}` (what timeline().run({until}) emits);
+  // if stepSlices only reads step.until it measures the step as the WHOLE run, and the
+  // scrubber is mis-scaled and seeks the engine to the wrong absolute time.
+  const spec = {
+    nodes: [{ id: "a", data: { duration: "1s" } }, { id: "b", data: { duration: "1s" } }, { id: "c", data: { duration: "1s" } }],
+    edges: [{ id: "e1", source: "a", target: "b" }, { id: "e2", source: "b", target: "c" }],
+  };
+  const built = tl().run({ until: "a" }).label("mid").run({ until: "b" }).build();
+  const byBuilder = mountBare(spec, { storyboard: built });
+  byBuilder.g.run({});
+  const byHand = mountBare(spec, {
+    storyboard: [{ op: "run.play", until: "a" }, { label: "mid" }, { op: "run.play", until: "b" }],
+  });
+  byHand.g.run({});
+  await pump(2);
+
+  assert.equal(
+    byBuilder.g.timeline().total, byHand.g.timeline().total,
+    "both spellings of the same story are worth the same on the transport timeline",
+  );
+  assert.ok(byHand.g.timeline().total < byHand.g.run().duration, "and neither is the whole run");
+  byBuilder.g.destroy();
+  byHand.g.destroy();
 });
 
 test("one deduped stylesheet however many instances mount (G8)", () => {

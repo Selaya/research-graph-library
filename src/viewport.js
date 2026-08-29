@@ -105,8 +105,11 @@ export function createViewport(svgEl, viewportG, ticker) {
    *  now that the same thing lives at `after` in world space (D10). */
   function anchor(before, after, duration = 0) {
     if (!before || !after) return;
-    const dx = (before.x - after.x) * state.k;
-    const dy = (before.y - after.y) * state.k;
+    // Scale by the frame this correction is actually written into (setTo() below bases the
+    // new position on `target`, not on wherever `state` sits mid-tween) — using `state.k`
+    // here would mix the current, possibly mid-tween, scale with the destination frame.
+    const dx = (before.x - after.x) * target.k;
+    const dy = (before.y - after.y) * target.k;
     if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
     if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
     setTo(target.x + dx, target.y + dy, target.k, duration);

@@ -52,6 +52,7 @@ function readCurrentTime(anim) {
 export function createTicker(opts = {}) {
   const manual = !!opts.manual;
   const callbacks = new Set();
+  const destroyCbs = new Set(); // teardown waiters: everything suspended on the clock
   let frameId = null;
   let manualTime = 0;
   let clock = null;
@@ -92,11 +93,23 @@ export function createTicker(opts = {}) {
         frameId = null;
       }
     },
+    /** Teardown notification: a callback that only ever settles from inside a tick would
+     *  otherwise be stranded forever by destroy() (its promise never resolving). Returns an
+     *  off() so a normally-completing waiter can unsubscribe. */
+    onDestroy(fn) {
+      if (destroyed) { fn(); return () => {}; }
+      destroyCbs.add(fn);
+      return () => destroyCbs.delete(fn);
+    },
     destroy() {
+      if (destroyed) return;
       destroyed = true;
+      const waiters = [...destroyCbs];
+      destroyCbs.clear();
       callbacks.clear();
       if (frameId != null) { cancelFrame(frameId); frameId = null; }
       if (clock) { try { clock.cancel(); } catch {} clock = null; }
+      for (const fn of waiters) { try { fn(); } catch {} }
     },
     /** Manual-mode only: advance the clock and fire callbacks once (for tests). */
     tick(ms) {
