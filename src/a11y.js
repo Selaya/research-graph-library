@@ -88,9 +88,14 @@ export function attachA11y(g, { root, svg } = {}) {
   const nodeEls = () => Array.from(svg.querySelectorAll(".smv-node"));
   const findEl = (id) => nodeEls().find((el) => el.getAttribute("data-id") === id) || null;
 
-  function ariaLabelFor(id) {
+  /** `status` prefers the LIVE run state over the design-time `data.status`. run-render.js
+   *  writes it to `data-run` on the element per status transition and deliberately never
+   *  back into the spec, so reading the spec alone left a screen-reader user with no signal
+   *  at all while a run drove the graph (sighted users get fills, pulses and badges). */
+  function ariaLabelFor(id, el) {
     const n = node(id);
-    const status = n && n.data && n.data.status;
+    const run = el && typeof el.getAttribute === "function" ? el.getAttribute("data-run") : null;
+    const status = run || (n && n.data && n.data.status);
     const label = (n && n.label) || id;
     return status ? `${label} · ${status}` : String(label);
   }
@@ -102,6 +107,30 @@ export function attachA11y(g, { root, svg } = {}) {
     return !!(vs && vs.collapsed && vs.collapsed.has(id));
   }
 
+  /** The `<g class="smv-node">` an event landed on (or inside). */
+  function nodeElFor(target) {
+    let el = target, guard = 0;
+    while (el && guard++ < 16) {
+      if (typeof el.getAttribute === "function"
+        && (el.getAttribute("class") || "").split(/\s+/).includes("smv-node")) return el;
+      el = el.parentNode;
+    }
+    return null;
+  }
+
+  /** Which of our elements really holds DOM focus right now (null if focus is elsewhere). */
+  function focusedEl() {
+    const active = doc && doc.activeElement;
+    if (!active || typeof active.getAttribute !== "function") return null;
+    return nodeEls().includes(active) ? active : null;
+  }
+
+  function setRoving() {
+    for (const el of nodeEls()) {
+      el.setAttribute("tabindex", el.getAttribute("data-id") === currentId ? "0" : "-1");
+    }
+  }
+
   /** Re-applies every ARIA attribute + the roving tabindex. Called on attach and on every
    *  `commit` (the DOM elements it targets may all be freshly re-created since). */
   function applyAttrs() {
@@ -109,6 +138,13 @@ export function attachA11y(g, { root, svg } = {}) {
     if (groupG && typeof groupG.setAttribute === "function") groupG.setAttribute("role", "tree");
 
     const ids = readingOrder(layoutOf());
+    const active = focusedEl();
+    const activeId = active ? active.getAttribute("data-id") : null;
+    if (activeId != null) currentId = activeId; // real focus always wins over our bookkeeping
+    // The focused node is leaving the visible set (its container just collapsed, a condense
+    // merged it away). Its element is still in the DOM mid-exit-animation; once it detaches
+    // the browser drops focus to <body>, so re-home it onto the new roving stop now.
+    const orphaned = activeId != null && !ids.includes(activeId);
     if (ids.length && (currentId == null || !ids.includes(currentId))) currentId = ids[0];
 
     for (const el of nodeEls()) {
@@ -116,19 +152,44 @@ export function attachA11y(g, { root, svg } = {}) {
       if (id == null) continue;
       el.setAttribute("role", "treeitem");
       el.setAttribute("aria-level", String(depthOf(id, node) + 1));
-      el.setAttribute("aria-label", ariaLabelFor(id));
+      el.setAttribute("aria-label", ariaLabelFor(id, el));
       if (isContainer(id)) el.setAttribute("aria-expanded", isCollapsed(id) ? "false" : "true");
       else if (typeof el.removeAttribute === "function") el.removeAttribute("aria-expanded");
       el.setAttribute("tabindex", id === currentId ? "0" : "-1");
     }
+
+    if (orphaned && currentId != null && currentId !== activeId) {
+      const el = findEl(currentId);
+      if (el && el !== active && typeof el.focus === "function") el.focus();
+    }
+  }
+
+  /** run-render writes `data-run` outside the commit cycle, so the accessible name has to
+   *  refresh on that channel too. Already throttled at the source: it only fires when a
+   *  node's status actually changes, never once per animation frame. */
+  function onRunStatus(ev) {
+    const id = ev && ev.id;
+    if (id == null) return;
+    const el = findEl(id);
+    if (el) el.setAttribute("aria-label", ariaLabelFor(id, el));
+  }
+
+  /** Focus can arrive by routes this module does not drive — a click on the `<g>`, an
+   *  external `.focus()`, a screen reader's virtual cursor. The roving-tabindex pattern
+   *  requires `currentId` to track REAL focus, or Enter/Space and the arrows act on a stale
+   *  node while the user's focus ring sits somewhere else entirely. */
+  function onFocusIn(ev) {
+    const el = nodeElFor(ev && ev.target);
+    const id = el && el.getAttribute("data-id");
+    if (id == null || id === currentId) return;
+    currentId = id;
+    setRoving();
   }
 
   function focusId(id) {
     if (id == null) return;
     currentId = id;
-    for (const el of nodeEls()) {
-      el.setAttribute("tabindex", el.getAttribute("data-id") === id ? "0" : "-1");
-    }
+    setRoving();
     const el = findEl(id);
     if (el && typeof el.focus === "function") el.focus();
   }
@@ -159,14 +220,22 @@ export function attachA11y(g, { root, svg } = {}) {
     }
   }
 
-  if (typeof svg.addEventListener === "function") svg.addEventListener("keydown", onKeydown);
+  if (typeof svg.addEventListener === "function") {
+    svg.addEventListener("keydown", onKeydown);
+    svg.addEventListener("focusin", onFocusIn);
+  }
   applyAttrs();
   const offCommit = typeof g.on === "function" ? g.on("commit", applyAttrs) : null;
+  const offRun = typeof g.on === "function" ? g.on("runstatus", onRunStatus) : null;
 
   return {
     destroy() {
-      if (typeof svg.removeEventListener === "function") svg.removeEventListener("keydown", onKeydown);
+      if (typeof svg.removeEventListener === "function") {
+        svg.removeEventListener("keydown", onKeydown);
+        svg.removeEventListener("focusin", onFocusIn);
+      }
       if (offCommit) offCommit();
+      if (offRun) offRun();
       const groupG = svg.querySelector && svg.querySelector(".smv-nodes");
       if (groupG && typeof groupG.removeAttribute === "function") groupG.removeAttribute("role");
       svg.removeAttribute("role");

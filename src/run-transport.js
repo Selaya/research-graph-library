@@ -20,6 +20,27 @@ function deferred() {
   return { promise, resolve };
 }
 
+/** Latest timestamp an event log reaches (0 for an empty one). */
+function logFloor(log) {
+  let max = 0;
+  for (const e of log || []) { const et = +e.t; if (Number.isFinite(et) && et > max) max = et; }
+  return max;
+}
+
+/** A private copy of a replayed state: the live transport memoizes its last replay, and
+ *  consumers (run-render's progress floors, callers generally) write into what they get. */
+const cloneEntries = (o) => { const out = {}; for (const k of Object.keys(o)) out[k] = { ...o[k] }; return out; };
+function cloneState(s) {
+  return {
+    tokens: s.tokens.map((tk) => ({ ...tk, at: { ...tk.at } })),
+    nodes: cloneEntries(s.nodes),
+    edges: cloneEntries(s.edges),
+    joins: cloneEntries(s.joins),
+    loops: cloneEntries(s.loops),
+    done: s.done,
+  };
+}
+
 /**
  * createRunTransport(internals, opts) -> run
  *   internals = { ticker, store, bus }   (bus = the instance event bus, optional)
@@ -278,16 +299,29 @@ function createSimTransport(internals, opts = {}) {
  */
 function createLiveTransport(internals, opts = {}) {
   const { ticker, store } = internals;
-  // internals.bus (the host's commit/mutation bus) needs no subscription here — see the
-  // note by `offs` below.
+  const hostBus = internals.bus || null;
   const bus = emitter();
 
   const hopMs = Number.isFinite(opts.hopMs) && opts.hopMs >= 0 ? opts.hopMs : undefined;
-  const liveOpts = () => (hopMs == null ? {} : { hopMs });
+  /** Edge id -> the live instant it entered the run. The log is HISTORY (D4: "time-travel
+   *  into history"), so a finish written before an edge existed must not be re-resolved
+   *  over it — without this, adding an edge retroactively fans a token out of a node that
+   *  completed seconds ago, visible both live and when scrubbing back. */
+  const edgeBornAt = new Map();
+  const liveOpts = () => {
+    const o = hopMs == null ? {} : { hopMs };
+    if (edgeBornAt.size) o.bornAt = edgeBornAt;
+    return o;
+  };
 
   let log = (opts.log || []).map((e) => ({ ...e }));
-  let frontier = 0;
-  let t = 0;
+  let logRev = 0;
+  /** The frontier is how far this run's history reaches: real elapsed ms since creation,
+   *  floored by any log it was seeded with (`opts.log`/`reset`) — otherwise seeded events
+   *  are unreachable, since `t` is clamped to the frontier and nothing past 0 could be
+   *  sampled. With no seed this is exactly the pinned "starts at 0". */
+  let frontier = logFloor(log);
+  let t = frontier;
   let following = true;
   let playing = false;
   let until = null;
@@ -306,11 +340,33 @@ function createLiveTransport(internals, opts = {}) {
     if (p) p.resolve({ canceled });
   }
 
+  // ---- memoized replay --------------------------------------------------------------
+  // state() is sampled on EVERY frame (the decoration layer draws off the "tick" this
+  // transport emits unconditionally) and replayLive is a from-scratch O(events)
+  // re-simulation. Nothing but the view time, the log and the spec can change the answer,
+  // so key the last result on exactly those three and an idle live graph costs a
+  // comparison per frame instead of a full replay.
+  const revOf = () => (typeof store.rev === "number" ? store.rev : NaN); // NaN => never cache
+  let cache = null;
+  function stateAt(tt) {
+    const rev = revOf();
+    if (cache && cache.t === tt && cache.rev === rev && cache.logRev === logRev) return cloneState(cache.state);
+    const st = replayLive(store.spec(), log, tt, liveOpts());
+    cache = { t: tt, rev, logRev, state: st };
+    return cloneState(st);
+  }
+  const touchLog = () => { logRev++; };
+
+  /** `until` is a node's status, not a timestamp — and in live mode `t` is glued to the
+   *  frontier by default, so consulting the frontier FIRST made every `play({until})` from
+   *  the (normal) following state resolve on the spot with the target still pending. Mode A
+   *  waits for the node; the shared surface has to mean the same thing in both modes. */
   function satisfied() {
-    if (t >= frontier) return true;
-    if (until == null) return false;
-    const n = replayLive(store.spec(), log, t, liveOpts()).nodes[until];
-    return !n || n.status === "done";
+    if (until != null) {
+      const n = stateAt(t).nodes[until];
+      return !n || n.status === "done"; // an unknown node can never fire — never hang on it
+    }
+    return t >= frontier;
   }
 
   /** The one always-on ticker callback (added at creation, removed at destroy): advances
@@ -399,6 +455,7 @@ function createLiveTransport(internals, opts = {}) {
     if (destroyed) return t;
     const at = stampAt(o);
     log.push({ t: at, type: "start", id });
+    touchLog();
     bus.emit("start", { id, t: at });
     return at;
   }
@@ -409,6 +466,7 @@ function createLiveTransport(internals, opts = {}) {
     const ev = { t: at, type: "finish", id };
     if (o && Number.isFinite(o.n)) ev.n = o.n;
     log.push(ev);
+    touchLog();
     bus.emit("finish", { id, t: at, n: ev.n });
     return at;
   }
@@ -417,6 +475,7 @@ function createLiveTransport(internals, opts = {}) {
     if (destroyed) return t;
     const at = stampAt(o);
     log.push({ t: at, type: "spawn", id, n });
+    touchLog();
     bus.emit("spawn", { id, t: at, n });
     return at;
   }
@@ -426,9 +485,10 @@ function createLiveTransport(internals, opts = {}) {
     return frontier;
   }
 
-  /** Re-seeds the log (opts.log) and restarts the frontier from 0 — a fresh live session
-   *  under the same transport identity/listeners. `time` is clamped against the NEW
-   *  (just-reset) frontier, so it only has effect once the caller advances the ticker. */
+  /** Re-seeds the log (opts.log) under the same transport identity/listeners. The frontier
+   *  restarts from the re-seeded log's own span, so a storyboard restore (`reset(options(),
+   *  time)`, G2) round-trips losslessly instead of deleting the run's history — `time` is
+   *  clamped against that NEW frontier. */
   function reset(o = {}, time = 0) {
     if (destroyed) return t;
     playing = false;
@@ -437,19 +497,58 @@ function createLiveTransport(internals, opts = {}) {
     pending = null;
     if (p) p.resolve({ canceled: true });
     log = (o.log || []).map((e) => ({ ...e }));
-    frontier = 0;
+    touchLog();
+    edgeBornAt.clear();
+    frontier = logFloor(log);
     lastNow = ticker.now();
-    following = true;
     t = Math.max(0, Math.min(frontier, Number.isFinite(+time) ? +time : 0));
+    following = t >= frontier;
     bus.emit("seek", { time: t, duration: frontier });
     return t;
   }
 
-  // No compiled artifact to invalidate in live mode (state() reads store.spec() fresh every
-  // call) — mutations just need the decoration layer to re-index on the next "commit", which
-  // internals.bus already delivers independent of the run transport, so there is nothing for
-  // this transport itself to subscribe to on hostBus.
+  // ---- token <-> morph rule (D4) in Mode B ---------------------------------------------
+  // Mode A answers a condense by recompiling; there is nothing to compile here, so the
+  // equivalent is to rewrite HISTORY. The log names only nodes, so mapping every entry on a
+  // removed source onto the surviving node is total: the survivor inherits its sources'
+  // active/done instants and re-fans them out over the redirected edges. Leaving the log
+  // alone instead means replayLive's `nodes.has(e.id)` filter silently drops all of it —
+  // tokens vanish with no ghost-fade and `done` flips true mid-run.
+  function remapLog(sources, target) {
+    if (destroyed || !Array.isArray(sources) || target == null) return;
+    const set = new Set(sources);
+    let touched = false;
+    for (const e of log) if (set.has(e.id)) { e.id = target; touched = true; }
+    if (!touched) return;
+    touchLog();
+    const after = stateAt(t).nodes[target];
+    bus.emit("remap", { sources, target, progress: after ? after.progress : 0, ghosts: [], time: t });
+  }
+
+  /** A split's history belongs on the ENTRY part (the one no sibling feeds), so it re-fans
+   *  forward through the new internal wiring exactly as the source would have. */
+  function entryOf(targets) {
+    if (!targets || !targets.length) return null;
+    const set = new Set(targets);
+    const fed = new Set();
+    for (const e of store.spec().edges || []) if (set.has(e.source) && set.has(e.target)) fed.add(e.target);
+    return targets.find((id) => !fed.has(id)) ?? targets[0];
+  }
+
+  // There is no compiled artifact to invalidate here, but the host bus still carries two
+  // things this transport alone can act on: id-remapping morphs, and when an edge was born.
   const offs = [];
+  if (hostBus) {
+    offs.push(hostBus.on("condense", (ev) => { if (ev) remapLog(ev.sources, ev.target); }));
+    offs.push(hostBus.on("split", (ev) => { if (ev) remapLog([ev.source], entryOf(ev.targets)); }));
+    // `bornAt` is a replay input like the log itself, so changing it invalidates the memo.
+    offs.push(hostBus.on("add", (ev) => {
+      if (ev && ev.kind === "edge" && ev.id != null) { edgeBornAt.set(ev.id, frontier); touchLog(); }
+    }));
+    offs.push(hostBus.on("remove", (ev) => {
+      if (ev && ev.kind === "edge" && ev.id != null && edgeBornAt.delete(ev.id)) touchLog();
+    }));
+  }
 
   return {
     play, pause, seek, speed, step, timeOf, reset,
@@ -462,9 +561,11 @@ function createLiveTransport(internals, opts = {}) {
     time: () => t,
     now: () => frontier,
     log: () => log.map((e) => ({ ...e })),
-    state: () => replayLive(store.spec(), log, t, liveOpts()),
-    sim: () => ({ duration: frontier, events: log.map((e) => ({ ...e })), stateAt: (tt) => replayLive(store.spec(), log, tt, liveOpts()) }),
-    options: () => ({ hopMs, mode: "live" }),
+    state: () => stateAt(t),
+    sim: () => ({ duration: frontier, events: log.map((e) => ({ ...e })), stateAt }),
+    /** Carries the LOG, not just the compile inputs: a storyboard snapshot/restore pair
+     *  (`reset(options(), time)`) would otherwise silently delete a live run's history. */
+    options: () => ({ hopMs, mode: "live", log: log.map((e) => ({ ...e })) }),
     on: (type, fn) => bus.on(type, fn),
     off: (type, fn) => bus.off(type, fn),
     destroy() {

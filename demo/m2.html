@@ -279,7 +279,9 @@
     var pastT = run.time();
     checks.livePastT = pastT;
 
-    await sleep(280); // > hopMs
+    // A fast hand-off is fine — a start() that beats the hop claims the token in flight —
+    // but this demo deliberately lets the pulse finish traveling so it is visible.
+    await sleep(280);
     run.start("build");
     await sleep(120);
     run.finish("build");

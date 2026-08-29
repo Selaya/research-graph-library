@@ -390,17 +390,27 @@ liveBoundaries(events) → number[]                // sorted distinct event time
 
 - `events`: append-only log, time-sorted (sort defensively on entry), entries:
   `{t, type: 'start'|'finish'|'spawn', id, n?}` — `t` in ms of live time.
-  `start(id)`: node becomes `active`; a token is created on it if none is present
-  (source/entry nodes). `finish(id)`: ALL tokens currently on `id` finish — node `done`,
+  `start(id)`: node becomes `active`; it takes the token already waiting on the node, else
+  the one still flying toward it (see below), else a fresh one is created (source/entry
+  nodes). `finish(id)`: ALL tokens currently on `id` finish — node `done`,
   each token fans out one child per non-loop out-edge, traveling its edge over
   `opts.hopMs` (default 300) of live time, then WAITING at the target (target stays
   `pending` until its own `start`). `{t, type:'finish', id, n:k}` finishes only `k`
   tokens (k < occupancy leaves the node `active`). `spawn(id, n)`: place `n` additional
   waiting tokens on node `id` (runtime fan-out; occupancy badge ×n).
+- **`hopMs` is a rendering travel time, never a gate on the feed.** A `start(target)`
+  stamped before the inbound hop lands CONSUMES that hop (its edge fill truncates to the
+  start instant, the wait collapses) instead of fabricating a second token and stranding
+  the real one — a real pipeline whose steps hand off in under 300ms is the normal case,
+  not an error. A landing that coincides exactly with a log event at the same `t` is
+  ordered BEFORE it: the landing is caused by an earlier `finish`, so it is causally prior.
+- `opts.bornAt` (Map edgeId → live ms, supplied by the transport): the log is history, so a
+  `finish` stamped before an edge existed never fans out over that edge.
 - Progress while `active`: `elapsed / declared-duration-estimate` clamped to 0.95 when
   `data.duration` parses (`parseDuration` from run.js); else 0 (status pulse carries it).
   Progress = 1 on finish.
-- Joins (`join:` policy): arrivals counted exactly as Mode A; but an explicit `start(id)`
+- Joins (`join:` policy): arrivals counted exactly as Mode A — including saturating at
+  `needed` (Mode A drops post-fire arrivals, so `arrived` never exceeds `needed`); but an explicit `start(id)`
   ALWAYS activates — the real log outranks the declared policy. `joins` map reported the
   same way. Loop edges (`loop: true`) never auto-fan-out; a repeated `start` of an
   already-done node re-activates it (that IS the live loop iteration) and increments
@@ -414,7 +424,8 @@ liveBoundaries(events) → number[]                // sorted distinct event time
 and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unchanged
 — every existing test must stay green. In live mode:
 
-- The transport keeps a **frontier** clock: starts at 0 when the run is created,
+- The transport keeps a **frontier** clock: starts at 0 when the run is created (or at the
+  span of a log it was seeded with, so seeded events are reachable at all), and
   advances with the shared ticker unconditionally (live time flows even while paused/
   scrubbed). `run.now() → frontier ms`.
 - `run.start(id, {at}?)`, `run.finish(id, {at}?|{at,n}?)`, `run.spawn(id, n, {at}?)`
@@ -425,11 +436,27 @@ and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unch
   advances `t` at 1× (× global speed) and clamps at the frontier — you can NEVER scrub or
   play past `now`; on catching up it re-attaches (`following` true again). `follow()`
   re-attaches immediately.
-- `duration` getter = frontier (grows). `state()` = `replayLive(store.spec(), log, t)`.
+- `duration` getter = frontier (grows). `state()` = `replayLive(store.spec(), log, t)`,
+  memoized on `(t, store.rev, log revision)` — it is sampled every frame off the
+  unconditional `tick`, and a full replay is O(events); the memo hands out a private copy,
+  so callers may write into what they get.
   `step()` walks `liveBoundaries`. `speed(f,{branch})` in live mode: global `f` scales
   only replay playback (frontier is real time); per-branch is a no-op (documented).
-  `run.log() → [...events]` (copy). `reset(opts, time)` re-seeds log from `opts.log`.
-- Graph mutations mark dirty exactly as Mode A (replay hits the new spec lazily).
+  `run.log() → [...events]` (copy). `reset(opts, time)` re-seeds log from `opts.log`, and
+  `options()` CARRIES that log — the pair is the storyboard snapshot/restore round trip
+  (G2), which must not delete a live run's history.
+- `play({until})` waits on the node's status in BOTH modes. In live mode the view clock is
+  glued to the frontier by default, so `until` is consulted before the frontier — otherwise
+  every `play({until})` from the normal following state resolves on the spot.
+- Graph mutations hit the new spec lazily, as in Mode A, with two live-only rules the log
+  forces (the log is history, not a re-simulation input):
+  - `condense`/`split` on the host bus REWRITE the log — every entry naming a removed
+    source is re-pointed at the survivor (a split's entry part) — so the merged/entry node
+    inherits its sources' instants and re-fans over the redirected edges. `remap` is
+    emitted afterwards, as in Mode A. Without this the `nodes.has(e.id)` filter in
+    replayLive silently drops that history and `done` flips true mid-run.
+  - an edge is stamped with the frontier when it is added, and a `finish` older than that
+    stamp never travels it (no retroactive fan-out out of a node that finished long ago).
 
 ## `src/store.js` — `split(id, parts)` (D6 inverse; split/query agent)
 
@@ -442,6 +469,11 @@ and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unch
   Every former incoming edge of `id` is redirected to EVERY entry node (first keeps its
   id, clones get `id + ':' + targetId`); outgoing likewise from every exit node. Weights:
   a redirected edge carrying `weight: N` keeps it. Self-loops on `id` are dropped.
+  Internal wiring that leaves NO entry (or no exit) — e.g. a cycle spanning every new node
+  — has nowhere to redirect to, so it is rejected up front with `GraphError`
+  `split-no-entry` / `split-no-exit` (only when there is actually something to redirect),
+  rather than deleting those edges and silently disconnecting their far ends. `g.split()`
+  asks the same question synchronously, like every other split guard.
 - The split node is removed. Returns `{ added: [nodeIds], addedEdges, removedEdges }`.
 - Snapshot/restore must round-trip it (it composes from existing primitives).
 
@@ -489,10 +521,24 @@ attachA11y(g, { root, svg }) → { destroy() }
 - Called by index.js on mount (always on; `opts.a11y: false` opts out).
 - Sets `role="application"` + `aria-roledescription="graph"` + `aria-label` on the svg;
   `role="tree"` on the nodes group; per node `<g>`: `role="treeitem"`, `aria-level`
-  (containment depth+1), `aria-label` = `label · status` (from spec/data), `aria-expanded`
+  (containment depth+1), `aria-label` = `label · status`, `aria-expanded`
   on containers (true/false from viewstate), `tabindex` roving (-1 everywhere, 0 on the
   current item). Re-applied after every `commit` event (renderer reuses elements keyed by
   `[data-id]` — query the DOM, do not touch render.js).
+- `status` in that name is the LIVE run status when a run is driving the node (the
+  `data-run` attribute run-render.js owns), else the design-time `data.status` from the
+  spec. Refreshed on the `runstatus` bus event, which fires per status transition (never
+  per frame) — a run is not a spec mutation, so no `commit` would otherwise announce it,
+  and a screen-reader user would get nothing at all while a run played.
+- The roving `currentId` tracks REAL DOM focus: a `focusin` listener on the svg re-seats it
+  whenever focus arrives by a route this module does not drive (a click on the `<g>`, an
+  external `.focus()`, a screen reader's virtual cursor), or Enter/Space and the arrows act
+  on a stale node. When a commit takes the focused node out of the visible set (its
+  container collapsed, a condense merged it away), focus is re-homed onto the new roving
+  stop — the browser would otherwise drop it on `<body>` once the element detaches.
+- Decoration carries no accessible text of its own: the `g.smv-tokens` layer (run-render.js),
+  edge labels and container chrome (stack/header/chevron/count badge) are all
+  `aria-hidden="true"`; the owning treeitem's `aria-label` is the authoritative name.
 - Keyboard (listener on the svg): ArrowRight/ArrowDown = next, ArrowLeft/ArrowUp = prev
   in **reading order** (layout rank order: sort visible nodes by x then y from
   `g.layoutResult()`), Home/End = first/last, Enter/Space = toggle expand/collapse on
@@ -507,6 +553,10 @@ attachA11y(g, { root, svg }) → { destroy() }
 after the svg inside the mount root; `visible: false` applies a visually-hidden clip
 class (its own injected style). Updates on `commit`/`update` events. Package export
 `sparkle-motion-vizualizer/a11y-table`.
+- The table and a11y.js's tree are two renderings of the same content, so exactly one is in
+  the accessibility tree at a time: while the interactive tree is attached (the default)
+  the table sets `aria-hidden="true"` and is a visual/structural fallback only; with
+  `mount(..., { a11y: false })` it is the accessible surface. Re-checked on every render.
 
 ## `src/export.js` — exportSVG/exportPNG (ESM-only entry, export agent)
 

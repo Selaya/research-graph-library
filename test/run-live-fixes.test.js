@@ -244,12 +244,12 @@ test("live transport: condensing two nodes keeps the merged node's progress and 
   ticker.tick(300);
   assert.equal(run.state().nodes.B.status, "active");
 
-  store.condense(["A", "B"], { id: "M" });
+  store.condense(["A", "B"], { id: "M", data: { duration: "10s" } });
   bus.emit("condense", { sources: ["A", "B"], target: "M" });
 
   const st = run.state();
   assert.equal(st.nodes.M.status, "active", "the merged node is still working, not reset to pending");
-  assert.ok(st.nodes.M.progress > 0, "and it kept the progress its sources had earned");
+  assert.ok(st.nodes.M.progress > 0, "and it kept the dwell its sources had earned");
   assert.equal(st.done, false);
   assert.equal(run.log().some((e) => e.id === "A" || e.id === "B"), false, "the log names the merged node now");
   run.destroy();

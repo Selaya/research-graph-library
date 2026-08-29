@@ -27,6 +27,25 @@ function wait(ticker, ms) {
   return { promise, cancel: () => finish(true) };
 }
 
+/** Phase 2 awaits a scene transition rather than a sleep, but it suspends on the same
+ *  clock and owes the same guarantee: a torn-down ticker settles it. Relying on
+ *  scene.destroy() running first is an accident of g.destroy()'s call order, not something
+ *  this module controls — `g.ticker` is public, so `g.ticker.destroy()` alone would
+ *  otherwise strand this promise with the store already split. */
+function awaitTransition(ticker, tr) {
+  let settle, done = false, offDestroy = null;
+  const promise = new Promise((r) => { settle = r; });
+  const finish = (canceled) => {
+    if (done) return;
+    done = true;
+    if (offDestroy) { offDestroy(); offDestroy = null; }
+    settle(canceled);
+  };
+  Promise.resolve(tr).then((r) => finish(!!(r && r.canceled)), () => finish(true));
+  if (typeof ticker.onDestroy === "function") offDestroy = ticker.onDestroy(() => finish(true));
+  return { promise, cancel: () => { if (tr && tr.cancel) tr.cancel(); finish(true); } };
+}
+
 /**
  * @param {object} g          public instance (used for node lookups in the event payload)
  * @param {object} internals  { ticker, store, bus, relayout, mark, reduced }
@@ -80,7 +99,7 @@ export function runSplit(g, internals, id, parts) {
     });
     // Mirrors C12: the core announces the split and stops; it never reads durations.
     bus.emit("split", { source: id, targets, sourceData });
-    inFlight = { promise: Promise.resolve(tr).then((r) => !!(r && r.canceled)), cancel: () => tr.cancel && tr.cancel() };
+    inFlight = awaitTransition(ticker, tr);
     const cut = await inFlight.promise;
     diverging = false;
     mark([id], null);

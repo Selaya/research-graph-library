@@ -130,7 +130,21 @@ export function attachA11yTable(g, { visible = false } = {}) {
     return (n && n.label) || id;
   };
 
+  /** This table and a11y.js's interactive tree are two renderings of the SAME content, and
+   *  nothing stops a page attaching both (the tree is on by default). Announcing both makes
+   *  assistive tech read every node twice in a row, so only one of them is ever in the
+   *  accessibility tree: with the tree attached this stays a visual/structural fallback;
+   *  with `mount(..., { a11y: false })` this IS the accessible surface. Re-checked per
+   *  render so attaching/destroying the tree later stays coherent. */
+  function syncAria() {
+    const svg = typeof root.querySelector === "function" ? root.querySelector("svg") : null;
+    const treeOn = !!(svg && typeof svg.getAttribute === "function" && svg.getAttribute("role") === "application");
+    if (treeOn) table.setAttribute("aria-hidden", "true");
+    else table.removeAttribute("aria-hidden");
+  }
+
   function render() {
+    syncAria();
     while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
     for (const row of computeRows(g)) {
       const tr = doc.createElement("tr");

@@ -112,6 +112,9 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     e.g.appendChild(e.chev);
     e.badge = make("text", "smv-node-badge");
     e.g.appendChild(e.badge);
+    // Chrome, not content: the treeitem's own aria-label is the authoritative name for all
+    // of it, so these must not surface as extra accessible nodes inside every container.
+    for (const part of [e.stack, e.header, e.chev, e.badge]) part.setAttribute("aria-hidden", "true");
   }
 
   function ensureEdge(id) {
@@ -135,6 +138,9 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
   function ensureEdgeLabel(e) {
     if (e.label) return e.label;
     e.label = make("text", "smv-edge-label");
+    // Decorative: edges are not tree items, so this text would otherwise linearize as a
+    // bare orphan string ("then") with no relationship to anything a reader can find.
+    e.label.setAttribute("aria-hidden", "true");
     e.g.appendChild(e.label);
     return e.label;
   }

@@ -259,6 +259,7 @@ export class Store {
       });
       newEdges.push(e);
     }
+    this.rev++;
     return { merged, removedNodes: [...removedNodes], newEdges };
   }
 
@@ -331,6 +332,19 @@ export class Store {
       if (tHit) incoming.push(e); else outgoing.push(e);
     }
 
+    // Internal wiring that leaves no entry (or no exit) — every new node has an internal
+    // in-edge, e.g. a cycle spanning all of them — has nowhere to redirect `id`'s former
+    // edges to. Deleting them anyway silently disconnects whatever was on the other end,
+    // so refuse BEFORE any mutation, same discipline as every other guard here.
+    if (incoming.length && !entryIds.length) {
+      throw new GraphError("split-no-entry",
+        `split of "${id}" has no entry node (every new node has an internal in-edge), but "${id}" has ${incoming.length} incoming edge(s) to redirect`);
+    }
+    if (outgoing.length && !exitIds.length) {
+      throw new GraphError("split-no-exit",
+        `split of "${id}" has no exit node (every new node has an internal out-edge), but "${id}" has ${outgoing.length} outgoing edge(s) to redirect`);
+    }
+
     // ---- build the redirected clones (fan-out on the entry/exit side) ----
     const toAdd = []; // { id, proto, source, target }
     for (const e of incoming) {
@@ -370,6 +384,7 @@ export class Store {
     for (const spec of toAdd) {
       addedEdges.push(this.addEdge({ ...spec.proto, id: spec.id, source: spec.source, target: spec.target }));
     }
+    this.rev++;
     return { added, addedEdges, removedEdges: removedEdgeIds };
   }
 }

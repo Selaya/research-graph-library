@@ -138,3 +138,44 @@ test("split: the normal phase-2 completion still resolves {canceled:false}", asy
   await advance(h.ticker, SPLIT_PHASES.reveal + 1);
   assert.deepEqual(await within(run.promise, 200), { canceled: false });
 });
+
+// The same guard must fire at the g.split() call site, synchronously — index.js's stated
+// discipline (a bad call throws where it was made, not out of runSplit's async phase 2).
+test("g.split(): the no-entry guard fires synchronously at the call site", async () => {
+  const { mount } = await import("../src/index.js");
+  const doc = {
+    head: { appendChild() {}, children: [] },
+    querySelector: () => null,
+    createElement: () => stub("style"),
+    createElementNS: (_ns, tag) => stub(tag),
+  };
+  function stub(tag) {
+    const el = {
+      tagName: tag, children: [], attrs: {}, textContent: "",
+      style: { setProperty() {}, removeProperty() {}, getPropertyValue: () => "" },
+      classList: { add() {}, remove() {}, contains: () => false },
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      getAttribute(k) { return this.attrs[k] ?? null; },
+      removeAttribute(k) { delete this.attrs[k]; },
+      appendChild(c) { this.children.push(c); return c; },
+      insertBefore(c) { this.children.push(c); return c; },
+      removeChild() {}, remove() {},
+      addEventListener() {}, removeEventListener() {},
+      querySelector: () => null, querySelectorAll: () => [],
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 400 }),
+      clientWidth: 800, clientHeight: 400,
+      getContext: () => ({ font: "", measureText: (s) => ({ width: String(s).length * 7 }) }),
+    };
+    el.ownerDocument = doc;
+    return el;
+  }
+  const root = stub("div");
+  const g = mount(root, {
+    nodes: [{ id: "A" }, { id: "M" }, { id: "B" }],
+    edges: [{ id: "e_in", source: "A", target: "M" }, { id: "e_out", source: "M", target: "B" }],
+  }, { a11y: false, animation: { duration: 0 } });
+
+  assert.throws(() => g.split("M", cyclicParts()), isCode("split-no-entry"));
+  assert.equal(g.node("M") !== undefined, true, "nothing was mutated by the rejected split");
+  g.destroy();
+});

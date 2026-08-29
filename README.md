@@ -137,12 +137,22 @@ only in v1.
 `role="application"` / `aria-roledescription="graph"`, the node layer is `role="tree"`,
 each node a `role="treeitem"` with `aria-level`, `aria-label` (`label · status`) and
 `aria-expanded` on containers. Arrow keys move focus in reading order, Home/End jump,
-Enter/Space toggle a container. For a fully linearized fallback:
+Enter/Space toggle a container, and focus arriving any other way (a click, an external
+`.focus()`) is picked up too. `status` in the name is the live run status while a run is
+driving the node, so a screen reader hears nodes start and finish. Decoration — token
+pulses, occupancy/loop badges, edge labels, container chrome — is `aria-hidden`.
+
+For a fully linearized fallback:
 
 ```js
 import { attachA11yTable } from "sparkle-motion-vizualizer/a11y-table";
 const t = attachA11yTable(g, { visible: false });   // visually-hidden by default
 ```
+
+The table and the interactive tree are two views of the same content, so only one is ever
+announced: with the tree on (the default) the table is `aria-hidden` and serves as a
+visual/structural fallback; mount with `{ a11y: false }` to make the table the accessible
+surface instead.
 
 **Exports.** ESM-only entries (not in the IIFE, D11):
 

@@ -559,6 +559,22 @@ export function mount(el, spec = {}, opts = {}) {
         if (n.id !== id && store.hasNode(n.id)) throw new GraphError("dup-id", `duplicate node id "${n.id}"`);
         ids.add(n.id);
       }
+      // Internal wiring with no entry (or no exit) has nowhere to redirect the split node's
+      // former edges to, and store.split() refuses rather than dropping them silently.
+      const internal = (parts && parts.edges) || [];
+      const fedIn = new Set(internal.map((e) => e && e.target));
+      const fedOut = new Set(internal.map((e) => e && e.source));
+      let inc = 0, outg = 0;
+      for (const e of store.edges.values()) {
+        if (e.source === id && e.target === id) continue; // self-loop: dropped either way
+        if (e.target === id) inc++; else if (e.source === id) outg++;
+      }
+      if (inc && list.every((n) => fedIn.has(n.id))) {
+        throw new GraphError("split-no-entry", `split of "${id}" has no entry node to redirect its ${inc} incoming edge(s) to`);
+      }
+      if (outg && list.every((n) => fedOut.has(n.id))) {
+        throw new GraphError("split-no-exit", `split of "${id}" has no exit node to redirect its ${outg} outgoing edge(s) from`);
+      }
       const run = runSplit(g, internals, id, parts);
       return thenable(run.promise, run.cancel);
     },

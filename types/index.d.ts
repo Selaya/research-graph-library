@@ -222,7 +222,8 @@ export interface SimRunOpts extends RunOptsBase {
 }
 export interface LiveRunOpts extends RunOptsBase {
   mode: "live";
-  /** Re-seed the live event log (re-seeding/tests). */
+  /** Re-seed the live event log (re-seeding/tests). The frontier starts at the seeded
+   *  log's own span, so the events handed in are immediately reachable. */
   log?: LiveEvent[];
 }
 export type RunOpts = SimRunOpts | LiveRunOpts;
@@ -345,6 +346,10 @@ export interface GraphEventMap {
   collapseAll: { ids: string[] };
   condense: { sources: string[]; target: string; sourceData: NodeSpec[]; targetData?: NodeSpec };
   split: { source: string; targets: string[]; sourceData: NodeSpec };
+  /** A node's RUN status changed (run-render.js). Emitted per transition, never per frame;
+   *  a run is not a spec mutation, so no `commit` announces it. a11y.js uses it to keep the
+   *  accessible name in step with the live/simulated run. */
+  runstatus: { id: string; status: "pending" | "active" | "done" };
 }
 
 // ---------------------------------------------------------------------------
