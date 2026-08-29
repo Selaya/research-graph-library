@@ -68,6 +68,10 @@ export class Store {
     const s = validateSpec(normalizeSpec(spec));
     this.nodes = new Map(s.nodes.map((n) => [n.id, n]));
     this.edges = new Map(s.edges.map((e) => [e.id, e]));
+    /** Bumped by every successful mutation. Lets a reader memoize derived work against
+     *  "has the graph changed since I last looked?" without diffing spec() (Mode B's
+     *  per-frame replay is the caller this exists for). */
+    this.rev = 0;
   }
 
   node(id) { return this.nodes.get(id); }
@@ -96,6 +100,7 @@ export class Store {
     const s = validateSpec(normalizeSpec(snap));
     this.nodes = new Map(s.nodes.map((n) => [n.id, n]));
     this.edges = new Map(s.edges.map((e) => [e.id, e]));
+    this.rev++;
   }
 
   // ---- mutations (validated against the *resulting* spec) ----
@@ -108,6 +113,7 @@ export class Store {
     }
     if (n.id == null || n.id === "") throw new GraphError("node-id", "every node needs a non-empty id");
     this.nodes.set(n.id, n);
+    this.rev++;
     return n;
   }
 
@@ -118,6 +124,7 @@ export class Store {
     if (!this.nodes.has(e.target)) throw new GraphError("dangling", `edge "${e.id}" target "${e.target}" does not exist`);
     if (e.loop && !(e.maxIterations > 0)) throw new GraphError("unbounded-loop", `loop edge "${e.id}" requires maxIterations > 0`);
     this.edges.set(e.id, e);
+    this.rev++;
     return e;
   }
 
@@ -135,12 +142,14 @@ export class Store {
       if (doomed.has(e.source) || doomed.has(e.target)) this.edges.delete(e.id);
     }
     for (const d of doomed) this.nodes.delete(d);
+    this.rev++;
     return doomed;
   }
 
   removeEdge(id) {
     if (!this.edges.has(id)) throw new GraphError("missing", `edge "${id}" does not exist`);
     this.edges.delete(id);
+    this.rev++;
   }
 
   update(id, patch) {
@@ -176,6 +185,7 @@ export class Store {
       if (k === "data") t.data = { ...t.data, ...v };
       else t[k] = v;
     }
+    this.rev++;
     return t;
   }
 
