@@ -1,8 +1,10 @@
-# Flowline — an embeddable, animated graph visualization library
+# sparkle-motion-vizualizer — an embeddable, animated graph visualization library
 
 **Design plan · 2026-08-29**
 
-*(Working name: `flowline` — verified free on npm, as are `graphmotion`, `pipegraph`, `stepgraph`, `graphstage`. `flowgraph` and `flowviz` are taken.)*
+*(Name: **`sparkle-motion-vizualizer`** — verified free on npm (2026-08-29), as is the
+alternate spelling `sparkle-motion-visualizer`. Browser global: `SparkleMotion`;
+short prefix for files/CSS: `smv`.)*
 
 ---
 
@@ -271,7 +273,7 @@ Choreography (Heer & Robertson staged-transition principle; total ≤ 900ms):
 ### D7 — One styling mechanism
 
 Style resolution runs at **commit time** (on mutation), never per frame, and writes only
-(a) `data-*` attributes and (b) CSS custom properties (`--fl-fill`, `--fl-stroke`, …).
+(a) `data-*` attributes and (b) CSS custom properties (`--smv-fill`, `--smv-stroke`, …).
 The default theme is a stylesheet consuming those properties → CSS-only theming, devtools
 inspectable; user style functions *set custom properties*, composing with CSS instead of
 fighting it (no precedence rules needed). Rejected: sigma-style per-frame reducers
@@ -311,7 +313,7 @@ pinch — never hijack plain page scroll (a documented GitHub-Actions-graph comp
 
 ### D11 — Distribution
 
-`dist/flowline.esm.js` (tree-shakeable) + `dist/flowline.iife.min.js` (global `Flowline`)
+`dist/smv.esm.js` (tree-shakeable) + `dist/smv.iife.min.js` (global `SparkleMotion`)
 on npm → jsdelivr/unpkg. No required external CSS/fonts/assets (styles injected). No
 plugin registry in v1 (an un-walk-backable API commitment; optional pieces are ESM-only
 entries; the IIFE is a monolith containing exactly what the pipeline demo needs).
@@ -368,9 +370,9 @@ sequential sum or the parallel max of its children (default `sum`) — so the fl
 
 ```html
 <div id="pipe" style="height:480px"></div>
-<script src="https://cdn.jsdelivr.net/npm/flowline@1/dist/flowline.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-vizualizer@1/dist/smv.iife.min.js"></script>
 <script>
-  const g = Flowline.mount("#pipe", spec, {
+  const g = SparkleMotion.mount("#pipe", spec, {
     theme: "auto",                       // "light" | "dark" | "auto" | token object
     layout: { dir: "LR" },
     animation: { duration: 350, easing: "cubic-out" },
@@ -424,7 +426,7 @@ live.seek(pastT);                            // time-travel replay; can't scrub 
 ### 5.5 Storyboard (what a shared HTML file replays)
 
 ```js
-Flowline.mount("#pipe", spec, {
+SparkleMotion.mount("#pipe", spec, {
   controls: true, autoplay: false,
   storyboard: [
     { op: "run.play",  until: "clean" },
@@ -443,12 +445,12 @@ Flowline.mount("#pipe", spec, {
 ### 5.6 Styling
 
 ```js
-g.style(n => ({ "--fl-fill": statusColor[n.data.status],
-                "--fl-w": 60 + Math.sqrt(n.data.durationSec || 0) }));
+g.style(n => ({ "--smv-fill": statusColor[n.data.status],
+                "--smv-w": 60 + Math.sqrt(n.data.durationSec || 0) }));
 ```
 ```css
-.fl-node[data-status="done"]   { --fl-fill: var(--ok); }
-.fl-edge[data-back-edge]       { stroke-dasharray: 4 3; opacity: .7; }
+.smv-node[data-status="done"]   { --smv-fill: var(--ok); }
+.smv-edge[data-back-edge]       { stroke-dasharray: 4 3; opacity: .7; }
 ```
 
 ---
@@ -615,4 +617,4 @@ pipeline UX/motion design, cyclic-graph layout, token/execution semantics. Key
 verifications performed directly in-session: npm tarball size measurements
 (`gzip -9` on shipped `dist` files), dagre 3.1.1 source reading (acyclic.ts,
 greedy-fas.ts, layout.ts, changelog), `dist/dagre.min.js` self-containment (graphlib
-inlined), npm name availability (`flowline` et al. free; `flowgraph`, `flowviz` taken).
+inlined), npm name availability (`sparkle-motion-vizualizer` free, 2026-08-29).
