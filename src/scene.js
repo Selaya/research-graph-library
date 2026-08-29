@@ -15,6 +15,8 @@ import { catmullRom, resample, lerpPoints } from "./path.js";
 export const EDGE_POINTS = 24;
 
 const ENTER_SCALE = 0.6;
+/** Exiting nodes that have an `exitTo` target shrink as they fly to it (collapse, condense). */
+const EXIT_SCALE = 0.6;
 
 function normalizePoints(points) {
   return resample(catmullRom(points || [], 8), EDGE_POINTS);
@@ -42,10 +44,11 @@ export function createScene(ticker) {
   }
 
   function apply(tr, p) {
-    const e = tr.easing(p);
+    const base = tr.easing(p);
     for (const op of tr.nodes) {
       const cur = visual.nodes.get(op.id);
       if (!cur) continue;
+      const e = op.ease ? op.ease(p) : base; // per-op easing (condense reveal overshoots alone)
       cur.x = lerp(op.from.x, op.to.x, e);
       cur.y = lerp(op.from.y, op.to.y, e);
       cur.w = lerp(op.from.w, op.to.w, e);
@@ -55,6 +58,7 @@ export function createScene(ticker) {
     for (const op of tr.edges) {
       const cur = visual.edges.get(op.id);
       if (!cur) continue;
+      const e = op.ease ? op.ease(p) : base;
       cur.points = p >= 1 ? op.to.points.map((q) => ({ x: q.x, y: q.y })) : lerpPoints(op.from.points, op.to.points, e);
       cur.opacity = lerp(op.from.opacity, op.to.opacity, p);
     }
@@ -96,8 +100,14 @@ export function createScene(ticker) {
     const duration = opts.duration ?? 350;
     const easing = opts.easing || EASE.cubicOut;
     const enterFrom = opts.enterFrom || {};
+    const exitTo = opts.exitTo || {};
+    const ease = opts.easeOverride || {};
     const hold = opts.holdOpacity;
     const held = (id) => !!(hold && hold.has(id));
+    const at = (map, id) => {
+      const p = map[id];
+      return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? p : null;
+    };
     const tNodes = target?.nodes || {};
     const tEdges = target?.edges || {};
 
@@ -107,27 +117,33 @@ export function createScene(ticker) {
       const cur = visual.nodes.get(id);
       const to = tNodes[id];
       nodeOps.push({
-        id, exit: false,
+        id, exit: false, ease: ease[id],
         from: { x: cur.x, y: cur.y, w: cur.w, h: cur.h, opacity: cur.opacity },
         to: { x: to.x, y: to.y, w: to.w, h: to.h, opacity: held(id) ? cur.opacity : 1 },
       });
     }
     for (const id of dn.enter) {
       const to = tNodes[id];
-      const at = enterFrom[id];
+      const start = at(enterFrom, id);
       const from = {
-        x: at && Number.isFinite(at.x) ? at.x : to.x,
-        y: at && Number.isFinite(at.y) ? at.y : to.y,
+        x: start ? start.x : to.x,
+        y: start ? start.y : to.y,
         w: to.w * ENTER_SCALE, h: to.h * ENTER_SCALE,
         opacity: held(id) ? 1 : 0,
       };
       visual.nodes.set(id, { ...from });
-      nodeOps.push({ id, exit: false, from, to: { x: to.x, y: to.y, w: to.w, h: to.h, opacity: 1 } });
+      nodeOps.push({ id, exit: false, ease: ease[id], from, to: { x: to.x, y: to.y, w: to.w, h: to.h, opacity: 1 } });
     }
     for (const id of dn.exit) {
       const cur = visual.nodes.get(id);
       const from = { x: cur.x, y: cur.y, w: cur.w, h: cur.h, opacity: cur.opacity };
-      nodeOps.push({ id, exit: true, from, to: { ...from, opacity: 0 } });
+      // exitTo (collapse children -> container centre, condense converge): fly + shrink
+      // while fading, instead of fading in place.
+      const away = at(exitTo, id);
+      const to = away
+        ? { x: away.x, y: away.y, w: from.w * EXIT_SCALE, h: from.h * EXIT_SCALE, opacity: 0 }
+        : { ...from, opacity: 0 };
+      nodeOps.push({ id, exit: true, ease: ease[id], from, to });
     }
 
     const edgeOps = [];
@@ -137,7 +153,7 @@ export function createScene(ticker) {
       const to = tEdges[id];
       cur.reversed = !!to.reversed; // styling flag lands at commit time (D7), not per frame
       edgeOps.push({
-        id, exit: false,
+        id, exit: false, ease: ease[id],
         from: { points: toPoints(cur.points), opacity: cur.opacity },
         to: { points: normalizePoints(to.points), opacity: held(id) ? cur.opacity : 1 },
       });
@@ -147,12 +163,12 @@ export function createScene(ticker) {
       const pts = normalizePoints(to.points);
       const opacity = held(id) ? 1 : 0;
       visual.edges.set(id, { points: pts.map((p) => ({ x: p.x, y: p.y })), opacity, reversed: !!to.reversed });
-      edgeOps.push({ id, exit: false, from: { points: pts, opacity }, to: { points: pts, opacity: 1 } });
+      edgeOps.push({ id, exit: false, ease: ease[id], from: { points: pts, opacity }, to: { points: pts, opacity: 1 } });
     }
     for (const id of de.exit) {
       const cur = visual.edges.get(id);
       const pts = toPoints(cur.points);
-      edgeOps.push({ id, exit: true, from: { points: pts, opacity: cur.opacity }, to: { points: pts, opacity: 0 } });
+      edgeOps.push({ id, exit: true, ease: ease[id], from: { points: pts, opacity: cur.opacity }, to: { points: pts, opacity: 0 } });
     }
 
     let resolve;

@@ -19,6 +19,9 @@ import { sampleCubic } from "./path.js";
 
 const DEFAULTS = { dir: "LR", nodesep: 28, ranksep: 56, marginx: 20, marginy: 20 };
 
+/** Container chrome (D5): a 28px header strip on top, 12px of breathing room elsewhere. */
+export const CONTAINER_PAD = { top: 28, side: 12, bottom: 12 };
+
 export function layout(view, opts = {}) {
   const o = { ...DEFAULTS, ...opts };
   const nodes = view.nodes || [];
@@ -41,6 +44,9 @@ export function layout(view, opts = {}) {
 
   for (const n of nodes) g.setNode(n.id, { width: n.w, height: n.h });
   if (hasParents) {
+    // INVARIANT: no edge in `view` may touch a node that has children — dagre throws on
+    // edges incident to a cluster. viewstate.js re-attaches those to the interior
+    // entry/exit child before we ever get here (D5).
     for (const n of nodes) if (n.parent !== undefined) g.setParent(n.id, n.parent);
   }
   for (const e of realEdges) {
@@ -58,6 +64,7 @@ export function layout(view, opts = {}) {
     const d = g.node(n.id);
     outNodes[n.id] = { x: d.x, y: d.y, w: d.width, h: d.height };
   }
+  if (hasParents) padContainers(nodes, outNodes, { ...CONTAINER_PAD, ...(o.containerPad || {}) });
 
   const outEdges = {};
   for (const e of realEdges) {
@@ -78,6 +85,46 @@ export function layout(view, opts = {}) {
 
   const bounds = computeBounds(outNodes, outEdges);
   return { nodes: outNodes, edges: outEdges, bounds, reversedEdgeIds: reversed };
+}
+
+/**
+ * D5 step 4 — give every cluster its exact chrome. dagre computes a cluster rect from
+ * invisible border nodes, so its padding is a side effect of nodesep/ranksep; we grow
+ * that rect to the union with (children bbox + containerPad) so the header strip always
+ * clears the topmost child while siblings still never overlap what dagre reserved.
+ * Deepest containers first, so a nested container is already padded when its parent
+ * measures it.
+ */
+function padContainers(nodes, out, pad) {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const kids = new Map();
+  for (const n of nodes) {
+    if (n.parent === undefined || !byId.has(n.parent)) continue;
+    if (!kids.has(n.parent)) kids.set(n.parent, []);
+    kids.get(n.parent).push(n.id);
+  }
+  const depthOf = (id) => {
+    let d = 0, p = byId.get(id).parent, seen = new Set([id]);
+    while (p !== undefined && byId.has(p) && !seen.has(p)) { d++; seen.add(p); p = byId.get(p).parent; }
+    return d;
+  };
+  for (const id of [...kids.keys()].sort((a, b) => depthOf(b) - depthOf(a))) {
+    const r = out[id];
+    if (!r) continue;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const c of kids.get(id)) {
+      const k = out[c];
+      if (!k) continue;
+      x0 = Math.min(x0, k.x - k.w / 2); y0 = Math.min(y0, k.y - k.h / 2);
+      x1 = Math.max(x1, k.x + k.w / 2); y1 = Math.max(y1, k.y + k.h / 2);
+    }
+    if (x0 === Infinity) continue;
+    const l = Math.min(r.x - r.w / 2, x0 - pad.side);
+    const t = Math.min(r.y - r.h / 2, y0 - pad.top);
+    const rt = Math.max(r.x + r.w / 2, x1 + pad.side);
+    const b = Math.max(r.y + r.h / 2, y1 + pad.bottom);
+    out[id] = { x: (l + rt) / 2, y: (t + b) / 2, w: rt - l, h: b - t };
+  }
 }
 
 /**
