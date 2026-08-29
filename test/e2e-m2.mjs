@@ -239,6 +239,37 @@ try {
   check(childVisible, "…and its child is now actually in the DOM (real expand, not just the attribute)");
 
   // ---------------------------------------------------------------------------
+  // 7b — tap-to-toggle: a real pointer tap on the container's header collapses it,
+  // a second tap re-expands, and a DRAG across it (a pan) toggles nothing.
+  // ---------------------------------------------------------------------------
+  const headerPoint = async () => {
+    const box = await (await page.$('#stage .smv-node[data-id="verifyA"]')).boundingBox();
+    return { x: box.x + 12, y: box.y + 10 }; // header strip: top-left, never covered by children
+  };
+  const expandedAttr = () => page.evaluate(() =>
+    document.querySelector('#stage .smv-node[data-id="verifyA"]').getAttribute("aria-expanded"));
+
+  let pt = await headerPoint();
+  await page.mouse.click(pt.x, pt.y);
+  await page.waitForTimeout(400);
+  check((await expandedAttr()) === "false", "a tap on the expanded container's header collapses it (aria-expanded=false)");
+
+  pt = await headerPoint();
+  await page.mouse.click(pt.x, pt.y);
+  await page.waitForTimeout(400);
+  check((await expandedAttr()) === "true", "a second tap re-expands it (aria-expanded=true)");
+
+  pt = await headerPoint();
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.down();
+  await page.mouse.move(pt.x + 60, pt.y + 4, { steps: 4 }); // a pan gesture, not a tap
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  check((await expandedAttr()) === "true", "a drag starting on the container pans, it does NOT toggle");
+  // put the viewport back where the pan moved it from, so later geometry checks are unaffected
+  await page.evaluate(() => window.__g.fitView({ animate: false }));
+
+  // ---------------------------------------------------------------------------
   // 8 — exports: exportSVG (parse + content) and exportPNG (decode dimensions), driven
   // live via the ESM import the page's own module script made.
   // ---------------------------------------------------------------------------

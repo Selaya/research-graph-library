@@ -133,6 +133,9 @@ export interface MountOpts {
   preset?: "pipeline";
   /** ARIA + keyboard is on by default; pass `false` to opt out. */
   a11y?: boolean;
+  /** Pointer interactions. `tapToggle` (tap/click a container to expand/collapse) is on
+   *  by default; pass `{ tapToggle: false }` to opt out. */
+  interaction?: { tapToggle?: boolean };
   storyboard?: StoryboardStep[];
   autoplay?: boolean;
 }

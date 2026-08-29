@@ -97,7 +97,7 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-node rect.smv-node-header,
 .smv-node path.smv-node-chev,
 .smv-node text.smv-node-badge{display:none}
-.smv-node[data-container]{--smv-fill:var(--smv-container)}
+.smv-node[data-container]{--smv-fill:var(--smv-container); cursor:pointer}
 .smv-node[data-container] rect.smv-node-stack{
   display:inline; fill:var(--smv-fill); stroke:var(--smv-stroke); stroke-width:1.25; opacity:.55;
 }

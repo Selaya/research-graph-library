@@ -17,6 +17,7 @@ import { runCondense } from "./condense-anim.js";
 import { runSplit } from "./split-anim.js";
 import { makeQuery } from "./query.js";
 import { attachA11y } from "./a11y.js";
+import { attachTapToggle } from "./interact.js";
 import { createRunTransport } from "./run-transport.js";
 import { createRunRender } from "./run-render.js";
 import { createStoryboard } from "./storyboard.js";
@@ -212,6 +213,7 @@ export function mount(el, spec = {}, opts = {}) {
   let transport = null;
   let preset = null;
   let a11y = null;
+  let tap = null;
   const tbus = emitter(); // transport-facing "something moved" channel
   const notify = () => tbus.emit("change", null);
 
@@ -675,6 +677,7 @@ export function mount(el, spec = {}, opts = {}) {
       if (destroyed) return;
       destroyed = true;
       if (a11y) { a11y.destroy(); a11y = null; }
+      if (tap) { tap.destroy(); tap = null; }
       if (transport) { transport.destroy(); transport = null; }
       if (preset) { preset.destroy(); preset = null; }
       if (sb) { sb.pause(); sb = null; }
@@ -703,6 +706,10 @@ export function mount(el, spec = {}, opts = {}) {
 
   // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
   if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg });
+  // Tap/click a container toggles it (same public path the keyboard uses).
+  if (!(opts.interaction && opts.interaction.tapToggle === false)) {
+    tap = attachTapToggle(g, { svg: renderer.svg });
+  }
 
   if (opts.storyboard) buildStoryboard(opts.storyboard);
   if (opts.controls) {

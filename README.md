@@ -69,7 +69,9 @@ ESM for bundler users: `import { mount } from "sparkle-motion-vizualizer"`.
 `mount(el, spec, opts) → g`. `el` is an element or a selector; `opts` takes
 `theme` (`auto`/`light`/`dark`), `layout` (`{dir:"LR"|"TB", nodesep, ranksep, …}`),
 `animation` (`{duration, easing}`), `controls`, `preset`, `storyboard`, `autoplay`,
-and `a11y: false` to opt out of the ARIA layer.
+`a11y: false` to opt out of the ARIA layer, and `interaction: { tapToggle: false }` to
+turn off tap/click-to-toggle on container nodes (on by default; a tap that travels past
+a small slop radius counts as a pan and never toggles — touch-friendly by construction).
 
 Every mutation returns an awaitable, cancelable handle (`await g.addNode(…)`,
 `g.condense(…).cancel()`); overlapping calls cancel-and-retarget rather than queue.

@@ -624,3 +624,12 @@ export/a11y-table via `../src/`) + `test/e2e-m2.mjs` (playwright-core, chromium 
   bounds×scale.
 - **no regression**: zero console errors; `npm test`, `npm run size`, e2e-m0, e2e-m1 all
   green.
+
+## `src/interact.js` — tap-to-toggle (post-review M2 addition)
+
+`attachTapToggle(g, {svg}) → {destroy}` — pointerdown resolves the `.smv-node[data-id]`
+under the finger (before the viewport's setPointerCapture retargets the gesture);
+pointerup toggles the container through public `g.expand/collapse` ONLY when the pointer
+stayed within a 6px slop and no second pointer joined (pinch). Wired by index.js unless
+`opts.interaction.tapToggle === false`; containers get `cursor: pointer`. Ships in the
+IIFE.
