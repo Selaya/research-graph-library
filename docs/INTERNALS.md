@@ -185,3 +185,157 @@ properties. Nothing style-related is written per frame.
   core (dagre-external, minified+gzip) ≥ 40KB, or IIFE min+gzip ≥ 56KB (dagre era,
   §8; tightens to 50KB at M3). Prints a table.
 - CI: `.github/workflows/ci.yml` — npm ci, test, size (which builds).
+
+---
+
+# M1 contracts (expand/collapse · condense · tokens · storyboard · preset)
+
+M0 is DONE and green (71 tests, e2e). Do not regress it. New rules of engagement:
+scene.js/render.js/index.js/styles.js are edited ONLY by the agent explicitly assigned
+to them in its prompt; everything else is new files.
+
+## Scene extensions (owned by the compound/condense agent)
+
+- `opts.exitTo: {id:{x,y}}` — exiting nodes tween toward this point (w/h shrink to 60%)
+  while fading, instead of fading in place. Used by collapse (children → container
+  centroid) and condense converge.
+- Per-op easing: node ops accept `opts.easeOverride: {id: fn}` so the condensed target
+  node can enter with `EASE.overshoot` while everything else runs the commit easing.
+- Both are additive; existing tests must stay green.
+
+## `src/viewstate.js` — expand/collapse + meta-edges (D5)
+
+```js
+createViewState(store) → vs
+vs.collapsed            // Set<id> (initialized from node.collapsed === true for nodes that have children)
+vs.isContainer(id), vs.isVisible(id)
+vs.expand(id), vs.collapse(id)     // mutate the set only; relayout happens in index.js
+vs.view() → { nodes, edges, sizes, meta }
+```
+
+- `view()` output plugs into the existing `layout()` seam:
+  - visible node = every ancestor expanded. Expanded containers appear WITH `parent`
+    links on their children (dagre compound reserves the space — that is the dagre-era
+    implementation of D5's four-step; containers get `containerPad` {top:28 for the
+    header strip, side:12, bottom:12} passed via node w/h handling in dagre's cluster
+    result).
+  - collapsed container = plain node sized by `sizeNode` + room for a ×N badge.
+  - meta-edges: an edge whose endpoint is hidden re-attaches to the nearest visible
+    ancestor; parallel meta-edges (same src→tgt) dedupe into id
+    `meta:<src>-><tgt>` carrying `weight` = count; self-referential results
+    (both endpoints map to the same container) drop; a loop wholly inside a collapsed
+    container becomes `meta.loopBadge = {containerId, max}` instead of an edge (D3).
+  - `meta` = { metaEdges: Map<metaId, {sources:[edgeId], weight}>, loopBadges: [{id, max}] }.
+- index.js gains `g.expand(id)` / `g.collapse(id)` returning the commit awaitable;
+  expand passes `enterFrom` = container's previous center for entering children;
+  collapse passes `exitTo` = container's new center. Events "expand"/"collapse".
+- Renderer: containers render as `.smv-node[data-container]` (label in the header strip
+  top-left, not centered; children drawn after parents — sort by containment depth);
+  meta-edges get `data-weight` when weight>1 (badge via preset/CSS).
+
+## `src/condense-anim.js` — condense choreography (D6), owned by the same agent
+
+`runCondense(g, internals, ids, newNodeSpec)` sequencing on the shared ticker
+(total ≤900ms; reduced-motion: each phase ≥1ms, sequencing preserved):
+1. highlight ~150ms: sources get `data-condense="src"` (CSS glow) — no geometry change.
+2. converge ~450ms: `store.condense()` then relayout commit with `exitTo` = the merged
+   node's new center for the removed sources, `enterFrom` = centroid of the sources'
+   previous rects for the merged node, `easeOverride` = overshoot for the merged node.
+3. reveal ~300ms: merged node `data-condense="reveal"` pulse class, removed after.
+Emits `condense` {sources, target, sourceData, targetData} on phase 2 start (C12 — core
+never reads durations). `g.condense(ids, spec)` returns an awaitable resolving after
+phase 3 (canceled:true if interrupted).
+
+## `src/run.js` — token engine Mode A (D4), PURE (no DOM, no imports from render/index)
+
+```js
+parseDuration("2h"|"45m"|"8s"|"300ms"|number(sec)) → seconds | null
+compileRun(spec, opts) → sim
+```
+
+- `spec` = a `store.spec()` snapshot. `opts = { iterations?: {[edgeId]: n} (≤ maxIterations),
+  rates?: [{t, scope: nodeId|'*', factor}], hopMs=300, dwell?: (sec|null, ctx) => ms }`.
+- Default pacing: `dwellMs = 300 + 1200 * (sec / maxSecInGraph)`, 600 when the node has
+  no `data.duration`. Rates: a token entering node X multiplies its inherited rate by
+  every applicable rate event; rate divides dwell AND hop times for that token's branch
+  (children inherit). `scope:'*'` is global speed. Rate factor 0 freezes (used by
+  step({token})).
+- Semantics: source nodes (no in-edges, loop edges excluded) start with one token at t=0.
+  A node completes → spawns one child token per non-loop out-edge (implicit fan-out).
+  `join: "all"|"any"|{count:k}` on a node: dwell starts when the policy fires
+  (expected = # non-loop in-edges); later arrivals emit `drop` (ghost-fade). Loop edge
+  `loop:true` A→B: token finishing A with iterations remaining traverses the arc ONCE
+  visually (iteration 1), then per further iteration a compressed in-place tick
+  (250ms/iter, no re-fly — D4) emitting `loop` {edgeId, iteration, max}; after the final
+  iteration the token proceeds through A's normal out-edges. Iterations =
+  `opts.iterations[edgeId] ?? maxIterations`.
+- `sim = { duration, events, boundaries, stateAt(t), nextBoundary(t, tokenId?) }`
+  - `events`: time-sorted `[{t, type: 'enter'|'start'|'finish'|'spawn'|'join'|'drop'|'loop'|'done', …}]`.
+  - `stateAt(t)` → `{ tokens: [{id, rate, at: {kind:'node'|'edge', id, progress}}],
+      nodes: {id: {status:'pending'|'active'|'done', progress, occupancy}},
+      edges: {id: {traversed: 0..1}},
+      joins: {nodeId: {arrived, needed, fired}},
+      loops: {edgeId: {iteration, max}}, done }`
+    Pure O(events) worst case is fine at our scale; make it deterministic.
+- `speed()`/`step({token})` are implemented by the TRANSPORT (below) as rate events +
+  recompile (cheap at tens of nodes); `nextBoundary(t, tokenId?)` supports `step()`.
+
+## `src/run-transport.js` + `src/run-render.js` — wiring (integration agent)
+
+- `g.run(opts)` → `run = { play, pause, playing, seek(ms), time(), speed(f, {branch}?),
+  step(opts?), on/off, state() (=stateAt(now)), duration, destroy, promise }`.
+  Driven by the shared ticker; `play({until: nodeId})` pauses when that node's status
+  becomes done (storyboard uses it). Recompiles via compileRun on speed/step; preserves
+  current virtual time. Emits 'join'/'loop'/'drop'/'done'/'tick'.
+- `run-render`: subscribes to ticker + scene.visual; draws into `g.smv-tokens` layer
+  (created after nodes): one pulse circle per token via `pointAt` on the CURRENT edge
+  geometry (follows mid-transition edges), per-node progress fill (a rect inset behind
+  the label, width = progress), occupancy `×n` badge, join slot pips `k/n`, loop badge
+  `iter i/n` near the loop arc / on the container (viewstate loopBadges), traversed-edge
+  `data-traversed` + `--smv-traversed` custom property. All from `stateAt(t)` inside the
+  single rAF (never per-token WAAPI). Token↔morph rule (D4): on `condense` involving
+  token-holding nodes the engine recompiles against the new spec; tokens remap to the
+  merged node carrying max(progress); tokens on removed nodes ghost-fade.
+
+## `src/storyboard.js` (pure sequencer) + `src/transport.js` (DOM bar)
+
+- `createStoryboard(host, steps)` where `host = { apply(step) → {promise?|run?},
+  snapshot() → any, restore(snap) → promise, }`; steps = the JSON op array (§5.5), ops:
+  `addNode|addEdge|removeNode|removeEdge|update|expand|collapse|condense|batch|
+   run.play (args or {until})|run.step|run.seek|wait {ms}`; `label` entries are
+  zero-duration markers.
+- Snapshot BEFORE each step (G2); `sb.seek(indexOrLabel)`: restore that snapshot →
+  host.restore animates the diff from current visual state; then optionally replay to an
+  intra-step run time. `sb.play/pause/next/prev/seek/labels/position/on`.
+- index.js: `opts.storyboard` array + `opts.autoplay`; host implementation lives in
+  index.js (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed],
+  runTime, runOpts}).
+- `src/transport.js`: `createTransport(rootEl, controller)` — play/pause, step back/fwd,
+  scrubber (input range over the storyboard's cumulative timeline; within a run.play
+  step maps to run.seek), speed select (0.5/1/2/4), current label readout.
+  `.smv-transport` fixed at the bottom of the mount root; `opts.controls: true` enables.
+
+## `src/preset-pipeline.js` (own file; integration agent adds the single import)
+
+`applyPipelinePreset(g)` — subscribes via public `g.on` + DOM adornments only:
+- duration chip (top-right in-node `<text class="smv-chip">`) from `data.duration`;
+  `durationAgg: 'sum'|'max'` rollup for containers/collapsed groups (G5).
+- status glyphs via `data-status` CSS (clock/pulse/check), manual hand vs auto bolt badge
+  from `data.mode`.
+- on `condense`: odometer-roll the target's chip from aggregated source duration to the
+  target duration (e.g. `2h → 8s`), pop a transient `−99.9% · N× faster` delta badge,
+  update the total-duration bar (a slim bar under the graph, `.smv-totalbar`).
+- Enabled via `opts.preset: 'pipeline'` or `SparkleMotion.presetPipeline(g)`.
+
+## M1 exit (verify agent)
+
+`demo/pipeline.html` — ONE script tag (`../dist/smv.iife.min.js`), a storyboard playing
+§6 end to end: steps appear → token run with 3-way fan-out at visibly different rates +
+`join:"all"` firing converge-burst → retry loop ticking to 3/5 → expand "clean" into 3
+substeps → condense them into 1 automated step with the 2h→8s odometer → scrub backward
+and forward cleanly. `?auto=1` exposes `window.__smvM1 = {done, errors, checks:{...}}`.
+`test/e2e-m1.mjs` (playwright-core, chromium at /opt/pw-browsers/chromium) asserts:
+zero errors; 3 concurrent tokens observed with distinct branch progress; join fires after
+all 3; loop badge reaches 3/5; expand adds 3 substeps; condense leaves 1 node + odometer
+text lands on "8s"; scrub to "before automation" restores the 3 substeps then scrub to
+end re-condenses; no NaN anywhere.
