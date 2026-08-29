@@ -57,6 +57,11 @@ export function createRunRender(internals, run) {
 
   const layer = doc.createElementNS(NS, "g");
   layer.setAttribute("class", "smv-tokens");
+  // Pure decoration: pulses, fills, occupancy/loop badges and ghosts are all sampled
+  // restatements of state the owning treeitem's accessible name already carries. Left
+  // exposed they linearize for assistive tech as bare, context-free text ("×3", "iter 2/5")
+  // sitting outside the tree entirely.
+  layer.setAttribute("aria-hidden", "true");
   const gFill = doc.createElementNS(NS, "g");
   const gMark = doc.createElementNS(NS, "g");
   const gTok = doc.createElementNS(NS, "g");
@@ -176,6 +181,10 @@ export function createRunRender(internals, run) {
     if (!el) return;
     if (status === "pending") el.removeAttribute("data-run");
     else el.setAttribute("data-run", status);
+    // The accessible name is derived from this same channel (a11y.js listens), and a run is
+    // not a spec mutation, so no "commit" ever announces it. This is a transition, not a
+    // frame: the cache check above means it fires only when the value actually changed.
+    if (internals.bus) internals.bus.emit("runstatus", { id, status });
   }
 
   /** stateAt(t) with the condense progress floors folded in (never mutates the engine's

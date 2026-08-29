@@ -5,18 +5,36 @@
   "type": "module",
   "main": "./src/index.js",
   "module": "./src/index.js",
+  "types": "./types/index.d.ts",
   "exports": {
-    ".": "./src/index.js",
-    "./preset-pipeline": "./src/preset-pipeline.js"
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./preset-pipeline": "./src/preset-pipeline.js",
+    "./export": {
+      "types": "./types/export.d.ts",
+      "default": "./src/export.js"
+    },
+    "./a11y-table": {
+      "types": "./types/a11y-table.d.ts",
+      "default": "./src/a11y-table.js"
+    }
+  },
+  "bin": {
+    "smv-pack": "bin/smv-pack.mjs"
   },
   "files": [
     "src",
-    "dist"
+    "dist",
+    "types",
+    "bin"
   ],
   "scripts": {
     "build": "node scripts/build.js",
     "test": "node --test \"test/*.test.js\"",
     "size": "node scripts/size-budget.js",
+    "types": "tsc -p types",
     "check": "npm run test && npm run build && npm run size"
   },
   "license": "MIT",
@@ -25,6 +43,7 @@
   },
   "devDependencies": {
     "esbuild": "0.28.2",
-    "playwright-core": "^1.62.1"
+    "playwright-core": "^1.62.1",
+    "typescript": "5.9.3"
   }
 }

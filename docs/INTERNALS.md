@@ -359,3 +359,277 @@ end re-condenses; no NaN anywhere.
   re-seats them (G2 fidelity: pins are part of the state a step moves).
 - `run.js` runs `breakCycles` over its (container-remapped) edges: untagged back edges
   are zero-iteration loops — excluded from join arity and from token re-fly.
+
+---
+
+# M2 contracts (live mode · split · a11y · exports · labels · query · types)
+
+M1 is DONE and green (200 tests, e2e-m0, e2e-m1, size budget). Do not regress it.
+
+**File ownership (hard rule — a file is edited ONLY by its owner):**
+
+| files | owner |
+|---|---|
+| `src/run-live.js` (new), `src/run-transport.js`, `test/run-live*.test.js` | live-mode agent |
+| `src/store.js`, `src/split-anim.js` (new), `src/query.js` (new), `test/split.test.js`, `test/query.test.js` | split/query agent |
+| `src/render.js`, `src/styles.js`, `src/viewstate.js`, `test/labels.test.js` | render-extras agent |
+| `src/a11y.js` (new), `src/a11y-table.js` (new), `test/a11y.test.js` | a11y agent |
+| `src/export.js` (new), `bin/smv-pack.mjs` (new), `docs/EMBED.md`, `test/export.test.js` | export agent |
+| `src/index.js`, `package.json`, `README.md` | integration agent |
+| `types/*.d.ts`, `docs/THEMING.md`, `scripts/*`, typescript devDep | types/docs agent |
+| `demo/m2.html`, `test/e2e-m2.mjs` | verify agent |
+
+All modules must import cleanly under Node (guard browser APIs); `node --test "test/*.test.js"`.
+
+## `src/run-live.js` — Mode B engine (D4), PURE (no DOM)
+
+```js
+replayLive(spec, events, t, opts = {}) → state   // same shape as compileRun's stateAt(t)
+liveBoundaries(events) → number[]                // sorted distinct event times (for step())
+```
+
+- `events`: append-only log, time-sorted (sort defensively on entry), entries:
+  `{t, type: 'start'|'finish'|'spawn', id, n?}` — `t` in ms of live time.
+  `start(id)`: node becomes `active`; it takes the token already waiting on the node, else
+  the one still flying toward it (see below), else a fresh one is created (source/entry
+  nodes). `finish(id)`: ALL tokens currently on `id` finish — node `done`,
+  each token fans out one child per non-loop out-edge, traveling its edge over
+  `opts.hopMs` (default 300) of live time, then WAITING at the target (target stays
+  `pending` until its own `start`). `{t, type:'finish', id, n:k}` finishes only `k`
+  tokens (k < occupancy leaves the node `active`). `spawn(id, n)`: place `n` additional
+  waiting tokens on node `id` (runtime fan-out; occupancy badge ×n).
+- **`hopMs` is a rendering travel time, never a gate on the feed.** A `start(target)`
+  stamped before the inbound hop lands CONSUMES that hop (its edge fill truncates to the
+  start instant, the wait collapses) instead of fabricating a second token and stranding
+  the real one — a real pipeline whose steps hand off in under 300ms is the normal case,
+  not an error. A landing that coincides exactly with a log event at the same `t` is
+  ordered BEFORE it: the landing is caused by an earlier `finish`, so it is causally prior.
+- `opts.bornAt` (Map edgeId → live ms, supplied by the transport): the log is history, so a
+  `finish` stamped before an edge existed never fans out over that edge.
+- Progress while `active`: `elapsed / declared-duration-estimate` clamped to 0.95 when
+  `data.duration` parses (`parseDuration` from run.js); else 0 (status pulse carries it).
+  Progress = 1 on finish.
+- Joins (`join:` policy): arrivals counted exactly as Mode A — including saturating at
+  `needed` (Mode A drops post-fire arrivals, so `arrived` never exceeds `needed`); but an explicit `start(id)`
+  ALWAYS activates — the real log outranks the declared policy. `joins` map reported the
+  same way. Loop edges (`loop: true`) never auto-fan-out; a repeated `start` of an
+  already-done node re-activates it (that IS the live loop iteration) and increments
+  `loops[edgeId].iteration` for its loop in-edge if one exists.
+- Deterministic: same (spec, events, t) → same state. No wall clock inside; the caller
+  owns time.
+
+## `src/run-transport.js` — mode switch (live-mode agent owns this file)
+
+`createRunTransport(internals, opts)` gains `opts.mode: 'simulate'(default) | 'live'`
+and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unchanged
+— every existing test must stay green. In live mode:
+
+- The transport keeps a **frontier** clock: starts at 0 when the run is created (or at the
+  span of a log it was seeded with, so seeded events are reachable at all), and
+  advances with the shared ticker unconditionally (live time flows even while paused/
+  scrubbed). `run.now() → frontier ms`.
+- `run.start(id, {at}?)`, `run.finish(id, {at}?|{at,n}?)`, `run.spawn(id, n, {at}?)`
+  append to the log stamped at `at ?? frontier` (clamped to ≤ frontier). Emits the same-
+  named event.
+- View time `t`: by default **follows** the frontier (`run.following === true`).
+  `seek(ms)` clamps to `[0, frontier]` and detaches (time-travel replay); `play()`
+  advances `t` at 1× (× global speed) and clamps at the frontier — you can NEVER scrub or
+  play past `now`; on catching up it re-attaches (`following` true again). `follow()`
+  re-attaches immediately.
+- `duration` getter = frontier (grows). `state()` = `replayLive(store.spec(), log, t)`,
+  memoized on `(t, store.rev, log revision)` — it is sampled every frame off the
+  unconditional `tick`, and a full replay is O(events); the memo hands out a private copy,
+  so callers may write into what they get.
+  `step()` walks `liveBoundaries`. `speed(f,{branch})` in live mode: global `f` scales
+  only replay playback (frontier is real time); per-branch is a no-op (documented).
+  `run.log() → [...events]` (copy). `reset(opts, time)` re-seeds log from `opts.log`, and
+  `options()` CARRIES that log — the pair is the storyboard snapshot/restore round trip
+  (G2), which must not delete a live run's history.
+- `play({until})` waits on the node's status in BOTH modes. In live mode the view clock is
+  glued to the frontier by default, so `until` is consulted before the frontier — otherwise
+  every `play({until})` from the normal following state resolves on the spot.
+- Graph mutations hit the new spec lazily, as in Mode A, with two live-only rules the log
+  forces (the log is history, not a re-simulation input):
+  - `condense`/`split` on the host bus REWRITE the log — every entry naming a removed
+    source is re-pointed at the survivor (a split's entry part) — so the merged/entry node
+    inherits its sources' instants and re-fans over the redirected edges. `remap` is
+    emitted afterwards, as in Mode A. Without this the `nodes.has(e.id)` filter in
+    replayLive silently drops that history and `done` flips true mid-run.
+  - an edge is stamped with the frontier when it is added, and a `finish` older than that
+    stamp never travels it (no retroactive fan-out out of a node that finished long ago).
+
+## `src/store.js` — `split(id, parts)` (D6 inverse; split/query agent)
+
+`store.split(id, { nodes, edges = [] })`:
+- `id` must exist and must NOT be a container with children (named `GraphError('split-container')`).
+- `nodes`: ≥1 new node specs, ids unique and not colliding (`dup-id`); they inherit
+  `parent` from the split node unless they specify one. `edges`: internal edges among
+  the new nodes only (`split-edge` error otherwise).
+- Entry nodes = new nodes with no in-edge in `edges`; exit nodes = no out-edge in `edges`.
+  Every former incoming edge of `id` is redirected to EVERY entry node (first keeps its
+  id, clones get `id + ':' + targetId`); outgoing likewise from every exit node. Weights:
+  a redirected edge carrying `weight: N` keeps it. Self-loops on `id` are dropped.
+  Internal wiring that leaves NO entry (or no exit) — e.g. a cycle spanning every new node
+  — has nowhere to redirect to, so it is rejected up front with `GraphError`
+  `split-no-entry` / `split-no-exit` (only when there is actually something to redirect),
+  rather than deleting those edges and silently disconnecting their far ends. `g.split()`
+  asks the same question synchronously, like every other split guard.
+- The split node is removed. Returns `{ added: [nodeIds], addedEdges, removedEdges }`.
+- Snapshot/restore must round-trip it (it composes from existing primitives).
+
+## `src/split-anim.js` — split choreography (split/query agent)
+
+`runSplit(g, internals, id, parts)` — mirror of runCondense, total ≤900ms, reduced-motion
+≥1ms/phase with sequencing preserved:
+1. highlight ~150ms: source gets `data-condense="src"` (reuse the glow).
+2. diverge ~450ms: `store.split()` then relayout with `enterFrom` = the source's previous
+   center for every added node (they bloom outward), `easeOverride` overshoot for them.
+3. reveal ~300ms: added nodes get `data-condense="reveal"` pulse, removed after.
+Emits `split` `{source, targets, sourceData}` on phase-2 start. Returns
+`{promise, cancel}`; promise resolves `{canceled}`; must register `ticker.onDestroy`.
+
+## `src/query.js` — query sugar (split/query agent), PURE
+
+```js
+makeQuery(store) → { nodes(filter?), edges(filter?), children(id), descendants(id), roots() }
+```
+- `filter` = predicate `(item) => bool`, or a match object: top-level keys compare `===`
+  against the spec item; a `data` key matches shallowly against `item.data`.
+  `nodes({ data: { status: 'done' } })`, `edges({ loop: true })`.
+- Returns plain copies (same cloning discipline as `store.spec()`). `roots()` = nodes
+  with no parent. `descendants` includes nested children, not the node itself.
+
+## `src/render.js` + `src/styles.js` + `src/viewstate.js` — edge labels, collapseAll (render-extras agent)
+
+- **Edge labels:** `edge.label` renders as `<text class="smv-edge-label">` inside the
+  edge group, positioned per frame at `pointAt(clippedPoints, 0.5)` with a small
+  perpendicular offset; content/truncation set at styleCommit only (D7). Labels do NOT
+  affect layout (documented simplification — record in DEVIATIONS if judged material).
+  Meta-edges: when a collapsed boundary edge aggregates ≥2 labeled edges the label drops
+  (weight badge already carries the story). CSS: `.smv-edge-label` muted, 10px, paint-order
+  stroke halo for readability, in styles.js.
+- **`vs.containers()`** → array of container ids in containment-depth order (parents
+  first). `vs.expandAll()` / `vs.collapseAll()` mutate the set only and return the ids
+  that changed (index.js drives the single relayout).
+- Existing tests + goldens must stay byte-green.
+
+## `src/a11y.js` — ARIA + keyboard (a11y agent), core (ships in the IIFE)
+
+```js
+attachA11y(g, { root, svg }) → { destroy() }
+```
+- Called by index.js on mount (always on; `opts.a11y: false` opts out).
+- Sets `role="application"` + `aria-roledescription="graph"` + `aria-label` on the svg;
+  `role="tree"` on the nodes group; per node `<g>`: `role="treeitem"`, `aria-level`
+  (containment depth+1), `aria-label` = `label · status`, `aria-expanded`
+  on containers (true/false from viewstate), `tabindex` roving (-1 everywhere, 0 on the
+  current item). Re-applied after every `commit` event (renderer reuses elements keyed by
+  `[data-id]` — query the DOM, do not touch render.js).
+- `status` in that name is the LIVE run status when a run is driving the node (the
+  `data-run` attribute run-render.js owns), else the design-time `data.status` from the
+  spec. Refreshed on the `runstatus` bus event, which fires per status transition (never
+  per frame) — a run is not a spec mutation, so no `commit` would otherwise announce it,
+  and a screen-reader user would get nothing at all while a run played.
+- The roving `currentId` tracks REAL DOM focus: a `focusin` listener on the svg re-seats it
+  whenever focus arrives by a route this module does not drive (a click on the `<g>`, an
+  external `.focus()`, a screen reader's virtual cursor), or Enter/Space and the arrows act
+  on a stale node. When a commit takes the focused node out of the visible set (its
+  container collapsed, a condense merged it away), focus is re-homed onto the new roving
+  stop — the browser would otherwise drop it on `<body>` once the element detaches.
+- Decoration carries no accessible text of its own: the `g.smv-tokens` layer (run-render.js),
+  edge labels and container chrome (stack/header/chevron/count badge) are all
+  `aria-hidden="true"`; the owning treeitem's `aria-label` is the authoritative name.
+- Keyboard (listener on the svg): ArrowRight/ArrowDown = next, ArrowLeft/ArrowUp = prev
+  in **reading order** (layout rank order: sort visible nodes by x then y from
+  `g.layoutResult()`), Home/End = first/last, Enter/Space = toggle expand/collapse on
+  containers, focus follows with `.focus()` on the `<g>`. Focused node gets a CSS ring:
+  a11y.js injects its OWN `<style data-smv-a11y>` (dedup-guarded) — do not edit styles.js.
+- Emits `g`'s bus nothing new; calls public `g.expand/collapse` only.
+
+## `src/a11y-table.js` — linearized fallback (ESM-only entry, a11y agent)
+
+`attachA11yTable(g, { visible = false }) → { el, destroy() }` — appends a `<table>`
+(caption, one row per visible node: label, status, duration, depth, outgoing targets)
+after the svg inside the mount root; `visible: false` applies a visually-hidden clip
+class (its own injected style). Updates on `commit`/`update` events. Package export
+`sparkle-motion-vizualizer/a11y-table`.
+- The table and a11y.js's tree are two renderings of the same content, so exactly one is in
+  the accessibility tree at a time: while the interactive tree is attached (the default)
+  the table sets `aria-hidden="true"` and is a visual/structural fallback only; with
+  `mount(..., { a11y: false })` it is the accessible surface. Re-checked on every render.
+
+## `src/export.js` — exportSVG/exportPNG (ESM-only entry, export agent)
+
+- `exportSVG(g, { pad = 24, theme, width }?) → string` — standalone SVG document:
+  clone `g.renderer.svg`, strip transport/interaction cruft, set
+  `viewBox` from `g.bounds()` + pad, inline the smv CSS (import `CSS` from styles.js and
+  embed in a `<style>`) + resolved custom properties for the theme, `xmlns` correct.
+  Pure string-building where possible so Node tests can cover it with a fake clone.
+- `exportPNG(g, { scale = 2, background }?) → Promise<Blob>` — browser-only: SVG string
+  → `Image` → canvas → `toBlob`. Rejects cleanly under Node.
+- Package export `sparkle-motion-vizualizer/export`. NOT in the IIFE (D11).
+
+## `bin/smv-pack.mjs` — single-file HTML CLI (export agent)
+
+`node bin/smv-pack.mjs spec.json [-o out.html] [--storyboard sb.json] [--title T]` —
+emits ONE self-contained HTML file: inlined `dist/smv.iife.min.js` (built if missing —
+just error with instructions, do not shell out), the spec JSON, a mount call with
+`controls: true` + optional storyboard. `docs/EMBED.md` documents both the CLI and the
+copy-paste recipe. package.json gains `"bin": {"smv-pack": "bin/smv-pack.mjs"}`
+(integration agent applies the package.json edit; export agent documents it).
+
+## `src/index.js` — integration agent
+
+- `g.split(id, parts)` — synchronous guards (missing id, container check via store, dup
+  ids) then `runSplit`; returns awaitable like condense.
+- `g.expandAll() / g.collapseAll()` — drive `vs.expandAll/collapseAll` inside ONE
+  relayout; enterFrom/exitTo per container center exactly like expand/collapse do;
+  emit `expandAll`/`collapseAll` with `{ids}`.
+- Query sugar: spread `makeQuery(store)` onto `g` (`nodes/edges/children/descendants/roots`
+  — note: `g.node/g.edge` singular already exist and stay).
+- a11y: `attachA11y` on mount unless `opts.a11y === false`; destroy on `g.destroy()`.
+- `g.run({mode:'live'})` passes through (transport owns the branch). Storyboard op table
+  unchanged (live mode is not storyboard-driven in v1 — document).
+- package.json: exports `"./export"`, `"./a11y-table"`, `"bin"`, `"types"`.
+- IIFE global additions: none beyond what index.js exports (export/a11y-table stay ESM).
+
+## `types/` + docs (types/docs agent, AFTER integration)
+
+- Hand-written `types/index.d.ts` (+ `types/export.d.ts`, `types/a11y-table.d.ts`)
+  covering the public surface (mount opts, instance g, run A+B, storyboard steps,
+  preset, errors). package.json `"types"` + per-export `"types"` conditions (the
+  integration agent leaves placeholders; types agent fills the files).
+- `npm run types` = `tsc --noEmit` over a `types/check.ts` exercising the surface
+  (typescript pinned as devDependency; the check file is the test).
+- `docs/THEMING.md`: every `--smv-*` property, every `data-*` attr, dark/light/auto,
+  worked example. README: new API sections.
+
+## M2 exit (verify agent)
+
+`demo/m2.html` (one script tag → `../dist/smv.iife.min.js`, plus an ESM block for
+export/a11y-table via `../src/`) + `test/e2e-m2.mjs` (playwright-core, chromium at
+/opt/pw-browsers/chromium, pattern of e2e-m1) asserting, with `?auto=1` and
+`window.__smvM2 = {done, errors, checks}`:
+- **live**: scripted feed (start/finish×N, one `spawn(id,3)`) drives tokens; occupancy
+  badge ×3 appears; `seek(pastT)` shows the earlier state (fewer done nodes);
+  `seek(1e9)` clamps to `now()`; after `follow()` new events land.
+- **split**: condensed→split round trip: 1 node becomes 3 with animated bloom; edges
+  redirected; store round-trips.
+- **labels**: an `edge.label` renders and tracks its edge through a relayout.
+- **collapseAll/expandAll** flip every container in one transition.
+- **a11y**: every node has `role=treeitem`; container toggles `aria-expanded`; ArrowRight
+  moves focus (activeElement data-id changes in rank order); Enter expands a container.
+- **exports**: `exportSVG` string contains a `<style>` + all visible node labels and
+  parses as XML; `exportPNG` resolves to an image/png blob, decoded dimensions match
+  bounds×scale.
+- **no regression**: zero console errors; `npm test`, `npm run size`, e2e-m0, e2e-m1 all
+  green.
+
+## `src/interact.js` — tap-to-toggle (post-review M2 addition)
+
+`attachTapToggle(g, {svg}) → {destroy}` — pointerdown resolves the `.smv-node[data-id]`
+under the finger (before the viewport's setPointerCapture retargets the gesture);
+pointerup toggles the container through public `g.expand/collapse` ONLY when the pointer
+stayed within a 6px slop and no second pointer joined (pinch). Wired by index.js unless
+`opts.interaction.tapToggle === false`; containers get `cursor: pointer`. Ships in the
+IIFE.

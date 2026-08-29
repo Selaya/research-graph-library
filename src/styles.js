@@ -97,7 +97,7 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-node rect.smv-node-header,
 .smv-node path.smv-node-chev,
 .smv-node text.smv-node-badge{display:none}
-.smv-node[data-container]{--smv-fill:var(--smv-container)}
+.smv-node[data-container]{--smv-fill:var(--smv-container); cursor:pointer}
 .smv-node[data-container] rect.smv-node-stack{
   display:inline; fill:var(--smv-fill); stroke:var(--smv-stroke); stroke-width:1.25; opacity:.55;
 }
@@ -130,6 +130,16 @@ svg.smv.smv-grabbing{cursor:grabbing}
   stroke-linecap:round; stroke-linejoin:round;
 }
 .smv-edge path.smv-edge-arrow{fill:var(--smv-edge); stroke:none}
+/* Edge labels (M2): muted, small, with a background-colored stroke halo (paint-order)
+   so they stay legible crossing lines/nodes in both themes without a backing rect. */
+.smv-edge text.smv-edge-label{
+  fill:var(--smv-muted);
+  font:500 10px system-ui,-apple-system,'Segoe UI',sans-serif;
+  text-anchor:middle; dominant-baseline:central;
+  paint-order:stroke fill;
+  stroke:var(--smv-bg); stroke-width:3px; stroke-linejoin:round;
+  pointer-events:none;
+}
 /* Back edges read as loops, not glitches: muted + dashed, a distinct visual channel (D3). */
 .smv-edge[data-reversed] path.smv-edge-line{stroke-dasharray:4 3; opacity:.7}
 .smv-edge[data-reversed] path.smv-edge-arrow{opacity:.7}

@@ -68,6 +68,10 @@ export class Store {
     const s = validateSpec(normalizeSpec(spec));
     this.nodes = new Map(s.nodes.map((n) => [n.id, n]));
     this.edges = new Map(s.edges.map((e) => [e.id, e]));
+    /** Bumped by every successful mutation. Lets a reader memoize derived work against
+     *  "has the graph changed since I last looked?" without diffing spec() (Mode B's
+     *  per-frame replay is the caller this exists for). */
+    this.rev = 0;
   }
 
   node(id) { return this.nodes.get(id); }
@@ -96,6 +100,7 @@ export class Store {
     const s = validateSpec(normalizeSpec(snap));
     this.nodes = new Map(s.nodes.map((n) => [n.id, n]));
     this.edges = new Map(s.edges.map((e) => [e.id, e]));
+    this.rev++;
   }
 
   // ---- mutations (validated against the *resulting* spec) ----
@@ -108,6 +113,7 @@ export class Store {
     }
     if (n.id == null || n.id === "") throw new GraphError("node-id", "every node needs a non-empty id");
     this.nodes.set(n.id, n);
+    this.rev++;
     return n;
   }
 
@@ -118,6 +124,7 @@ export class Store {
     if (!this.nodes.has(e.target)) throw new GraphError("dangling", `edge "${e.id}" target "${e.target}" does not exist`);
     if (e.loop && !(e.maxIterations > 0)) throw new GraphError("unbounded-loop", `loop edge "${e.id}" requires maxIterations > 0`);
     this.edges.set(e.id, e);
+    this.rev++;
     return e;
   }
 
@@ -135,12 +142,14 @@ export class Store {
       if (doomed.has(e.source) || doomed.has(e.target)) this.edges.delete(e.id);
     }
     for (const d of doomed) this.nodes.delete(d);
+    this.rev++;
     return doomed;
   }
 
   removeEdge(id) {
     if (!this.edges.has(id)) throw new GraphError("missing", `edge "${id}" does not exist`);
     this.edges.delete(id);
+    this.rev++;
   }
 
   update(id, patch) {
@@ -176,6 +185,7 @@ export class Store {
       if (k === "data") t.data = { ...t.data, ...v };
       else t[k] = v;
     }
+    this.rev++;
     return t;
   }
 
@@ -249,7 +259,133 @@ export class Store {
       });
       newEdges.push(e);
     }
+    this.rev++;
     return { merged, removedNodes: [...removedNodes], newEdges };
+  }
+
+  /**
+   * split(id, { nodes, edges = [] }) — D6 inverse: one node becomes N (M2).
+   * `id` is removed; `nodes` are the replacement specs (parent inherited from `id`
+   * unless a node names its own); `edges` are internal wiring among ONLY those new
+   * nodes. Entry nodes (no internal in-edge) inherit every former incoming edge of
+   * `id`; exit nodes (no internal out-edge) inherit every former outgoing edge —
+   * fan-out/fan-in when there's more than one, by the "first keeps the id, clones
+   * get `id:targetId`" rule below. Weights pass through unchanged (no aggregation —
+   * unlike condense, nothing is merging). Self-loops on `id` are dropped: there's no
+   * single sensible new endpoint for them to redirect to on both sides at once.
+   * All guards run BEFORE any mutation (dup-id / split-edge can't half-delete `id`).
+   */
+  split(id, parts = {}) {
+    const { nodes: newNodes = [], edges: internalEdges = [] } = parts;
+    if (!this.nodes.has(id)) throw new GraphError("missing", `node "${id}" does not exist`);
+    if (this.children(id).length > 0) {
+      throw new GraphError("split-container", `node "${id}" is a container (has children) and cannot be split`);
+    }
+    if (!newNodes.length) throw new GraphError("missing", "split requires at least one new node");
+    const splitNode = this.nodes.get(id);
+
+    // ---- validate the replacement node specs ----
+    const specs = newNodes.map((n) => pick(n, NODE_FIELDS));
+    const newIds = new Set();
+    for (const n of specs) {
+      if (n.id == null || n.id === "") throw new GraphError("node-id", "every node needs a non-empty id");
+      if (newIds.has(n.id)) throw new GraphError("dup-id", `duplicate node id "${n.id}" in split`);
+      if (this.nodes.has(n.id) && n.id !== id) throw new GraphError("dup-id", `duplicate node id "${n.id}"`);
+      newIds.add(n.id);
+    }
+    for (const n of specs) {
+      if (n.parent === undefined) n.parent = splitNode.parent;
+      if (n.parent === id) throw new GraphError("dangling", `node "${n.id}" parent "${id}" is being removed by split`);
+      if (n.parent !== undefined && !this.nodes.has(n.parent) && !newIds.has(n.parent)) {
+        throw new GraphError("dangling", `node "${n.id}" parent "${n.parent}" does not exist`);
+      }
+    }
+
+    // ---- validate internal edges: both endpoints must be among the new nodes ----
+    const edgeSpecs = internalEdges.map((e) => pick(e, EDGE_FIELDS));
+    const internalIds = new Set();
+    for (const e of edgeSpecs) {
+      if (e.id == null || e.id === "") throw new GraphError("edge-id", "every edge needs a non-empty id");
+      if (internalIds.has(e.id)) throw new GraphError("dup-id", `duplicate edge id "${e.id}" in split`);
+      internalIds.add(e.id);
+      if (!newIds.has(e.source) || !newIds.has(e.target)) {
+        throw new GraphError("split-edge", `split edge "${e.id}" must connect two of the split's new nodes`);
+      }
+    }
+
+    // Entry = no internal in-edge; exit = no internal out-edge. A node with neither
+    // (no internal edges at all) is both.
+    const hasIncoming = new Set(edgeSpecs.map((e) => e.target));
+    const hasOutgoing = new Set(edgeSpecs.map((e) => e.source));
+    const allIds = specs.map((n) => n.id);
+    const entryIds = allIds.filter((nid) => !hasIncoming.has(nid));
+    const exitIds = allIds.filter((nid) => !hasOutgoing.has(nid));
+
+    // ---- classify id's current incident edges (before anything is removed) ----
+    const incoming = [], outgoing = [];
+    const removedEdgeIds = [];
+    for (const e of this.edges.values()) {
+      const sHit = e.source === id, tHit = e.target === id;
+      if (!sHit && !tHit) continue;
+      removedEdgeIds.push(e.id);
+      if (sHit && tHit) continue; // self-loop: dropped, not redirected either way
+      if (tHit) incoming.push(e); else outgoing.push(e);
+    }
+
+    // Internal wiring that leaves no entry (or no exit) — every new node has an internal
+    // in-edge, e.g. a cycle spanning all of them — has nowhere to redirect `id`'s former
+    // edges to. Deleting them anyway silently disconnects whatever was on the other end,
+    // so refuse BEFORE any mutation, same discipline as every other guard here.
+    if (incoming.length && !entryIds.length) {
+      throw new GraphError("split-no-entry",
+        `split of "${id}" has no entry node (every new node has an internal in-edge), but "${id}" has ${incoming.length} incoming edge(s) to redirect`);
+    }
+    if (outgoing.length && !exitIds.length) {
+      throw new GraphError("split-no-exit",
+        `split of "${id}" has no exit node (every new node has an internal out-edge), but "${id}" has ${outgoing.length} outgoing edge(s) to redirect`);
+    }
+
+    // ---- build the redirected clones (fan-out on the entry/exit side) ----
+    const toAdd = []; // { id, proto, source, target }
+    for (const e of incoming) {
+      entryIds.forEach((tid, i) => {
+        toAdd.push({ id: i === 0 ? e.id : `${e.id}:${tid}`, proto: e, source: e.source, target: tid });
+      });
+    }
+    for (const e of outgoing) {
+      exitIds.forEach((sid, i) => {
+        toAdd.push({ id: i === 0 ? e.id : `${e.id}:${sid}`, proto: e, source: sid, target: e.target });
+      });
+    }
+
+    // Every id that will exist in the store once this lands — checked BEFORE any
+    // mutation runs, same discipline as condense(): a rejected split must not have
+    // touched the store.
+    const removedEdgeSet = new Set(removedEdgeIds);
+    const finalIds = new Set(internalIds);
+    for (const spec of toAdd) {
+      if (finalIds.has(spec.id)) throw new GraphError("dup-id", `duplicate edge id "${spec.id}" produced by split`);
+      finalIds.add(spec.id);
+      if (this.edges.has(spec.id) && !removedEdgeSet.has(spec.id)) {
+        throw new GraphError("dup-id", `duplicate edge id "${spec.id}"`);
+      }
+    }
+    for (const e of edgeSpecs) {
+      if (this.edges.has(e.id) && !removedEdgeSet.has(e.id)) {
+        throw new GraphError("dup-id", `duplicate edge id "${e.id}"`);
+      }
+    }
+
+    // ---- mutate: remove the split node (and its incident edges), add the rest ----
+    this.removeNode(id);
+    const added = specs.map((n) => this.addNode(n).id);
+    const addedEdges = [];
+    for (const e of edgeSpecs) addedEdges.push(this.addEdge(e));
+    for (const spec of toAdd) {
+      addedEdges.push(this.addEdge({ ...spec.proto, id: spec.id, source: spec.source, target: spec.target }));
+    }
+    this.rev++;
+    return { added, addedEdges, removedEdges: removedEdgeIds };
   }
 }
 

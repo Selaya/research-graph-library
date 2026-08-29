@@ -4,7 +4,7 @@
 // Arrowheads are hand-drawn triangles posed by clipEnds (G6) — <marker> never appears.
 // Node size animates via rect width/height, never a group scale (D1).
 
-import { clipEnds, pathString } from "./path.js";
+import { clipEnds, pathString, pointAt } from "./path.js";
 import { truncate, NODE_PAD_X, NODE_MAX_W } from "./measure.js";
 
 const NS = "http://www.w3.org/2000/svg";
@@ -19,6 +19,11 @@ const LABEL_X = 26;
 const STACK_OFF = 4;
 const CHEV_RIGHT = "M -2.5 -4 L 1.5 0 L -2.5 4"; // collapsed
 const CHEV_DOWN = "M -4 -2.5 L 0 1.5 L 4 -2.5";  // expanded
+
+// Edge labels: truncated at commit time (D7), positioned per frame at the path midpoint
+// nudged off the line so the halo doesn't sit directly on the stroke.
+const EDGE_LABEL_MAX_W = 90;
+const EDGE_LABEL_OFFSET = 8;
 
 const r2 = (n) => Math.round((Number.isFinite(n) ? n : 0) * 100) / 100;
 const deg = (rad) => r2((Number.isFinite(rad) ? rad : 0) * 180 / Math.PI);
@@ -107,6 +112,9 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     e.g.appendChild(e.chev);
     e.badge = make("text", "smv-node-badge");
     e.g.appendChild(e.badge);
+    // Chrome, not content: the treeitem's own aria-label is the authoritative name for all
+    // of it, so these must not surface as extra accessible nodes inside every container.
+    for (const part of [e.stack, e.header, e.chev, e.badge]) part.setAttribute("aria-hidden", "true");
   }
 
   function ensureEdge(id) {
@@ -120,10 +128,21 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     g.appendChild(line);
     g.appendChild(arrow);
     edgesG.appendChild(g);
-    e = { g, line, arrow };
+    e = { g, line, arrow, label: null };
     edgeEls.set(id, e);
     applyEdgeStyle(id, e);
     return e;
+  }
+
+  /** Lazily allocated so an unlabeled edge (the common case) stays a two-element group. */
+  function ensureEdgeLabel(e) {
+    if (e.label) return e.label;
+    e.label = make("text", "smv-edge-label");
+    // Decorative: edges are not tree items, so this text would otherwise linearize as a
+    // bare orphan string ("then") with no relationship to anything a reader can find.
+    e.label.setAttribute("aria-hidden", "true");
+    e.g.appendChild(e.label);
+    return e.label;
   }
 
   function setProps(el, props) {
@@ -170,6 +189,13 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     setData(e.g, "data-weight", st.weight);
     setData(e.g, "data-mode", st.mode);
     setProps(e.g, st.props);
+    if (st.label) {
+      ensureEdgeLabel(e);
+      if (e.label.textContent !== st.label) e.label.textContent = st.label;
+    } else if (e.label) {
+      e.label.remove();
+      e.label = null;
+    }
   }
 
   /**
@@ -199,10 +225,15 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     }
     for (const [id, ed] of edges) {
       edgeMeta.set(id, { source: ed.source, target: ed.target });
+      const weight = ed.weight > 1 ? ed.weight : null;
+      // A meta-edge aggregating >=2 source edges drops its label — the weight badge
+      // already carries the story, and there's no single label left to show.
+      const label = ed.label && !(ed.meta && weight) ? truncate(String(ed.label), EDGE_LABEL_MAX_W) : null;
       edgeStyle.set(id, {
         reversed: reversed.has(id) || ed.loop ? true : null,
-        weight: ed.weight > 1 ? ed.weight : null,
+        weight,
         mode: ed.data && ed.data.mode,
+        label,
         props: null, // the user style function is node-scoped (§5.6)
       });
       const e = edgeEls.get(id);
@@ -260,6 +291,14 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
       const { points, arrow } = clipEnds(ed.points, rectOf(vNodes.get(meta.source)), rectOf(vNodes.get(meta.target)));
       e.line.setAttribute("d", pathString(points));
       e.arrow.setAttribute("transform", `translate(${r2(arrow.x)},${r2(arrow.y)}) rotate(${deg(arrow.angle)})`);
+      if (e.label) {
+        // Midpoint of the CLIPPED path, nudged along the local normal so the halo
+        // doesn't sit directly on the stroke; opacity inherits from the group below.
+        const mid = pointAt(points, 0.5);
+        const nx = -Math.sin(mid.angle), ny = Math.cos(mid.angle);
+        e.label.setAttribute("x", String(r2(mid.x + nx * EDGE_LABEL_OFFSET)));
+        e.label.setAttribute("y", String(r2(mid.y + ny * EDGE_LABEL_OFFSET)));
+      }
       e.g.setAttribute("opacity", String(r2(ed.opacity ?? 1)));
     }
     for (const [id, e] of edgeEls) {
