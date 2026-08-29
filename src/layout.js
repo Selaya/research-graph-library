@@ -1,19 +1,27 @@
-// D2 — the frozen layout seam. M0–M2 delegate to @dagrejs/dagre; M3 swaps in the
-// in-house layered engine behind this exact signature:
+// D2 — the frozen layout seam. M0–M2 delegated to @dagrejs/dagre; M3 swaps in the
+// in-house layered engine (src/engine.js) behind this exact signature:
 //
 //   layout(view, opts) -> {
 //     nodes:  { [id]: {x, y, w, h} }          // x,y = center
 //     edges:  { [id]: { points, reversed? } } // points always run source -> target (true direction)
 //     bounds: { x, y, w, h }
+//     reversedEdgeIds: Set<string>            // persist -> opts.pinnedReversals (D3)
+//     order:  string[][]                      // persist -> opts.prevOrder (order stability)
 //   }
 //
-// Cycle handling (D3) lives HERE, not in dagre: we break cycles ourselves (with
+// This file is the SHELL around a pluggable solver: `opts.solver` (default `engineSolve`)
+// is handed an acyclic, cluster-edge-free graph and returns node rects, edge bend chains
+// and the per-rank order. `src/adapters/dagre.js` supplies the same contract on top of
+// @dagrejs/dagre for anyone who wants the old engine back — the default path (and every
+// bundle) imports no dagre at all.
+//
+// Cycle handling (D3) lives HERE, not in the solver: we break cycles ourselves (with
 // pinning via opts.pinnedReversals) so the caller knows exactly which edges are
-// loop-backs, then feed dagre an acyclic graph. Back edges and self-loops get
+// loop-backs, then feed the solver an acyclic graph. Back edges and self-loops get
 // deterministic consistent-side arc routing — by construction they can never
 // flip sides across re-layouts.
 
-import * as dagre from "@dagrejs/dagre";
+import { engineSolve } from "./engine.js";
 import { breakCycles } from "./cycles.js";
 import { sampleCubic } from "./path.js";
 
@@ -24,6 +32,7 @@ export const CONTAINER_PAD = { top: 28, side: 12, bottom: 12 };
 
 export function layout(view, opts = {}) {
   const o = { ...DEFAULTS, ...opts };
+  const solver = typeof o.solver === "function" ? o.solver : engineSolve;
   const nodes = view.nodes || [];
   const edges = view.edges || [];
 
@@ -32,45 +41,39 @@ export function layout(view, opts = {}) {
   const reversed = breakCycles(nodes, realEdges, o.pinnedReversals);
 
   const hasParents = nodes.some((n) => n.parent !== undefined);
-  const g = new dagre.graphlib.Graph({ compound: hasParents, multigraph: true });
-  g.setGraph({
-    rankdir: o.dir,
-    nodesep: o.nodesep,
-    ranksep: o.ranksep,
-    marginx: o.marginx,
-    marginy: o.marginy,
-  });
-  g.setDefaultEdgeLabel(() => ({}));
-
-  for (const n of nodes) g.setNode(n.id, { width: n.w, height: n.h });
-  if (hasParents) {
-    // INVARIANT: no edge in `view` may touch a node that has children — dagre throws on
-    // edges incident to a cluster. viewstate.js re-attaches those to the interior
-    // entry/exit child before we ever get here (D5).
-    for (const n of nodes) if (n.parent !== undefined) g.setParent(n.id, n.parent);
-  }
-  for (const e of realEdges) {
-    // Back edges are excluded from dagre entirely: we route them ourselves as
-    // consistent-side arcs, and feeding them (even flipped) would let dagre pull
-    // ranks around as the graph grows, jiggling the loop's shape.
-    if (reversed.has(e.id)) continue;
-    g.setEdge(e.source, e.target, {}, e.id);
-  }
-
-  dagre.layout(g);
+  // INVARIANT (solver contract): the edge set handed down is acyclic, and no edge touches
+  // a node that has children — viewstate.js re-attaches those to the interior entry/exit
+  // child before we ever get here (D5). Back edges are withheld entirely: we route them
+  // ourselves as consistent-side arcs, and feeding them (even flipped) would let the
+  // solver pull ranks around as the graph grows, jiggling the loop's shape.
+  const solved = solver(
+    {
+      nodes: nodes.map((n) => (hasParents ? { id: n.id, w: n.w, h: n.h, parent: n.parent } : { id: n.id, w: n.w, h: n.h })),
+      edges: realEdges.filter((e) => !reversed.has(e.id)).map((e) => ({ id: e.id, source: e.source, target: e.target })),
+    },
+    o
+  );
 
   const outNodes = {};
   for (const n of nodes) {
-    const d = g.node(n.id);
-    outNodes[n.id] = { x: d.x, y: d.y, w: d.width, h: d.height };
+    const d = (solved.nodes && solved.nodes[n.id]) || null;
+    outNodes[n.id] = d ? { x: d.x, y: d.y, w: d.w, h: d.h } : { x: 0, y: 0, w: n.w || 0, h: n.h || 0 };
   }
   if (hasParents) padContainers(nodes, outNodes, { ...CONTAINER_PAD, ...(o.containerPad || {}) });
 
   const outEdges = {};
   for (const e of realEdges) {
     if (reversed.has(e.id)) continue;
-    const d = g.edge(e.source, e.target, e.id);
-    outEdges[e.id] = { points: (d.points || []).map((p) => ({ x: p.x, y: p.y })) };
+    const d = (solved.edges && solved.edges[e.id]) || null;
+    const pts = d && d.points && d.points.length >= 2
+      ? d.points.map((p) => ({ x: p.x, y: p.y }))
+      // A solver that dropped the edge (dangling endpoint) still has to render as
+      // something: a straight centre-to-centre segment, which is what clipEnds expects.
+      : [
+          { x: outNodes[e.source].x, y: outNodes[e.source].y },
+          { x: outNodes[e.target].x, y: outNodes[e.target].y },
+        ];
+    outEdges[e.id] = { points: pts };
   }
   for (const e of realEdges) {
     if (!reversed.has(e.id)) continue;
@@ -84,14 +87,22 @@ export function layout(view, opts = {}) {
   }
 
   const bounds = computeBounds(outNodes, outEdges);
-  return { nodes: outNodes, edges: outEdges, bounds, reversedEdgeIds: reversed };
+  return {
+    nodes: outNodes,
+    edges: outEdges,
+    bounds,
+    reversedEdgeIds: reversed,
+    // Persisted by the caller and handed back as opts.prevOrder next time — the solver's
+    // order-stability channel (the role dagre's `useDynamic` played).
+    order: Array.isArray(solved.order) ? solved.order : [],
+  };
 }
 
 /**
- * D5 step 4 — give every cluster its exact chrome. dagre computes a cluster rect from
+ * D5 step 4 — give every cluster its exact chrome. A solver computes a cluster rect from
  * invisible border nodes, so its padding is a side effect of nodesep/ranksep; we grow
  * that rect to the union with (children bbox + containerPad) so the header strip always
- * clears the topmost child while siblings still never overlap what dagre reserved.
+ * clears the topmost child while siblings still never overlap what the solver reserved.
  * Deepest containers first, so a nested container is already padded when its parent
  * measures it.
  */

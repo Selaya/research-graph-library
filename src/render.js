@@ -25,6 +25,35 @@ const CHEV_DOWN = "M -4 -2.5 L 0 1.5 L 4 -2.5";  // expanded
 const EDGE_LABEL_MAX_W = 90;
 const EDGE_LABEL_OFFSET = 8;
 
+// Viewport culling (M3): only worth the per-frame outside-test cost above this element
+// count (nodes.size + edges.size) — below it the check costs more than it saves.
+const CULL_THRESHOLD = 150;
+
+/** True when the node's world-space rect has zero overlap with `rect` ({x,y,w,h}, x/y = top-left). */
+function nodeOutsideRect(n, rect) {
+  const w = Math.max(0, n.w), h = Math.max(0, n.h);
+  const left = n.x - w / 2, right = n.x + w / 2, top = n.y - h / 2, bottom = n.y + h / 2;
+  return right < rect.x || left > rect.x + rect.w || bottom < rect.y || top > rect.y + rect.h;
+}
+
+/** True when a single point sits strictly outside `rect`. */
+function pointOutsideRect(p, rect) {
+  return p.x < rect.x || p.x > rect.x + rect.w || p.y < rect.y || p.y > rect.y + rect.h;
+}
+
+/** An edge culls only when BOTH endpoints' rects AND every point on it are outside —
+ *  a long edge merely passing through the viewport must stay drawn. Missing endpoint
+ *  geometry (dangling meta lookup) never culls: we can't prove it's outside. */
+function edgeFullyOutside(ed, meta, vNodes, rect) {
+  const src = vNodes.get(meta.source), tgt = vNodes.get(meta.target);
+  if (!src || !tgt) return false;
+  if (!nodeOutsideRect(src, rect) || !nodeOutsideRect(tgt, rect)) return false;
+  const pts = ed.points;
+  if (!pts || !pts.length) return true;
+  for (let i = 0; i < pts.length; i++) if (!pointOutsideRect(pts[i], rect)) return false;
+  return true;
+}
+
 const r2 = (n) => Math.round((Number.isFinite(n) ? n : 0) * 100) / 100;
 const deg = (rad) => r2((Number.isFinite(rad) ? rad : 0) * 180 / Math.PI);
 
@@ -65,6 +94,22 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
   const edgeStyle = new Map();
   const edgeMeta = new Map(); // id -> {source, target}
 
+  // Viewport culling (M3): `fn()` returns the current world-space visible rect (or null
+  // to cull nothing) — set by index.js from viewport.visibleWorldRect(). Only consulted
+  // above CULL_THRESHOLD total elements (below it the check costs more than it saves).
+  let cullFn = null;
+  function setCull(fn) { cullFn = typeof fn === "function" ? fn : null; }
+
+  /** Toggle the culled bookkeeping on one element: data-culled attr + display:none.
+   *  The CSS home for [data-culled] would be styles.js, which this agent does not own —
+   *  set style.display directly instead (see M3 report). */
+  function setCulled(e, value) {
+    if (e.culled === value) return;
+    e.culled = value;
+    if (value) { e.g.setAttribute("data-culled", ""); e.g.style.display = "none"; }
+    else { e.g.removeAttribute("data-culled"); e.g.style.display = ""; }
+  }
+
   /** Containment depth decides paint order: children must land above their container. */
   function place(e) {
     for (const sib of nodesG.children) {
@@ -86,7 +131,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     const text = make("text", "smv-node-label");
     g.appendChild(rect);
     g.appendChild(text);
-    e = { g, rect, text, depth: (nodeStyle.get(id) || {}).depth || 0, container: false, collapsed: false };
+    e = { g, rect, text, depth: (nodeStyle.get(id) || {}).depth || 0, container: false, collapsed: false, culled: false };
     nodeEls.set(id, e);
     place(e);
     applyNodeStyle(id, e);
@@ -128,7 +173,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     g.appendChild(line);
     g.appendChild(arrow);
     edgesG.appendChild(g);
-    e = { g, line, arrow, label: null };
+    e = { g, line, arrow, label: null, culled: false };
     edgeEls.set(id, e);
     applyEdgeStyle(id, e);
     return e;
@@ -246,9 +291,17 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
   /** Per-frame geometry only — no styling, no measurement, no layout reads. */
   function frame(visual) {
     const vNodes = visual.nodes, vEdges = visual.edges;
+    // Cull only above the threshold — a null rect (fn unset, or no usable svg size, e.g.
+    // Node/fake-DOM tests) means "cull nothing", per the viewport.js contract.
+    const cullRect = cullFn && (vNodes.size + vEdges.size > CULL_THRESHOLD) ? cullFn() : null;
 
     for (const [id, n] of vNodes) {
       const e = ensureNode(id);
+      if (cullRect && nodeOutsideRect(n, cullRect)) {
+        setCulled(e, true);
+        continue; // skip geometry writes for fully-outside groups (hot-path saving)
+      }
+      setCulled(e, false);
       const w = Math.max(0, n.w), h = Math.max(0, n.h);
       e.g.setAttribute("transform", `translate(${r2(n.x - w / 2)},${r2(n.y - h / 2)})`);
       e.rect.setAttribute("width", String(r2(w)));
@@ -287,6 +340,11 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     for (const [id, ed] of vEdges) {
       const e = ensureEdge(id);
       const meta = edgeMeta.get(id) || {};
+      if (cullRect && edgeFullyOutside(ed, meta, vNodes, cullRect)) {
+        setCulled(e, true);
+        continue; // both endpoints AND every point outside — skip geometry writes
+      }
+      setCulled(e, false);
       // Clip against the CURRENT-frame rects so edges stay attached while nodes resize.
       const { points, arrow } = clipEnds(ed.points, rectOf(vNodes.get(meta.source)), rectOf(vNodes.get(meta.target)));
       e.line.setAttribute("d", pathString(points));
@@ -313,6 +371,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     viewportG,
     styleCommit,
     frame,
+    setCull,
     /** Phase marker for the condense choreography (D6): data-condense="src"|"reveal"|null. */
     mark(id, value) {
       const e = nodeEls.get(id);

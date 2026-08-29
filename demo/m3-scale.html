@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — M3 exit: 300-node scale + culling</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8; --card: #ffffff; --ink: #1b2230; --muted: #6b7488;
+    --line: rgba(128,138,160,.32); --accent: #5b6ef5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+             --line: rgba(128,138,160,.28); --accent: #8b9bff; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 78ch; }
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #stage {
+    height: 640px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Scale + culling <small>— M3 exit, 300-node synthetic graph</small></h1>
+  <p class="lede">
+    A synthetic 20-rank &times; 15-node layered DAG (300 nodes, ~500 edges — well above the
+    150-element culling threshold). The story: mount and fit (everything visible, nothing
+    should need culling), zoom hard into one corner (most of the graph now sits outside the
+    viewport and should cull), then a simulated 2-second pointer pan whose per-frame cost is
+    measured on the page's own <code>requestAnimationFrame</code> clock.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="run" type="button">Run scale exit</button>
+  <span id="phase">idle</span>
+</div>
+
+<div id="stage"></div>
+
+<div class="grid">
+  <div class="tile"><i>groups</i><span id="m-groups">—</span></div>
+  <div class="tile"><i>culled at fit</i><span id="m-fit">—</span></div>
+  <div class="tile"><i>culled zoomed</i><span id="m-zoom">—</span></div>
+  <div class="tile"><i>median frame</i><span id="m-frame">—</span></div>
+</div>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // Synthetic 20-rank x 15-node layered DAG. TB direction keeps the bounding box roughly
+  // square (a straight LR chain of this size would need k < viewport.MIN_K to fit, which
+  // would make "nothing culled at the initial fit" false for the wrong reason — this shape
+  // is chosen so it fits cleanly in #stage at construction time).
+  // ---------------------------------------------------------------------------
+  var RANKS = 20, PER_RANK = 15;
+  var spec = { nodes: [], edges: [] };
+  for (var r = 0; r < RANKS; r++) {
+    for (var i = 0; i < PER_RANK; i++) {
+      spec.nodes.push({ id: "n" + r + "-" + i, label: "N" + r + "." + i });
+    }
+  }
+  var eid = 0;
+  for (var r2 = 0; r2 < RANKS - 1; r2++) {
+    for (var i2 = 0; i2 < PER_RANK; i2++) {
+      var src = "n" + r2 + "-" + i2;
+      var t1 = "n" + (r2 + 1) + "-" + i2;
+      var t2 = "n" + (r2 + 1) + "-" + ((i2 + 1) % PER_RANK);
+      spec.edges.push({ id: "e" + (eid++), source: src, target: t1 });
+      if (t2 !== t1) spec.edges.push({ id: "e" + (eid++), source: src, target: t2 });
+    }
+  }
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), reportEl = $("#report"), runBtn = $("#run");
+  var mGroups = $("#m-groups"), mFit = $("#m-fit"), mZoom = $("#m-zoom"), mFrame = $("#m-frame");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#stage", spec, {
+      theme: "auto",
+      layout: { dir: "TB", nodesep: 28, ranksep: 56 },
+      animation: { duration: 300, easing: "cubic-out" },
+    });
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvM3Scale = { done: true, errors: errors, checks: {} };
+    return;
+  }
+  window.__g3 = g; // exposed for the e2e driver, mirroring window.__g in demo/m2.html
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /** Every rendered group under the mount root that carries an identity (node or edge). */
+  function allGroups() {
+    return document.querySelectorAll("#stage g[data-id]");
+  }
+  function culledCount() {
+    var list = allGroups(), n = 0;
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      if (el.hasAttribute("data-culled") || el.style.display === "none") n++;
+    }
+    return n;
+  }
+
+  /** Any NaN/Infinity that reached an attribute or a text node under the mount root. */
+  function scanNaN() {
+    var bad = [];
+    var all = document.querySelectorAll("#stage *");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      for (var a = 0; a < el.attributes.length; a++) {
+        var at = el.attributes[a];
+        if (/NaN|Infinity/.test(at.value)) bad.push((el.getAttribute("class") || el.nodeName) + "@" + at.name + "=" + at.value);
+      }
+    }
+    return bad;
+  }
+
+  /** Dispatch a real-shaped pointer drag across `ms` milliseconds on the shared rAF clock,
+   *  recording the wall-time delta between consecutive frames. This exercises the exact
+   *  path a real pan takes (viewport's pointer handlers -> index.js's recull -> renderer
+   *  .frame), which is what "per-frame cost" is meant to measure — not a synthetic no-op
+   *  loop. Returns {median, mean, max, count} in ms. */
+  function measurePan(ms) {
+    return new Promise(function (resolve) {
+      var svg = g.renderer.svg;
+      var pid = 909090;
+      var x = 300, y = 300;
+      var deltas = [];
+      var last = performance.now();
+      var elapsed = 0;
+      var started = false;
+
+      function fire(type, cx, cy) {
+        var ev;
+        try {
+          ev = new PointerEvent(type, {
+            clientX: cx, clientY: cy, bubbles: true, cancelable: true,
+            pointerId: pid, pointerType: "mouse", button: 0, isPrimary: true,
+          });
+        } catch (e) {
+          // jsdom-less headless chromium always has PointerEvent; this is defensive only.
+          ev = new MouseEvent(type, { clientX: cx, clientY: cy, bubbles: true, cancelable: true });
+        }
+        svg.dispatchEvent(ev);
+      }
+
+      function frame(now) {
+        var dt = now - last;
+        last = now;
+        if (started) deltas.push(dt);
+        started = true;
+        elapsed += dt;
+
+        x = 300 + Math.sin(elapsed / 140) * 90;
+        y = 300 + Math.cos(elapsed / 210) * 60;
+        fire("pointermove", x, y);
+
+        if (elapsed < ms) {
+          requestAnimationFrame(frame);
+        } else {
+          fire("pointerup", x, y);
+          deltas.sort(function (a, b) { return a - b; });
+          var n = deltas.length;
+          var median = n ? deltas[Math.floor(n / 2)] : NaN;
+          var mean = n ? deltas.reduce(function (a, b) { return a + b; }, 0) / n : NaN;
+          var max = n ? deltas[n - 1] : NaN;
+          resolve({ median: median, mean: mean, max: max, count: n });
+        }
+      }
+      fire("pointerdown", x, y);
+      requestAnimationFrame(frame);
+    });
+  }
+
+  var checks = {};
+
+  async function runExit() {
+    if (window.__smvM3Scale) return;
+    runBtn.disabled = true;
+
+    phaseEl.textContent = "settling initial fit…";
+    await sleep(400); // mount's zero-duration initial commit completes on the next tick
+
+    var groups = allGroups().length;
+    checks.totalNodes = spec.nodes.length;
+    checks.totalEdges = spec.edges.length;
+    checks.totalGroups = groups;
+    mGroups.textContent = String(groups);
+
+    checks.culledAtFit = culledCount();
+    mFit.textContent = String(checks.culledAtFit);
+
+    phaseEl.textContent = "zooming into a corner…";
+    g.viewport.zoomBy(40, { x: 0, y: 0 }); // clamps to MAX_K=4, anchored at the stage's top-left
+    // A programmatic transform change fires no scene frame — a real pan/zoom re-arms
+    // culling via a pointermove on the svg (INTERNALS "Culling" contract); do the same here.
+    g.renderer.svg.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 1, clientY: 1, bubbles: true, cancelable: true, pointerId: 424242,
+    }));
+    await sleep(100);
+
+    checks.culledZoomed = culledCount();
+    mZoom.textContent = String(checks.culledZoomed);
+
+    phaseEl.textContent = "measuring a 2s pan…";
+    var pan = await measurePan(2000);
+    checks.frameMedianMs = pan.median;
+    checks.frameMeanMs = pan.mean;
+    checks.frameMaxMs = pan.max;
+    checks.frameSamples = pan.count;
+    mFrame.textContent = (Number.isFinite(pan.median) ? pan.median.toFixed(2) : "?") + "ms";
+
+    // Put the viewport back for a clean final screenshot/state.
+    g.fitView({ animate: false });
+    await sleep(150);
+
+    checks.nan = scanNaN();
+
+    window.__smvM3Scale = { done: true, errors: errors, checks: checks };
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    reportEl.textContent =
+      "nodes/edges/groups     " + checks.totalNodes + " / " + checks.totalEdges + " / " + checks.totalGroups + "\n" +
+      "culled at fit           " + checks.culledAtFit + "\n" +
+      "culled zoomed in        " + checks.culledZoomed + "\n" +
+      "pan frame median/mean   " + checks.frameMedianMs.toFixed(2) + "ms / " + checks.frameMeanMs.toFixed(2) + "ms (" + checks.frameSamples + " samples)\n" +
+      "NaN in DOM              " + (checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
+      "errors                  " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  runBtn.addEventListener("click", runExit);
+  if (AUTO) {
+    runExit().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      window.__smvM3Scale = { done: true, errors: errors, checks: checks };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

@@ -13,6 +13,20 @@ function properlyIntersects(a1, a2, b1, b2) {
   return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
 }
 
+/**
+ * The dagre-era crossing counts, measured on the M2 layout (`@dagrejs/dagre` 3.1.1) for
+ * each golden fixture just before the M3 solver swap, and reproducible at any time with:
+ *
+ *   import { dagreLayout } from "../../src/adapters/dagre.js";
+ *   countCrossings(Object.values(dagreLayout(fixtureDiamond(), OPTS).edges)
+ *     .filter((e) => !e.reversed).map((e) => e.points));
+ *
+ * These are the M3 non-regression bar (INTERNALS §Gates): the in-house engine must draw
+ * each fixture with AT MOST this many crossings. Hard-coded on purpose — the bar must not
+ * move when the engine does, and the test must not need dagre installed to run.
+ */
+export const DAGRE_CROSSINGS = { diamond: 0, loop: 0, selfloop: 0 };
+
 /** Count pairwise crossings between the polylines in `edgePointsList` (points per edge). */
 export function countCrossings(edgePointsList) {
   let count = 0;

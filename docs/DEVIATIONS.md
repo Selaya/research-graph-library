@@ -20,7 +20,12 @@ the mental-map violation D3's pinning exists to prevent. Excluding the edge make
 overlapping appends in `test/e2e-m0.mjs`), at the cost of loops not pulling their
 endpoints closer together in rank. For the human-scale graphs in scope, side-stability
 won over compaction. The `reversed` tag still feeds styling and token loop-back
-semantics exactly as D3 specifies. Revisit at M3 when the in-house engine owns ranking.
+semantics exactly as D3 specifies.
+
+**M3 update:** revisited and kept. The in-house engine owns ranking now, and the shell
+withholds back edges from it for the same reason — the solver contract (INTERNALS §M3)
+states the acyclic input as an invariant, and `test/layout.test.js` asserts the shell
+never hands a reversed edge down.
 
 ## 2. Edges to an *expanded* container attach to an interior entry/exit child (D5)
 
@@ -44,8 +49,13 @@ performs the space reservation and sibling reflow in one pass (that is what D2 c
 for); a post-pass grows each cluster rect to the union of dagre's reservation and
 (children bbox + header/side padding) so the 28px header strip always clears children.
 Same result as the four steps — containers size to content, siblings never overlap —
-with dagre doing steps 1–3. The literal four-step pipeline becomes the M3 in-house
-engine's job, as the plan's M3 milestone already states.
+with dagre doing steps 1–3.
+
+**M3 update:** unchanged, with the in-house engine in dagre's place. `engine.js` reserves
+the cluster corridor with border dummies per spanned rank and emits a container rect
+covering its children + 8px; `padContainers` still grows that to clear the 28px header
+strip. The post-pass survives the swap verbatim — it was written against the seam's
+output, not against dagre.
 
 ## 4. Mode B realizes D4's token↔morph rule by rewriting the log, not by carrying progress (D4)
 
@@ -121,3 +131,100 @@ carry it. Separately, nothing prevented a page attaching both a11y surfaces — 
 documented `attachA11yTable(g, …)` snippet does not tell the caller to pass `a11y: false`
 — which made assistive tech read every node twice; exposing exactly one of the two keeps
 either configuration correct.
+
+## 8. M3 "parity" with dagre is structural + crossing non-regression, not coordinate identity (D2)
+
+**Plan:** the in-house engine is "gated on golden-file parity tests and a crossing-count
+non-regression."
+
+**Implementation (`test/layout.test.js`, `test/golden/*`, `test/engine-parity.test.js`):**
+the goldens were **regenerated** at the swap, and the gate is defined as:
+
+- every forward edge strictly advances along the rank axis;
+- no two sibling nodes overlap, same-rank neighbours keep ≥ `nodesep`, children stay
+  strictly inside their container rect (post-`padContainers`);
+- per-fixture crossings ≤ the **hard-coded dagre-era count** (`DAGRE_CROSSINGS` in
+  `test/golden/crossing.js`: diamond 0, loop 0, selfloop 0 — measured on
+  `@dagrejs/dagre` 3.1.1 immediately before the swap, and re-measurable at any time via
+  `dagreLayout` from the adapter);
+- `test/engine-parity.test.js` additionally runs both solvers over the fixtures plus 40
+  seeded synthetics and requires `crossings(engine) ≤ crossings(dagre)` on goldens,
+  `≤ +2` on synthetics (observed: never worse, 20 vs 29 in total);
+- shell behaviour (back edges below the flow for LR, self-loop side arcs, pinning) is
+  unchanged and still asserted by the same tests, unmodified in spirit.
+
+**Why:** "golden-file parity" cannot mean *coordinate-identical to dagre* — a different
+engine that reproduced dagre's coordinates would be dagre. Two differences are
+structural and intended: (a) edge points now start and end at node **centres** rather
+than on the node border (`clipEnds` in `path.js` trims either form identically, verified
+over both solvers' output), and (b) an adjacent-rank edge is **2 points**, where dagre
+always emitted 3 because it doubles ranks to make room for edge labels. Coordinates are
+also quantized to 1e-4 px. The goldens therefore still do their real job — they pin
+*this* engine byte-for-byte, so an unintended layout change fails loudly — while the
+cross-engine promise is the invariant + crossing bar above.
+
+One behaviour genuinely lost in the swap: **parallel edges between the same
+adjacent-rank pair now get identical polylines**, where dagre bent them apart via its
+intermediate-rank dummy. Multi-edges spanning two or more ranks still separate. Fanning
+coincident edges is a *rendering* concern, not a solver one, so it is not being added to
+`engine.js`; if it is ever wanted it belongs in `render.js`/`path.js`.
+
+Two facts worth recording from the parity run: the engine reproduces dagre's node
+coordinates exactly on the diamond fixture (with B/C mirrored), and **dagre 3.1.1 itself
+throws `Not possible to find intersection inside of the rectangle` on 3 of the 40 seeded
+compound synthetics** — the engine lays out all 40. The parity test tolerates dagre
+crashing (skips that comparison, still requires ≥30 comparable graphs) rather than
+pretending it did not happen.
+
+## 9. dagre survives as an optional adapter, not a dependency (D2/D11)
+
+**Plan / M3:** "dagre becomes an optional ESM adapter."
+
+**Implementation (`src/adapters/dagre.js`, `package.json`):** `layout()` is now a shell
+around a pluggable `opts.solver` (default `engineSolve`); `dagreSolver`/`dagreLayout` are
+the M2-era invocation, verbatim, behind that seam. `@dagrejs/dagre` moved from
+`dependencies` to `devDependencies` + an **optional** `peerDependency`, exported as
+`sparkle-motion-vizualizer/adapters/dagre`. `scripts/build.js` hard-fails if the string
+`@dagrejs`/`graphlib` appears in any bundle, or if `dagre` appears in either minified one.
+
+Recorded because it changes the install contract: nothing on the default path imports
+dagre, so a consumer who wants the adapter installs the peer themselves. Verified
+equivalence at the swap: `dagreLayout` reproduces all three pre-M3 goldens byte-for-byte.
+
+## 10. Compositor offload: deferred, pending the verify agent's profiling (D1)
+
+**Plan:** "Selective compositor offload for non-choreographed motion (profiled)" —
+explicitly "a profiling-driven M3 optimization, not a design premise."
+
+**Implementation:** not built. The decision gate is the verify agent's 300-node headless
+profile: if the median frame is ≤ 8ms, the entry stands as *"not justified at v1 scale"*
+and no compositor path is added. Viewport culling — the other half of that milestone
+line — **is** built (`renderer.setCull` + `viewport.visibleWorldRect`, engaged only above
+150 elements, wired in `index.js` and re-armed on pan/zoom).
+
+**Why:** D1's own rationale argues *against* splitting motion across the compositor and
+main threads (edges visibly detaching from nodes under jank), and the plan makes the
+optimization conditional on measurement. Building it unmeasured would trade the one-clock
+guarantee for a speed-up nobody has shown is needed.
+
+## 11. Gantt/temporal layout mode: skipped (M3)
+
+**Plan:** "Gantt/temporal layout mode (x = time, sweeping-line scrubber) **if demanded**."
+
+**Implementation:** not built. No demand has materialized, and the plan's own condition is
+explicit. The solver seam (item 9) is what makes it cheap later: a temporal mode is another
+`opts.solver`, not a fork of `layout.js`.
+
+## 12. Known M3 follow-up: token pulses are not culling-aware (M3 culling contract)
+
+**Contract:** "culling must not corrupt tokens whose node is culled (skip drawing their
+pulse when outside)."
+
+**Status:** the renderer's culling is complete and correct (geometry writes skipped,
+`data-culled` + `display:none` on the group, restored on re-entry). `src/run-render.js`
+reads token positions from `scene.visual`, which is culling-agnostic by design, so a
+token pulse anchored to a culled node is still drawn — a floating pulse with no visible
+node under it, at the far edge of a 150+ element graph. `run-render.js` is not in the M3
+file-ownership table, so the fix (check `data-culled` / `display` on
+`renderer.node(id)` before drawing the pulse) is deliberately left as a scoped follow-up
+rather than an out-of-lane edit. Nothing else about culling depends on it.

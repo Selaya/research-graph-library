@@ -19,6 +19,10 @@
     "./a11y-table": {
       "types": "./types/a11y-table.d.ts",
       "default": "./src/a11y-table.js"
+    },
+    "./adapters/dagre": {
+      "types": "./types/adapters-dagre.d.ts",
+      "default": "./src/adapters/dagre.js"
     }
   },
   "bin": {
@@ -38,10 +42,16 @@
     "check": "npm run test && npm run build && npm run size"
   },
   "license": "MIT",
-  "dependencies": {
-    "@dagrejs/dagre": "3.1.1"
+  "peerDependencies": {
+    "@dagrejs/dagre": "^3.1.1"
+  },
+  "peerDependenciesMeta": {
+    "@dagrejs/dagre": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@dagrejs/dagre": "3.1.1",
     "esbuild": "0.28.2",
     "playwright-core": "^1.62.1",
     "typescript": "5.9.3"

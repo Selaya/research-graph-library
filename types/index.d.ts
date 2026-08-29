@@ -99,7 +99,45 @@ export interface LayoutResult {
   edges: Record<string, LayoutEdgeResult>;
   bounds: Rect;
   reversedEdgeIds: Set<string>;
+  /** Final per-rank id sequences (real nodes only). Persisted by the caller and passed
+   *  back as `LayoutOpts.prevOrder` for order stability across re-layouts (M3). */
+  order: string[][];
 }
+
+// ---------------------------------------------------------------------------
+// The layout solver seam (M3): layout() is a shell around a pluggable solver.
+// Default is the in-house engine; `sparkle-motion-vizualizer/adapters/dagre`
+// supplies the same contract on top of the optional @dagrejs/dagre peer.
+// ---------------------------------------------------------------------------
+
+export interface LayoutViewNode {
+  id: string;
+  w?: number;
+  h?: number;
+  parent?: string;
+}
+
+export interface LayoutViewEdge {
+  id: string;
+  source: string;
+  target: string;
+}
+
+/** What the shell hands a solver: acyclic, and no edge incident to a node with children. */
+export interface SolverInput {
+  nodes: LayoutViewNode[];
+  edges: LayoutViewEdge[];
+}
+
+export interface SolverResult {
+  /** x,y are centers; a container's rect covers its children. */
+  nodes: Record<string, Rect>;
+  /** Bend chain included, >= 2 points, running source -> target. */
+  edges: Record<string, { points: Point[] }>;
+  order: string[][];
+}
+
+export type LayoutSolver = (input: SolverInput, opts: LayoutOpts) => SolverResult;
 
 // ---------------------------------------------------------------------------
 // Options
@@ -115,6 +153,11 @@ export interface LayoutOpts {
   ranksep?: number;
   marginx?: number;
   marginy?: number;
+  /** Swap the layered solver (M3). Defaults to the in-house engine. */
+  solver?: LayoutSolver;
+  /** Previous per-rank order, for stability across re-layouts. mount() persists this
+   *  itself; pass one only when driving layout() directly. */
+  prevOrder?: string[][];
   [key: string]: unknown;
 }
 

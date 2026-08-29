@@ -18,10 +18,15 @@ import {
   type Run,
   type StoryboardStep,
   type Timeline,
+  type LayoutResult,
+  type LayoutSolver,
+  type SolverInput,
+  type SolverResult,
 } from "./index.js";
 
 import { exportSVG, exportPNG } from "./export.js";
 import { attachA11yTable, computeRows } from "./a11y-table.js";
+import { dagreSolver, dagreLayout } from "./adapters-dagre.js";
 
 const spec: GraphSpec = {
   nodes: [
@@ -88,6 +93,25 @@ g.style((n: NodeSpec) => (n.data && n.data.status === "done" ? { "--smv-fill": "
 g.theme("dark");
 g.fitView({ pad: 24, animate: true });
 g.layout({ dir: "TB" });
+
+// ---- M3: the layout solver seam + the optional dagre adapter --------------------------
+const solver: LayoutSolver = dagreSolver;
+g.layout({ dir: "LR", solver, prevOrder: [["ingest"], ["clean"]] });
+
+const solved: SolverResult = solver(
+  { nodes: [{ id: "a", w: 100, h: 36 }], edges: [] } satisfies SolverInput,
+  { dir: "LR" }
+);
+const ranks: string[][] = solved.order;
+void ranks;
+
+const adapted: LayoutResult = dagreLayout(
+  { nodes: [{ id: "a", w: 100, h: 36 }], edges: [] },
+  { dir: "LR" }
+);
+const persistedOrder: string[][] = adapted.order;
+const persistedPins: Set<string> = adapted.reversedEdgeIds;
+void [persistedOrder, persistedPins];
 
 // ---- query sugar ----------------------------------------------------------------------
 const doneNodes: NodeSpec[] = g.nodes({ data: { status: "done" } });

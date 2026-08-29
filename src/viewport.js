@@ -89,6 +89,18 @@ export function createViewport(svgEl, viewportG, ticker) {
     setNow(pt.x - world.x * k, pt.y - world.y * k, k);
   }
 
+  /** World-space rect currently on screen, padded (M3 culling). Returns null when the svg
+   *  has no usable client size (Node / fake DOM in tests) — callers must then cull nothing. */
+  function visibleWorldRect(pad = 200) {
+    const r = typeof svgEl.getBoundingClientRect === "function" ? svgEl.getBoundingClientRect() : null;
+    const w = (r && r.width) || svgEl.clientWidth;
+    const h = (r && r.height) || svgEl.clientHeight;
+    if (!(w > 0) || !(h > 0)) return null;
+    const tl = screenToWorld({ x: 0, y: 0 });
+    const br = screenToWorld({ x: w, y: h });
+    return { x: tl.x - pad, y: tl.y - pad, w: br.x - tl.x + 2 * pad, h: br.y - tl.y + 2 * pad };
+  }
+
   function fit(bounds, pad = 24, animate = false) {
     if (!bounds) return;
     const { w: W, h: H } = size();
@@ -207,6 +219,7 @@ export function createViewport(svgEl, viewportG, ticker) {
     worldToScreen: (pt) => worldToScreen(pt),
     anchor,
     contains,
+    visibleWorldRect,
     zoomBy(factor, at) { zoomAbout(at || { x: size().w / 2, y: size().h / 2 }, factor); userMoved = true; },
     destroy() {
       if (destroyed) return;

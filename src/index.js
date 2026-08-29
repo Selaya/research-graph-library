@@ -90,6 +90,7 @@ export function mount(el, spec = {}, opts = {}) {
 
   let styleFn = null;
   let pinnedReversals = new Set();   // FAS pinning persisted across layouts (D3)
+  let lastOrder = [];                // per-rank solver order persisted across layouts (M3)
   let last = null;                   // previous layout result
   let transition = null;
   let batching = 0;
@@ -99,6 +100,31 @@ export function mount(el, spec = {}, opts = {}) {
   let destroyed = false;
 
   scene.onFrame((visual) => renderer.frame(visual));
+
+  // M3 culling — the renderer asks for the visible world rect every frame it draws, and
+  // viewport returns null (= cull nothing) whenever the svg has no usable size, e.g. in
+  // Node/fake-DOM tests. render.js only engages the check above its own element threshold.
+  renderer.setCull(() => viewport.visibleWorldRect());
+
+  // Panning/zooming moves the rect without moving the graph, so no scene frame is due —
+  // re-arm by repainting from the current visual state, but only when the transform has
+  // actually changed (a pointermove that pans nothing must stay free).
+  let lastCullSig = null;
+  function recull() {
+    if (destroyed) return;
+    const t = viewport.transform;
+    const sig = `${t.x},${t.y},${t.k}`;
+    if (sig === lastCullSig) return;
+    lastCullSig = sig;
+    renderer.frame(scene.visual);
+  }
+  const svgEl = renderer.svg;
+  const cullListens = svgEl && typeof svgEl.addEventListener === "function";
+  if (cullListens) {
+    svgEl.addEventListener("pointermove", recull);
+    svgEl.addEventListener("pointerup", recull);
+    svgEl.addEventListener("wheel", recull, { passive: true });
+  }
 
   /** Entering nodes bloom from a neighbour's previous position rather than popping in. */
   function enterFromFor(res, v) {
@@ -126,10 +152,14 @@ export function mount(el, spec = {}, opts = {}) {
   function relayout({ focal = null, duration, enterFrom, exitTo, easeOverride } = {}) {
     if (destroyed) return thenable(Promise.resolve({ canceled: true }), () => {});
     const v = vs.view();
-    const res = layout(v, { ...layoutOpts, pinnedReversals });
+    // M3 — `prevOrder` is the solver's order-stability channel, the exact counterpart of
+    // pinnedReversals: feed the last drawing's per-rank order back in and appending a node
+    // cannot reshuffle the ranks around it (mental-map preservation, D3's sibling rule).
+    const res = layout(v, { ...layoutOpts, pinnedReversals, prevOrder: lastOrder });
     pinnedReversals = res.reversedEdgeIds || new Set();
+    lastOrder = res.order || [];
 
-    // Containers get their real (dagre-computed) box here, so labels truncate to it.
+    // Containers get their real (solver-computed) box here, so labels truncate to it.
     const sizes = { ...v.sizes };
     for (const [id, r] of Object.entries(res.nodes)) sizes[id] = { w: r.w, h: r.h };
     renderer.styleCommit({
@@ -301,6 +331,7 @@ export function mount(el, spec = {}, opts = {}) {
         spec: store.snapshot(),
         collapsed: [...vs.collapsed],
         reversals: [...pinnedReversals],
+        order: lastOrder.map((rank) => [...rank]),
         runTime: runCtl ? runCtl.time() : 0,
         runOpts: runCtl ? runCtl.options() : null,
       };
@@ -316,6 +347,11 @@ export function mount(el, spec = {}, opts = {}) {
       // dashed back-edge arc and wrong ranks in a graph with no cycle, or the wrong edge
       // cut in one that has. Restore the pins the snapshot was taken with instead.
       pinnedReversals = new Set(snap.reversals || []);
+      // The solver order is the same kind of thing (G2): it belongs to the topology that
+      // produced it, so a backward seek that restores an older spec has to restore the
+      // order that spec was drawn with — otherwise the restored drawing is seeded with a
+      // *future* order and lands in a different arrangement than the one being replayed.
+      lastOrder = (snap.order || []).map((rank) => [...rank]);
       const tr = relayout({});
       // Re-seat the SAME transport in place: g.run() identity (and every listener on it)
       // has to survive a backward seek.
@@ -681,6 +717,12 @@ export function mount(el, spec = {}, opts = {}) {
       if (transport) { transport.destroy(); transport = null; }
       if (preset) { preset.destroy(); preset = null; }
       if (sb) { sb.pause(); sb = null; }
+      if (cullListens) {
+        svgEl.removeEventListener("pointermove", recull);
+        svgEl.removeEventListener("pointerup", recull);
+        svgEl.removeEventListener("wheel", recull);
+      }
+      renderer.setCull(null);
       disposeRun();
       scene.destroy();
       viewport.destroy();
