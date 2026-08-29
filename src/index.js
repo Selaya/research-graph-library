@@ -90,6 +90,8 @@ export function mount(el, spec = {}, opts = {}) {
 
   let styleFn = null;
   let pinnedReversals = new Set();   // FAS pinning persisted across layouts (D3)
+  let lastOrder = [];                // per-rank solver order persisted across layouts (M3)
+  let lastLayers = [];               // the same per-rank order WITH edge bends (M3)
   let last = null;                   // previous layout result
   let transition = null;
   let batching = 0;
@@ -99,6 +101,31 @@ export function mount(el, spec = {}, opts = {}) {
   let destroyed = false;
 
   scene.onFrame((visual) => renderer.frame(visual));
+
+  // M3 culling — the renderer asks for the visible world rect every frame it draws, and
+  // viewport returns null (= cull nothing) whenever the svg has no usable size, e.g. in
+  // Node/fake-DOM tests. render.js only engages the check above its own element threshold.
+  renderer.setCull(() => viewport.visibleWorldRect());
+
+  // Panning/zooming moves the rect without moving the graph, so no scene frame is due —
+  // re-arm by repainting from the current visual state, but only when the transform has
+  // actually changed (a pointermove that pans nothing must stay free). Driven off the
+  // viewport itself rather than the svg's pointer events: fitView(), viewport.zoomBy() and
+  // every tween tick move the rect with no pointer event anywhere in sight, and used to
+  // leave whatever the previous transform had hidden hidden for good.
+  let lastCullSig = null;
+  function recull() {
+    if (destroyed) return;
+    // A live scene transition already repaints from `visual` every tick, and renderer.frame
+    // re-reads the cull rect each time — piling a second frame on top of it buys nothing.
+    if (scene.transition) return;
+    const t = viewport.transform;
+    const sig = `${t.x},${t.y},${t.k}`;
+    if (sig === lastCullSig) return;
+    lastCullSig = sig;
+    renderer.frame(scene.visual);
+  }
+  const offCull = viewport.onChange(recull);
 
   /** Entering nodes bloom from a neighbour's previous position rather than popping in. */
   function enterFromFor(res, v) {
@@ -126,10 +153,15 @@ export function mount(el, spec = {}, opts = {}) {
   function relayout({ focal = null, duration, enterFrom, exitTo, easeOverride } = {}) {
     if (destroyed) return thenable(Promise.resolve({ canceled: true }), () => {});
     const v = vs.view();
-    const res = layout(v, { ...layoutOpts, pinnedReversals });
+    // M3 — `prevOrder` is the solver's order-stability channel, the exact counterpart of
+    // pinnedReversals: feed the last drawing's per-rank order back in and appending a node
+    // cannot reshuffle the ranks around it (mental-map preservation, D3's sibling rule).
+    const res = layout(v, { ...layoutOpts, pinnedReversals, prevOrder: lastOrder, prevLayers: lastLayers });
     pinnedReversals = res.reversedEdgeIds || new Set();
+    lastOrder = res.order || [];
+    lastLayers = res.layers || [];
 
-    // Containers get their real (dagre-computed) box here, so labels truncate to it.
+    // Containers get their real (solver-computed) box here, so labels truncate to it.
     const sizes = { ...v.sizes };
     for (const [id, r] of Object.entries(res.nodes)) sizes[id] = { w: r.w, h: r.h };
     renderer.styleCommit({
@@ -301,6 +333,8 @@ export function mount(el, spec = {}, opts = {}) {
         spec: store.snapshot(),
         collapsed: [...vs.collapsed],
         reversals: [...pinnedReversals],
+        order: lastOrder.map((rank) => [...rank]),
+        layers: lastLayers.map((rank) => [...rank]),
         runTime: runCtl ? runCtl.time() : 0,
         runOpts: runCtl ? runCtl.options() : null,
       };
@@ -316,6 +350,12 @@ export function mount(el, spec = {}, opts = {}) {
       // dashed back-edge arc and wrong ranks in a graph with no cycle, or the wrong edge
       // cut in one that has. Restore the pins the snapshot was taken with instead.
       pinnedReversals = new Set(snap.reversals || []);
+      // The solver order is the same kind of thing (G2): it belongs to the topology that
+      // produced it, so a backward seek that restores an older spec has to restore the
+      // order that spec was drawn with — otherwise the restored drawing is seeded with a
+      // *future* order and lands in a different arrangement than the one being replayed.
+      lastOrder = (snap.order || []).map((rank) => [...rank]);
+      lastLayers = (snap.layers || []).map((rank) => [...rank]);
       const tr = relayout({});
       // Re-seat the SAME transport in place: g.run() identity (and every listener on it)
       // has to survive a backward seek.
@@ -428,6 +468,34 @@ export function mount(el, spec = {}, opts = {}) {
     on: (type, fn) => tbus.on(type, fn),
   };
 
+  /** D6 — condense/split mint ids the solver has never seen, and an unknown id sorts after
+   *  everything known (INTERNALS: "append unknown ids in input order"), i.e. at the tail of
+   *  its rank. That flatly contradicts the choreography, which flies the new node out of the
+   *  sources' old centroid: it blooms there and then jumps past every untouched sibling on
+   *  the way to the end of the rank. Give the new ids the slot the sources held instead —
+   *  the merge happened *there*, so that is where the mental map expects the result. */
+  function reseat(newIds, sourceIds) {
+    const src = new Set(sourceIds);
+    const fresh = [...new Set(newIds)].filter((id) => !src.has(id));
+    if (!fresh.length) return;
+    const seat = (ranks) => {
+      let placed = false;
+      const out = ranks.map((rank) => {
+        const row = [];
+        for (const id of rank) {
+          if (fresh.includes(id)) continue; // never name a fresh id twice
+          if (!src.has(id)) { row.push(id); continue; }
+          if (!placed) { row.push(...fresh); placed = true; }
+        }
+        return row;
+      });
+      if (!placed) (out[0] || (out[0] = [])).push(...fresh);
+      return out;
+    };
+    lastOrder = seat(lastOrder);
+    lastLayers = seat(lastLayers);
+  }
+
   // Handed to the choreography modules: everything they need, nothing DOM-shaped, so
   // they stay testable against a fake host (D6).
   const internals = {
@@ -435,6 +503,7 @@ export function mount(el, spec = {}, opts = {}) {
     get reduced() { return reduced; },
     lastLayout: () => last,
     relayout,
+    reseat,
     mark(ids, value) { for (const id of ids) renderer.mark(id, value); },
   };
 
@@ -681,6 +750,8 @@ export function mount(el, spec = {}, opts = {}) {
       if (transport) { transport.destroy(); transport = null; }
       if (preset) { preset.destroy(); preset = null; }
       if (sb) { sb.pause(); sb = null; }
+      offCull();
+      renderer.setCull(null);
       disposeRun();
       scene.destroy();
       viewport.destroy();

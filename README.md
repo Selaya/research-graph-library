@@ -62,12 +62,17 @@ ESM for bundler users: `import { mount } from "sparkle-motion-vizualizer"`.
 - **Pipeline preset** — duration chips, sum/max rollups, manual/auto badges, the
   `2h → 8s` odometer + delta badge when automation lands, a total-duration bar.
 - **Sane viewport** — anchored (the focal node holds still; the graph reflows around
-  it), zoom only on ctrl/cmd+scroll, `fitView()` when *you* ask.
+  it), zoom only on ctrl/cmd+scroll, `fitView()` when *you* ask. Past 150 elements,
+  groups fully outside the visible rect stop being drawn at all.
+- **Layered layout, in-house** — no dependencies at all since M3: cluster-aware ranking,
+  median ordering, order stability across re-layouts, all four directions. dagre is still
+  available as an optional adapter.
 
 ## API
 
 `mount(el, spec, opts) → g`. `el` is an element or a selector; `opts` takes
-`theme` (`auto`/`light`/`dark`), `layout` (`{dir:"LR"|"TB", nodesep, ranksep, …}`),
+`theme` (`auto`/`light`/`dark`), `layout` (`{dir:"LR"|"RL"|"TB"|"BT", nodesep, ranksep,
+marginx, marginy, solver}` — see **Layout** below),
 `animation` (`{duration, easing}`), `controls`, `preset`, `storyboard`, `autoplay`,
 `a11y: false` to opt out of the ARIA layer, and `interaction: { tapToggle: false }` to
 turn off tap/click-to-toggle on container nodes (on by default; a tap that travels past
@@ -156,6 +161,47 @@ announced: with the tree on (the default) the table is `aria-hidden` and serves 
 visual/structural fallback; mount with `{ a11y: false }` to make the table the accessible
 surface instead.
 
+**Layout.** Layered (Sugiyama-family) and **in-house** since M3 — `src/engine.js`, ~630
+lines, no dependencies: cluster-aware ranking (longest path + a tightening pass), dummy
+bend chains, median ordering sweeps with transpose and previous-order tie-breaks, and a
+coordinate pass that repairs every relaxation move with isotonic regression, so
+"≥ `nodesep` apart, never overlapping" is an invariant rather than a hope. It replaced
+`@dagrejs/dagre`, which cost 17.1KB gzip against the engine's 4.0KB.
+
+```js
+mount(el, spec, { layout: { dir: "LR", nodesep: 28, ranksep: 56, marginx: 20, marginy: 20 } });
+g.layout({ dir: "TB" });    // relayout + animate into the new direction
+```
+
+All four directions (`LR`/`RL`/`TB`/`BT`) are solved top-to-bottom internally and
+transposed on the way out, so they are exactly as good as each other. Order stability
+across re-layouts is automatic: `mount()` persists each layout's per-rank order (`order`,
+plus `layers` — the same sequences with each multi-rank edge's bends interleaved, because
+the real nodes alone do not determine a drawing) and feeds both back as `prevOrder` /
+`prevLayers`, the same way it pins cycle-breaking reversals. Relaying out an unchanged
+graph reproduces it exactly, appending a node does not reshuffle the ranks around it, and
+storyboard snapshots carry both so a backward scrub restores the drawing it is replaying.
+
+*Want dagre back?* It lives on as an optional adapter behind the same solver seam —
+install the optional peer and pass a solver:
+
+```
+npm install @dagrejs/dagre
+```
+```js
+import { mount } from "sparkle-motion-vizualizer";
+import { dagreSolver, dagreLayout } from "sparkle-motion-vizualizer/adapters/dagre";
+
+mount("#pipe", spec, { layout: { dir: "LR", solver: dagreSolver } });
+const result = dagreLayout(view, { dir: "LR" });   // or drive layout() directly
+```
+
+Nothing on the default path imports dagre — the build hard-fails if it appears in any
+bundle — so the adapter costs non-users nothing. A solver is just
+`(input, opts) → {nodes, edges, order, layers?}` (`layers` is the bend-stability channel;
+omit it and the shell simply returns `[]`); the shell keeps cycle breaking, back-edge and
+self-loop arcs, container padding and bounds either way.
+
 **Exports.** ESM-only entries (not in the IIFE, D11):
 
 ```js
@@ -180,8 +226,11 @@ Enforced by a hard-fail CI budget (`npm run size`):
 
 | bundle | min+gzip | budget |
 |---|---:|---:|
-| core (layout engine external) | ~34KB | <40KB |
-| full IIFE incl. dagre layout | ~50KB | <56KB (dagre era; <50KB from M3) |
+| core (layout engine external) | 36.22KB | <40KB |
+| full IIFE incl. in-house layout | 40.04KB | <50KB |
+
+The M3 engine swap took the shipped IIFE from **51.66KB → 40.04KB** gzip (dagre 17.1KB
+out, `engine.js` ~3.6KB in), which is what bought the tightened 50KB budget.
 
 ## Demos
 
@@ -197,17 +246,24 @@ Enforced by a hard-fail CI budget (`npm run size`):
 ```
 npm install
 npm test          # node --test unit suite + golden-file layout snapshots
-npm run size      # build ESM + IIFE and enforce the size budget
+npm run size      # build ESM + IIFE, verify no dagre leaked in, enforce the size budget
 npm run types     # tsc over types/check.ts (the hand-written .d.ts surface)
-node test/e2e-m0.mjs && node test/e2e-m1.mjs   # headless-chromium end-to-end checks
+node test/e2e-m0.mjs && node test/e2e-m1.mjs && node test/e2e-m2.mjs   # headless chromium
 ```
+
+`node test/golden/update.js` regenerates the layout goldens — only ever run deliberately,
+and it refuses to write a fixture whose crossing count regressed past the recorded
+dagre-era bar. `test/engine-parity.test.js` runs both solvers side by side (it needs the
+dev-installed `@dagrejs/dagre`).
 
 Design: `docs/PLAN.md` (decisions D1–D11, milestones), `docs/INTERNALS.md` (module
 contracts), `docs/research/` (landscape + critique the plan rests on).
 
-Status: M0 (walking skeleton), M1 (pipeline demo end to end) and M2 (live mode, split,
+Status: M0 (walking skeleton), M1 (pipeline demo end to end), M2 (live mode, split,
 edge labels, expand/collapse-all, query sugar, ARIA + table fallback, SVG/PNG export,
-`smv-pack`) complete; M3 (in-house layout engine, size/scale) tracked in
-`docs/PLAN.md` §7. Embedding: `docs/EMBED.md`.
+`smv-pack`) and M3 (in-house layered engine, dagre demoted to an optional adapter,
+viewport culling, IIFE under 50KB gzip) complete. Deliberate departures from the plan —
+including what "parity with dagre" was gated on, and what M3 skipped — are recorded in
+`docs/DEVIATIONS.md`. Embedding: `docs/EMBED.md`.
 
 License: MIT.

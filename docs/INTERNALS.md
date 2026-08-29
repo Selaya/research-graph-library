@@ -633,3 +633,165 @@ pointerup toggles the container through public `g.expand/collapse` ONLY when the
 stayed within a 6px slop and no second pointer joined (pinch). Wired by index.js unless
 `opts.interaction.tapToggle === false`; containers get `cursor: pointer`. Ships in the
 IIFE.
+
+---
+
+# M3 contracts (in-house layered engine · dagre adapter · size · culling)
+
+M2 is DONE and merged (351 tests, e2e-m0/1/2, size, types green). Do not regress it.
+
+**File ownership (hard rule — a file is edited ONLY by its owner):**
+
+| files | owner |
+|---|---|
+| `src/engine.js` + optional `src/engine/*.js` (new), `test/engine.test.js`, `test/engine-parity.test.js` | engine agent |
+| `src/render.js`, `src/viewport.js`, `test/cull.test.js` | culling agent |
+| `src/layout.js`, `src/adapters/dagre.js` (new), `src/index.js`, `package.json`, `scripts/*`, `types/*`, `test/golden/*`, `test/layout.test.js`, README, docs/DEVIATIONS.md | integration agent |
+| `demo/*`, `test/e2e-m3.mjs` | verify agent |
+
+## `src/engine.js` — the in-house layered solver (D2/M3), PURE, no deps
+
+```js
+engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},…]}},
+                             order: string[][], layers: string[][] }
+```
+
+- `input = { nodes: [{id, w, h, parent?}], edges: [{id, source, target}] }` with two
+  invariants the caller (layout.js shell) guarantees: the edge set is **acyclic** (back
+  edges already withheld) and **no edge touches a node that has children** (viewstate's
+  entry/exit re-attachment, D5). Multi-edges (same endpoints, distinct ids) and
+  disconnected components must work.
+- `opts = { dir:'LR'|'RL'|'TB'|'BT', nodesep, ranksep, marginx, marginy,
+  prevOrder?: string[][], prevLayers?: string[][], chromePad?: number }`. Implement
+  internally for TB; transpose/flip for the others.
+- Output: x,y are **centers**; container nodes (those that are some node's `parent`)
+  get a rect covering their children (the shell's `padContainers` adds chrome after —
+  engine padding just needs children strictly inside). Edge `points` include the bend
+  chain (dummy positions), ≥2 points, running source→target. `order` = final per-rank
+  id sequences (real nodes only) — the caller persists it and passes it back as
+  `prevOrder` for order stability across re-layouts (the dagre `useDynamic` role).
+- **`layers` is the other half of that channel, and it is not optional.** `order` names
+  only the real nodes, and a drawing is *not* determined by those alone: every
+  multi-rank edge's bends sit between them, and a container that spans a rank without
+  holding anything there sits somewhere among them too. Re-deriving those on each solve
+  made a re-layout start from a differently-scored arrangement than the one it was
+  supposed to reproduce, so some sweep looked "strictly better" and ranks nobody had
+  touched got reshuffled. `layers` = the same per-rank sequences with those items
+  interleaved as opaque tokens; the caller persists it beside `order` and hands it back
+  as `prevLayers`. **Contract: `engineSolve(g, {prevOrder, prevLayers})` fed its own
+  output is a fixed point in `order`, `layers`, `nodes` AND `edges`.** A solver that
+  cannot produce `layers` (the dagre adapter) omits it, and the shell degrades to `[]`.
+- `chromePad` is how much padding the CALLER will add around a container rect after the
+  solve (layout.js passes its `CONTAINER_PAD`). The solver reserves it in the rank axis;
+  without that the padded rect eats the neighbouring rank whenever `ranksep` is small.
+- Passes (plan D2/M3, keep it the simple heuristic ON PURPOSE):
+  1. **Nesting**: derive the cluster tree; constrain ranking so a cluster's nodes
+     occupy a contiguous rank interval (nesting border ranks: reserve a top/bottom
+     border rank contribution per cluster level, dagre-style, simplified is fine).
+  2. **Ranking**: longest-path, then one tightening pass (pull every node with slack
+     toward its tightest successor) so chains don't left-pack.
+  3. **Dummies**: split multi-rank edges into unit spans; per-cluster border dummies
+     per spanned rank so ordering keeps foreign nodes out of a cluster's interval.
+  4. **Ordering**: init from `prevOrder` (append unknown ids in input order), else DFS;
+     N≤8 alternating down/up **median** sweeps with transpose passes; **tie-breaks and
+     equal-crossing decisions always prefer the previous order** (stability beats one
+     crossing); keep the best-crossing result; cluster children stay contiguous within
+     a rank (sort by cluster block).
+     **A cluster's block order is global, not per-rank.** Which side of a sibling a
+     container's block sits on is decided once, for every rank it spans; letting each
+     rank pick from its own members lets a container sit left of a sibling on one rank
+     and right of it on the next, and since the emitted rect is the union of the
+     members' cells across all ranks, both siblings then get a rect spanning the whole
+     drawing — each containing the other's children.
+     **The search must be idempotent, not merely bounded**: it ends only once a full
+     run of sweeps started from the best arrangement fails to improve on it. Stopping
+     after a fixed sweep count leaves an order the next solve (which starts from that
+     best) can still beat, which is the fixed point above breaking.
+  5. **Coordinates**: rank axis = cumulative max-extent + ranksep; in-rank positions by
+     a few median-alignment relaxation sweeps (parent/child barycenter) with minimum
+     separation `nodesep` enforced left-to-right then right-to-left (priority: dummies
+     straighten first). NO Brandes–Köpf (plan explicitly ships the simpler heuristic).
+     Container chrome is **reserved, not assumed**: a border dummy is at least as wide
+     as the padding the rect grows by, its distance from the rect edge is what the
+     separation rule will demand of the first member inside, two nested borders are only
+     the nesting step apart (charging them a whole node's gap makes the alignment
+     targets unreachable at ≥2 levels and pools them instead), and the border-alignment
+     loop runs until the rects stop moving rather than for a fixed number of passes.
+     Two sibling containers whose rank spans overlap are grown to their common window,
+     so the band each reserves exists on every rank that can put them side by side.
+  6. Margins applied last; deterministic throughout (no Math.random, stable sorts).
+- Determinism: same input+opts → identical output, byte for byte.
+- Target ≤ ~10KB gzip alone. No imports beyond possibly `./cycles.js` helpers (should
+  need none).
+
+## `src/layout.js` — solver shell (integration agent)
+
+`layout(view, opts)` keeps its exact public shape and gains `opts.solver` (defaults to
+`engineSolve`), `opts.prevOrder` and `opts.prevLayers`; the result gains `order` and
+`layers` (alongside `reversedEdgeIds`) for the caller to persist — both, together.
+The shell also derives `opts.chromePad` from its own `CONTAINER_PAD` so the solver can
+reserve the padding `padContainers` is about to add. Everything else in the shell (breakCycles
++ pinning, back-edge/self-loop arcs, `padContainers`, bounds) is UNCHANGED. The dagre
+import is REMOVED from this file.
+
+## `src/adapters/dagre.js` — optional ESM adapter (integration agent)
+
+Exports `dagreSolver(input, opts)` (same solver contract, delegating to
+`@dagrejs/dagre` exactly as the M2-era layout.js did — compound graph, multigraph,
+rankdir mapping; returns `order` derived from dagre's result ordering) and
+`dagreLayout(view, opts) = layout(view, {...opts, solver: dagreSolver})`.
+Package export `"./adapters/dagre"` with a `types/adapters-dagre.d.ts`. `@dagrejs/dagre`
+moves from `dependencies` to `devDependencies` + `peerDependenciesMeta` optional —
+the IIFE and default ESM path must not pull it in at all.
+
+## Culling (culling agent)
+
+- `viewport.visibleWorldRect(pad = 200)` → world-space rect currently on screen.
+- `renderer.setCull(fn|null)` — when set, `frame(visual)` skips geometry writes AND sets
+  `display:none` (via a `data-culled` attr + CSS is fine) for node/edge groups fully
+  outside `fn()`; entering/exiting the rect restores them. Only engage when
+  `visual.nodes.size + visual.edges.size > 150` (below that the check costs more than
+  it saves). Token layer (`run-render`) reads positions from `scene.visual` — culling
+  must not corrupt tokens whose node is culled (skip drawing their pulse when outside).
+- index.js wires `renderer.setCull(() => viewport.visibleWorldRect())` after mount and
+  re-arms from **`viewport.onChange`**, not from the svg's pointer events (integration
+  agent). "Pan/zoom" includes `g.fitView()`, `viewport.zoomBy()`, the anchored
+  correction and every tick of their tweens — none of which fire a pointer event, and
+  all of which used to leave whatever the previous transform had hidden hidden for good.
+- Culling is live-DOM state, so anything that reads the live DOM has to account for it:
+  - `export.js` clones the live svg, so it **clears `data-culled`/`display:none` on the
+    clone**. A standalone export always draws the whole graph its viewBox claims.
+  - `a11y.js` never parks the roving tabindex on a culled group: `.focus()` on a hidden
+    element is a silent no-op, so committing `currentId` there strands real focus on the
+    element just demoted to `tabindex="-1"`. Arrow/Home/End walk the focusable subset.
+
+## Gates & budget (integration + verify)
+
+- `scripts/size-budget.js`: IIFE limit tightens **56 → 50KB** gzip (plan §8 M3 public
+  commitment); core stays 40KB.
+- Goldens: regenerate via `node test/golden/update.js` (intentional layout change).
+  “Parity” gate = structural invariants + crossing non-regression, recorded as such in
+  DEVIATIONS (coordinate-identical parity with dagre is not a meaningful target):
+  - every forward edge strictly advances along the rank axis;
+  - no two visible sibling nodes overlap; children strictly inside container rects
+    (post-padContainers);
+  - per-fixture crossing count ≤ the recorded dagre-era count (extend
+    `test/golden/crossing.js` fixtures with the dagre numbers as of M2, hard-coded);
+  - back edges below the flow (LR), self-loops side arcs — unchanged shell behavior.
+- `test/engine-parity.test.js` (engine agent): run BOTH solvers (dagre from
+  devDependencies) over the fixture set + randomized-but-seeded graphs (~40: chains,
+  diamonds, fan-out/in, multi-edges, disconnected, 2-level nesting, wide ranks);
+  assert the invariants above for engineSolve and crossings(engine) ≤
+  crossings(dagre) + 2 per fixture (small slack on non-goldens; goldens get ≤).
+- Stability: appending one node to a 30-node fixture with `prevOrder` passed changes no
+  existing rank's relative order (test).
+- e2e-m3 (verify agent): flagship `demo/pipeline.html` narrative runs on the in-house
+  engine (it does automatically once layout.js swaps) — assert the §6 storyline still
+  passes (reuse e2e-m1's checks), plus: no dagre chunk in dist (grep the IIFE for
+  "dagre"), pipeline stage order left→right matches the DAG, containers contain their
+  children, no overlaps/NaN, and a 300-node synthetic graph mounts with culling active
+  (fewer rendered-visible groups than total when zoomed in) at interactive frame cost.
+- Compositor offload (plan: only if profiling justifies): verify agent profiles the
+  300-node run; if median frame ≤ 8ms headless, record "not justified at v1 scale" in
+  DEVIATIONS instead of building it. Gantt mode: skipped by default per plan (no
+  demand); note in DEVIATIONS.

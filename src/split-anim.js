@@ -85,6 +85,8 @@ export function runSplit(g, internals, id, parts) {
     const { added } = store.split(id, parts);
     diverging = true;
     const targets = [...added];
+    // Same as condense: the parts inherit the slot the node they came out of held.
+    if (internals.reseat) internals.reseat(targets, [id]);
     const tr = relayout({
       focal: targets[0],
       duration: ms(SPLIT_PHASES.diverge),

@@ -109,6 +109,9 @@ export function runCondense(g, internals, ids, newNodeSpec) {
     const { merged, removedNodes } = store.condense(sources, newNodeSpec);
     converging = true;
     const target = merged.id;
+    // The merged node takes the sources' place in the solver's order, so it settles where
+    // the choreography flew it from instead of at the tail of its rank.
+    if (internals.reseat) internals.reseat([target], sources);
     const gone = removedNodes.filter((id) => id !== target);
     const tr = relayout({
       focal: target,

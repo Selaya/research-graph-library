@@ -88,6 +88,23 @@ export function attachA11y(g, { root, svg } = {}) {
   const nodeEls = () => Array.from(svg.querySelectorAll(".smv-node"));
   const findEl = (id) => nodeEls().find((el) => el.getAttribute("data-id") === id) || null;
 
+  /** render.js hides off-screen groups once a drawing is big enough (`data-culled` +
+   *  display:none), and `.focus()` on a hidden element is a silent no-op. Moving the roving
+   *  tabindex onto one therefore strands REAL focus on the element we just demoted to
+   *  tabindex="-1": the ring stays put while Enter/arrows act on a node nobody can see, and
+   *  tabbing back into the widget lands on nothing. */
+  const isCulled = (el) => !!el && el.getAttribute("data-culled") !== null;
+
+  /** Reading order restricted to the nodes that can actually take focus. Falls back to the
+   *  full order when everything is culled, so navigation never dead-ends. */
+  function navOrder() {
+    const ids = readingOrder(layoutOf());
+    const els = new Map();
+    for (const el of nodeEls()) els.set(el.getAttribute("data-id"), el);
+    const live = ids.filter((id) => els.has(id) && !isCulled(els.get(id)));
+    return live.length ? live : ids;
+  }
+
   /** `status` prefers the LIVE run state over the design-time `data.status`. run-render.js
    *  writes it to `data-run` on the element per status transition and deliberately never
    *  back into the spec, so reading the spec alone left a screen-reader user with no signal
@@ -145,7 +162,9 @@ export function attachA11y(g, { root, svg } = {}) {
     // merged it away). Its element is still in the DOM mid-exit-animation; once it detaches
     // the browser drops focus to <body>, so re-home it onto the new roving stop now.
     const orphaned = activeId != null && !ids.includes(activeId);
-    if (ids.length && (currentId == null || !ids.includes(currentId))) currentId = ids[0];
+    // The roving stop has to be somewhere focus can actually go, so re-home onto the
+    // navigable subset (culling excluded) rather than the first id in reading order.
+    if (ids.length && (currentId == null || !ids.includes(currentId))) currentId = navOrder()[0];
 
     for (const el of nodeEls()) {
       const id = el.getAttribute("data-id");
@@ -188,14 +207,15 @@ export function attachA11y(g, { root, svg } = {}) {
 
   function focusId(id) {
     if (id == null) return;
+    const el = findEl(id);
+    if (isCulled(el)) return; // unfocusable: leave the roving stop where focus actually is
     currentId = id;
     setRoving();
-    const el = findEl(id);
     if (el && typeof el.focus === "function") el.focus();
   }
 
   function move(delta) {
-    const ids = readingOrder(layoutOf());
+    const ids = navOrder();
     if (!ids.length) return;
     const i = Math.max(0, ids.indexOf(currentId));
     focusId(ids[Math.min(ids.length - 1, Math.max(0, i + delta))]);
@@ -213,8 +233,8 @@ export function attachA11y(g, { root, svg } = {}) {
     switch (key) {
       case "ArrowRight": case "ArrowDown": stop(); move(1); break;
       case "ArrowLeft": case "ArrowUp": stop(); move(-1); break;
-      case "Home": { const ids = readingOrder(layoutOf()); if (ids.length) { stop(); focusId(ids[0]); } break; }
-      case "End": { const ids = readingOrder(layoutOf()); if (ids.length) { stop(); focusId(ids[ids.length - 1]); } break; }
+      case "Home": { const ids = navOrder(); if (ids.length) { stop(); focusId(ids[0]); } break; }
+      case "End": { const ids = navOrder(); if (ids.length) { stop(); focusId(ids[ids.length - 1]); } break; }
       case "Enter": stop(); toggle(currentId); break;
       default: if (isSpace(key)) { stop(); toggle(currentId); }
     }

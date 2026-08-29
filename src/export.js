@@ -69,6 +69,19 @@ export function exportSVG(g, opts = {}) {
   const viewportG = typeof clone.querySelector === "function" ? clone.querySelector(".smv-viewport") : null;
   if (viewportG && typeof viewportG.removeAttribute === "function") viewportG.removeAttribute("transform");
 
+  // Undo viewport culling (M3): render.js hides whatever is off screen on the LIVE elements
+  // (`data-culled` + inline display:none), and this is a clone of those. Resetting the
+  // viewBox alone would then produce a document that claims to show the whole graph while
+  // most of it is still display:none — a silently near-empty .svg/.png whenever the user
+  // happened to be zoomed in. A standalone export always draws everything.
+  const culled = typeof clone.querySelectorAll === "function" ? clone.querySelectorAll("[data-culled]") : null;
+  if (culled) {
+    for (const el of Array.from(culled)) {
+      if (typeof el.removeAttribute === "function") el.removeAttribute("data-culled");
+      if (el.style) el.style.display = "";
+    }
+  }
+
   // Interaction-only affordances have no meaning in a static document (transport/pan
   // cursor state already lives outside the svg, on the mount root, so there is nothing
   // there to strip — just the live element's own focus/keyboard wiring).

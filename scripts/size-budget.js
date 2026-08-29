@@ -8,10 +8,14 @@ import { dirname, join } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const dist = join(root, 'dist');
+// The core metric bundle is a build artifact, deliberately outside the published `dist`
+// (it is unloadable by design — the layout engine is externalized out of it).
+const metric = join(root, 'build');
 
-// dagre-era budget; M3 (in-house layout) tightens the IIFE limit to 50KB.
+// M3 budget: the in-house engine replaced dagre, so the IIFE limit tightens 56 -> 50KB
+// (docs/PLAN.md §8: "full pipeline IIFE < 50KB gzip from M3"). Core stays 40KB.
 const CORE_LIMIT = 40 * 1024;
-const IIFE_LIMIT = 56 * 1024;
+const IIFE_LIMIT = 50 * 1024;
 
 const result = spawnSync('node', [join(__dirname, 'build.js')], {
   cwd: root,
@@ -29,7 +33,7 @@ function gzipSize(path) {
 }
 
 const targets = [
-  { name: 'smv.core.esm.js', path: join(dist, 'smv.core.esm.js'), limit: CORE_LIMIT },
+  { name: 'smv.core.esm.js', path: join(metric, 'smv.core.esm.js'), limit: CORE_LIMIT },
   { name: 'smv.iife.min.js', path: join(dist, 'smv.iife.min.js'), limit: IIFE_LIMIT },
 ];
 
