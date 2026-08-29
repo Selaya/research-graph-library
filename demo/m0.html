@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — M0 exit criteria</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 20px;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: #f6f7f9; color: #1b2230;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #0d1015; color: #e6e9f0; } }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p.note { margin: 0 0 14px; opacity: .7; max-width: 70ch; }
+  .bar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  button {
+    font: inherit; padding: 7px 14px; border-radius: 7px; cursor: pointer;
+    border: 1px solid currentColor; background: transparent; color: inherit;
+  }
+  button[disabled] { opacity: .45; cursor: default; }
+  #status { font-variant-numeric: tabular-nums; opacity: .8; }
+  #pipe { height: 460px; border: 1px solid rgba(128,138,160,.35); border-radius: 10px; }
+  #out { margin-top: 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; opacity: .85; }
+</style>
+</head>
+<body>
+
+<h1>M0 exit — append 5 nodes one at a time to a 10-node graph containing one loop</h1>
+<p class="note">
+  Appends land every ~180ms while transitions run for 350ms, so every append interrupts a
+  live transition (cancel-and-retarget, D9). The back edge <code>verify → build</code> must
+  never flip sides: after each append's layout commit we record whether every point of its
+  geometry sits at or below the vertical centres of its endpoints.
+  Zoom is ctrl/⌘ + wheel — plain scroll is never hijacked.
+</p>
+
+<div class="bar">
+  <button id="run">Run M0 exit</button>
+  <span id="status">idle</span>
+</div>
+
+<div id="pipe"></div>
+<div id="out"></div>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  var errors = [];
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var DURATION = 350;
+  var SPACING = 180;   // < DURATION on purpose: every append overlaps the live transition
+  var APPENDS = 5;
+
+  // 10-node pipeline + ONE explicit loop back edge (loop:true, maxIterations mandatory).
+  var BASE = ["ingest", "parse", "validate", "enrich", "build", "test", "deploy", "verify", "publish", "done"];
+  var LOOP = { id: "retry", source: "verify", target: "build", loop: true, maxIterations: 3 };
+
+  var spec = { nodes: [], edges: [] };
+  BASE.forEach(function (id, i) {
+    spec.nodes.push({
+      id: id,
+      label: id.charAt(0).toUpperCase() + id.slice(1),
+      data: { status: i === 0 ? "done" : i === 1 ? "active" : "pending" },
+    });
+    if (i > 0) spec.edges.push({ id: "e" + i, source: BASE[i - 1], target: id });
+  });
+  spec.edges.push(LOOP);
+
+  var statusEl = document.getElementById("status");
+  var outEl = document.getElementById("out");
+  var runBtn = document.getElementById("run");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", spec, {
+      theme: "auto",
+      layout: { dir: "LR" },
+      animation: { duration: DURATION, easing: "cubic-out" },
+    });
+  } catch (err) {
+    errors.push("mount: " + String(err && err.message || err));
+    statusEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors, backEdgeSides: [] };
+    return;
+  }
+
+  /**
+   * The consistent-side invariant (D3): for an LR flow the loop arc bows BELOW the row.
+   * "below" = every point sits at-or-below both endpoint centres; "above" = the mirror.
+   * Anything else is a glitch and reads as "mixed".
+   */
+  function loopSide(nodes, edges) {
+    var e = edges[LOOP.id], s = nodes[LOOP.source], t = nodes[LOOP.target];
+    if (!e || !e.points || !e.points.length || !s || !t) return "missing";
+    var lo = Math.min(s.y, t.y), hi = Math.max(s.y, t.y);
+    var below = e.points.every(function (p) { return p.y >= hi - 0.5; });
+    if (below) return "below";
+    var above = e.points.every(function (p) { return p.y <= lo + 0.5; });
+    return above ? "above" : "mixed";
+  }
+
+  var backEdgeSides = [];
+  var recording = false;
+  g.on("commit", function (c) {
+    if (!recording) return;
+    backEdgeSides.push(loopSide(c.nodes, c.edges));
+  });
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  async function runExit() {
+    if (recording || window.__smvExit) return;
+    runBtn.disabled = true;
+    backEdgeSides.length = 0;
+    recording = true;
+
+    var after = "done";
+    for (var i = 1; i <= APPENDS; i++) {
+      var id = "extra" + i;
+      statusEl.textContent = "appending " + id + " (" + i + "/" + APPENDS + ")";
+      try {
+        // Not awaited: the next append must land mid-transition.
+        g.addNode({ id: id, label: "Extra " + i, data: { status: "pending" } }, { after: after });
+      } catch (err) {
+        errors.push("addNode " + id + ": " + String(err && err.message || err));
+      }
+      after = id;
+      await sleep(SPACING);
+    }
+
+    statusEl.textContent = "settling";
+    await sleep(DURATION * 3); // let the final transition finish and the viewport settle
+    recording = false;
+
+    var consistent = backEdgeSides.length === APPENDS &&
+      backEdgeSides.every(function (s) { return s === backEdgeSides[0]; }) &&
+      (backEdgeSides[0] === "below" || backEdgeSides[0] === "above");
+
+    window.__smvExit = { done: true, errors: errors, backEdgeSides: backEdgeSides };
+
+    statusEl.textContent = consistent && errors.length === 0 ? "done — clean" : "done — see report";
+    outEl.textContent =
+      "backEdgeSides: " + JSON.stringify(backEdgeSides) + "\n" +
+      "consistent side: " + consistent + "\n" +
+      "errors: " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  runBtn.addEventListener("click", runExit);
+
+  // ?auto=1 — the headless verification path. Give mount's initial fit one beat first.
+  if (/(^|[?&])auto=1(&|$)/.test(window.location.search)) setTimeout(runExit, 250);
+})();
+</script>
+
+</body>
+</html>
