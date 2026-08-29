@@ -202,6 +202,31 @@ and no compositor path is added. Viewport culling — the other half of that mil
 line — **is** built (`renderer.setCull` + `viewport.visibleWorldRect`, engaged only above
 150 elements, wired in `index.js` and re-armed on pan/zoom).
 
+**Measured (verify agent, `demo/m3-scale.html` + `test/e2e-m3.mjs`, headless chromium,
+1280×900, `--no-sandbox`):** a synthetic 300-node / ~570-edge layered graph (870 rendered
+groups, well above the 150-element culling threshold), driven through a 2-second simulated
+pointer pan (real `PointerEvent`s dispatched on `renderer.svg`, exercising the actual
+pan → recull → `renderer.frame` path). Per-frame cost is the *synchronous work time* inside
+each frame's `dispatchEvent` call, not the wall-clock gap between `requestAnimationFrame`
+callbacks (that gap is vsync-bound at ~16.7ms regardless of work done, and would make every
+page "cost" the same — measuring it would have produced a false positive here: an early,
+uncorrected pass of this same harness recorded ~16.7ms via that wrong method before the fix).
+
+| metric | value |
+|---|---:|
+| median frame | **1.6–1.8ms** (two runs) |
+| mean frame | 1.7ms |
+| max frame (worst observed) | 13.4ms (one outlier per run; GC/layout-thrash class, not the steady state) |
+| samples | 120–121 over 2s |
+| groups culled at initial fit (whole graph visible) | 0 / 870 |
+| groups culled after a moderate zoom into one corner | 754 / 870 (~87%) |
+
+Median ≤ 8ms by a wide margin (≈5× headroom before the budget is even touched) — the
+*"not justified at v1 scale"* verdict stands. Culling alone is doing the load-bearing work:
+with 87% of groups skipped once zoomed in, the remaining paint cost is small even before
+considering any compositor split. Re-measure if the target scale grows materially past
+300 nodes or the pan/zoom interaction pattern changes.
+
 **Why:** D1's own rationale argues *against* splitting motion across the compositor and
 main threads (edges visibly detaching from nodes under jank), and the plan makes the
 optimization conditional on measurement. Building it unmeasured would trade the one-clock

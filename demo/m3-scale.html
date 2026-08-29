@@ -165,19 +165,21 @@
   }
 
   /** Dispatch a real-shaped pointer drag across `ms` milliseconds on the shared rAF clock,
-   *  recording the wall-time delta between consecutive frames. This exercises the exact
-   *  path a real pan takes (viewport's pointer handlers -> index.js's recull -> renderer
-   *  .frame), which is what "per-frame cost" is meant to measure — not a synthetic no-op
-   *  loop. Returns {median, mean, max, count} in ms. */
+   *  recording the SYNCHRONOUS work duration each frame — the time the dispatchEvent call
+   *  spends inside viewport's pointer handler + index.js's recull + renderer.frame — not
+   *  the wall-clock gap between rAF callbacks (that gap is dominated by vsync, ~16.7ms at
+   *  60Hz regardless of how cheap the work is, and would make every page "cost" the same).
+   *  This is the number the compositor-offload decision rule (docs/DEVIATIONS.md item 10 /
+   *  INTERNALS "M3 exit") means by "median frame <= 8ms". Returns {median, mean, max,
+   *  count} in ms. */
   function measurePan(ms) {
     return new Promise(function (resolve) {
       var svg = g.renderer.svg;
       var pid = 909090;
       var x = 300, y = 300;
       var deltas = [];
-      var last = performance.now();
+      var t0 = performance.now();
       var elapsed = 0;
-      var started = false;
 
       function fire(type, cx, cy) {
         var ev;
@@ -194,15 +196,14 @@
       }
 
       function frame(now) {
-        var dt = now - last;
-        last = now;
-        if (started) deltas.push(dt);
-        started = true;
-        elapsed += dt;
+        elapsed = now - t0;
 
         x = 300 + Math.sin(elapsed / 140) * 90;
         y = 300 + Math.cos(elapsed / 210) * 60;
-        fire("pointermove", x, y);
+        var workStart = performance.now();
+        fire("pointermove", x, y); // synchronous: pan handler + recull + renderer.frame
+        var workEnd = performance.now();
+        deltas.push(workEnd - workStart);
 
         if (elapsed < ms) {
           requestAnimationFrame(frame);
@@ -240,7 +241,11 @@
     mFit.textContent = String(checks.culledAtFit);
 
     phaseEl.textContent = "zooming into a corner…";
-    g.viewport.zoomBy(40, { x: 0, y: 0 }); // clamps to MAX_K=4, anchored at the stage's top-left
+    // Moderate zoom anchored at the stage's top-left corner: enough to push most of the
+    // graph off-screen while leaving the near corner populated (a partial cull count is a
+    // more convincing demonstration than "everything vanished", and matches the shape the
+    // culling agent measured: 280/399 then 364/399, never 0 or all).
+    g.viewport.zoomBy(3, { x: 0, y: 0 });
     // A programmatic transform change fires no scene frame — a real pan/zoom re-arms
     // culling via a pointermove on the svg (INTERNALS "Culling" contract); do the same here.
     g.renderer.svg.dispatchEvent(new PointerEvent("pointermove", {
