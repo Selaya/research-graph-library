@@ -260,3 +260,29 @@ test("expandAll/collapseAll mutate only the collapsed set — a relayout still n
   assert.notDeepEqual(after.nodes.map((n) => n.id).sort(), before.nodes.map((n) => n.id).sort(),
     "a fresh view() after collapseAll does reflect the new collapsed set");
 });
+
+test("a weight-1 meta-edge keeps the hidden edge's label; aggregating a 2nd source keeps weight authority", () => {
+  const store = new Store({
+    nodes: [
+      { id: "C", label: "Box", collapsed: true },
+      { id: "C.a", parent: "C" },
+      { id: "C.b", parent: "C" },
+      { id: "X" },
+    ],
+    edges: [
+      { id: "e1", source: "C.a", target: "X", label: "ships to" },
+    ],
+  });
+  const vs = createViewState(store);
+  const v1 = vs.view();
+  const m1 = v1.edges.find((e) => e.meta);
+  assert.equal(m1.weight, 1);
+  assert.equal(m1.label, "ships to", "single hidden labeled edge keeps its label on the meta edge");
+
+  // A second boundary edge aggregates in: weight 2 — the renderer drops the label
+  // (weight > 1), viewstate still reports the first label it saw.
+  store.addEdge({ id: "e2", source: "C.b", target: "X" });
+  const v2 = vs.view();
+  const m2 = v2.edges.find((e) => e.meta);
+  assert.equal(m2.weight, 2);
+});
