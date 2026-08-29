@@ -4,7 +4,8 @@
 //   engineSolve(input, opts) -> {
 //     nodes: { [id]: {x, y, w, h} },          // x,y = center; a container covers its children
 //     edges: { [id]: { points: [{x,y}, …] } },// source -> target, bend chain included
-//     order: string[][]                       // final per-rank real-node order
+//     order: string[][],                      // final per-rank real-node order
+//     layers: string[][]                      // …the same, with edge bends interleaved
 //   }
 //
 // Caller invariants (layout.js shell): the edge set is acyclic (back edges withheld) and
@@ -16,7 +17,8 @@
 //   1 nesting      cluster tree, spans, border dummies
 //   2 ranking      longest path + one tightening pass
 //   3 dummies      unit-span chains for multi-rank edges
-//   4 ordering     median sweeps + transpose, previous-order tie-breaks (opts.prevOrder)
+//   4 ordering     median sweeps + transpose, previous-drawing tie-breaks
+//                  (opts.prevOrder + opts.prevLayers)
 //   5 coordinates  median relaxation + isotonic (PAVA) separation repair
 //   6 margins
 //
@@ -26,8 +28,10 @@
 const DEFAULTS = { dir: "LR", nodesep: 28, ranksep: 56, marginx: 20, marginy: 20 };
 const DIRS = ["LR", "RL", "TB", "BT"];
 
-const ITERATIONS = 8; // ordering sweeps, and relaxation sweeps
-const ALIGN_PASSES = 3; // cluster border alignment rounds
+const ITERATIONS = 8; // relaxation sweeps, and ordering sweeps without improvement
+const MAX_ORDER_SWEEPS = 32; // hard cap on one descent
+const ORDER_ROUNDS = 8; // hard cap on restarted descents (the loop exits when idempotent)
+const ALIGN_PASSES = 24; // cluster border alignment rounds (cap; the loop exits when settled)
 const CLUSTER_PAD = 8; // engine-side breathing room inside a container rect
 const DUMMY_W = 1; // edge dummies are thin, not zero-width (keeps bends separable)
 const BORDER_W = 500; // relaxation weight pinning a cluster border to the cluster rect
@@ -56,9 +60,22 @@ export function engineSolve(input = {}, opts = {}) {
     marginx: num(opts.marginx, DEFAULTS.marginx),
     marginy: num(opts.marginy, DEFAULTS.marginy),
     prevOrder: Array.isArray(opts.prevOrder) ? opts.prevOrder : null,
+    prevLayers: Array.isArray(opts.prevLayers) ? opts.prevLayers : null,
   };
+  // Container chrome has to be *reserved*, not assumed: a border dummy is the only thing
+  // standing between a foreign node and the CLUSTER_PAD the rect grows by, so it is at
+  // least that wide, and its distance from the rect edge is exactly what the separation
+  // rule will demand of the first member inside. Both were fixed fractions of nodesep
+  // before, which made the alignment targets infeasible (the borders pooled, the corridor
+  // collapsed) whenever nodesep was small or the nesting more than one level deep.
+  o.borderW = Math.max(o.nodesep, CLUSTER_PAD);
+  o.borderGap = Math.max(o.nodesep / 2, CLUSTER_PAD);
+  // How far past its outermost member the container rect the CALLER finally draws reaches
+  // (layout.js grows it again for the header strip). Reserved in the rank axis below —
+  // ranksep alone never accounted for it, so a small ranksep let a rect eat the next rank.
+  o.chromePad = Math.max(CLUSTER_PAD, num(opts.chromePad, 0));
   const g = indexInput(input, o);
-  if (!g.leaves.length) return { nodes: {}, edges: {}, order: [] };
+  if (!g.leaves.length) return { nodes: {}, edges: {}, order: [], layers: [] };
   rankLeaves(g);
   const L = buildLayers(g, o);
   orderLayers(L);
@@ -191,6 +208,7 @@ function assignPrefs(g) {
       for (const id of rankIds) if (g.rank.has(id) && !g.pref.has(id)) g.pref.set(id, k++);
     }
     for (const id of g.leaves) if (!g.pref.has(id)) g.pref.set(id, UNRANKED + g.nodes.get(id).index);
+    normalizePrefs(g);
     return;
   }
   let k = 0;
@@ -206,6 +224,25 @@ function assignPrefs(g) {
   };
   for (const id of g.leaves) if (!g.in.has(id)) visit(id);
   for (const id of g.leaves) if (!g.pref.has(id)) visit(id);
+  normalizePrefs(g);
+}
+
+/**
+ * Collapse `pref` onto a per-rank 0..n-1 index, keeping the order the raw keys gave.
+ * An edge dummy's pref is interpolated between its endpoints' (buildLayers), and it is
+ * then compared against the prefs of the rank it lands on — so the two have to live on
+ * the same scale. They did not: the prevOrder branch counts rank-major across the whole
+ * drawing while the DFS branch counts visit order, and a dummy's midpoint therefore fell
+ * in a completely different slot depending on which branch ran. That is what stopped
+ * `order` from being a fixed point (INTERNALS §M3) on any graph with a multi-rank edge.
+ */
+function normalizePrefs(g) {
+  const byRank = new Map();
+  for (const id of g.leaves) push(byRank, g.rank.get(id), id);
+  for (const ids of byRank.values()) {
+    ids.sort((a, b) => g.pref.get(a) - g.pref.get(b));
+    for (let i = 0; i < ids.length; i++) g.pref.set(ids[i], i);
+  }
 }
 
 // ------------------------------------------------------- 3 dummies + border dummies
@@ -244,6 +281,32 @@ function buildLayers(g, o) {
       p = g.nodes.get(p).parent;
     }
   }
+  // A container's rect is the union of its members' cells over EVERY rank it spans, so two
+  // siblings whose spans merely touch still need disjoint in-rank bands across the union of
+  // both spans: a member sitting on a rank the sibling does not span otherwise stretches the
+  // union rect straight through it, and the alignment pass below is then asked for something
+  // geometrically impossible (it pools the borders instead, and the rects overlap). Grow each
+  // group of span-overlapping siblings to their common window so the border pairs — and the
+  // separation they buy — exist on every rank that matters. A group's window is always inside
+  // the parent's own span, so a child block never outlives the block that has to contain it.
+  const groups = new Map();
+  for (const c of g.clusters) {
+    if (!span.has(c)) continue;
+    push(groups, g.nodes.get(c).parent === undefined ? ROOT : g.nodes.get(c).parent, c);
+  }
+  for (const sibs of groups.values()) {
+    const sorted = sibs.slice().sort((a, b) => span.get(a)[0] - span.get(b)[0]);
+    let run = [], hi = -Infinity;
+    const close = () => { for (const c of run) { span.get(c)[0] = span.get(run[0])[0]; span.get(c)[1] = hi; } };
+    for (const c of sorted) {
+      const s = span.get(c);
+      if (run.length && s[0] <= hi) { hi = Math.max(hi, s[1]); run.push(c); continue; }
+      if (run.length) close();
+      run = [c]; hi = s[1];
+    }
+    if (run.length) close();
+  }
+
   const borders = new Map(); // cluster -> { lo, l: [], r: [] }
   for (const c of g.clusters) {
     const s = span.get(c);
@@ -252,7 +315,7 @@ function buildLayers(g, o) {
     const parent = g.nodes.get(c).parent;
     for (let r = s[0]; r <= s[1]; r++) {
       for (const side of [0, 1]) {
-        const b = mk(2, r, parent, o.nodesep, 0, 0);
+        const b = mk(2, r, parent, o.borderW, 0, 0);
         b.of = c;
         b.side = side;
         (side ? rec.r : rec.l).push(b);
@@ -279,16 +342,24 @@ function buildLayers(g, o) {
 
   // Edge chains. A dummy belongs to the deepest cluster containing both endpoints, so
   // block-contiguity ordering routes it around clusters it does not belong to.
+  const seeds = prevKeys(o.prevLayers, g);
   const chains = new Map();
   for (const e of g.rankEdges) {
     const a = byNode.get(e.source), b = byNode.get(e.target);
     if (a.rank >= b.rank) continue; // only possible on malformed input; routed straight
     const cluster = lca(g, g.nodes.get(e.source).parent, g.nodes.get(e.target).parent);
-    const pref = (a.pref + b.pref) / 2;
     const chain = [];
+    const steps = b.rank - a.rank;
     let prev = a;
     for (let r = a.rank + 1; r < b.rank; r++) {
+      const tok = `${e.id}\u0000${chain.length}`;
+      // Where this bend sat in the previous drawing if we were told (opts.prevLayers), else
+      // interpolated along the edge — not a flat midpoint, so a long chain leans toward the
+      // end it is nearer instead of parking every bend in the same slot.
+      const seeded = seeds.bends.get(tok);
+      const pref = seeded === undefined ? a.pref + ((b.pref - a.pref) * (r - a.rank)) / steps : seeded;
       const d = mk(1, r, cluster, DUMMY_W, 0, pref);
+      d.tok = tok;
       link(prev, d);
       chain.push(d);
       prev = d;
@@ -297,11 +368,62 @@ function buildLayers(g, o) {
     chains.set(e.id, chain);
   }
 
+  // Every layout node (leaf or edge bend) inside a cluster's subtree, at any rank. This is
+  // the population a cluster's *global* block key averages over — see clusterSeq.
+  const members = new Map();
+  for (const v of V) {
+    if (v.kind === 2) continue;
+    let c = v.cluster;
+    while (c !== undefined) { push(members, c, v); c = g.nodes.get(c).parent; }
+  }
+
   const ranks = [];
   for (let r = 0; r <= g.maxRank; r++) ranks.push([]);
   for (const v of V) ranks[v.rank].push(v);
 
-  return { g, V, ranks, byNode, borders, spanClusters, chains, maxRank: g.maxRank, y: [] };
+  return { g, V, ranks, byNode, borders, spanClusters, chains, members, blockKeys: seeds.blocks, seq: new Map(), maxRank: g.maxRank, y: [] };
+}
+
+const BLOCK_TOK = "\u0000c"; // layers marker for a container that spans a rank with nothing on it
+
+/**
+ * Everything in the previous drawing that `order` does NOT name — every edge bend, and every
+ * container block that spans a rank without holding anything there — read back out of
+ * `layers` on the SAME per-rank real-index scale assignPrefs puts the real nodes on (an item
+ * that sat between real #2 and real #3 comes back as 2.x).
+ *
+ * Without this those items are re-derived from scratch on every solve while the real nodes
+ * are not; the re-solve then starts from a differently scored arrangement than the one it is
+ * supposed to reproduce, some sweep looks "strictly better", and a relayout that changed
+ * nothing reshuffles ranks and moves every node.
+ */
+function prevKeys(prev, g) {
+  const bends = new Map(), blocks = new Map();
+  if (!Array.isArray(prev)) return { bends, blocks };
+  for (let r = 0; r < prev.length; r++) {
+    const layer = prev[r];
+    if (!Array.isArray(layer)) continue;
+    let reals = 0;
+    let run = [];
+    const flush = () => {
+      for (let j = 0; j < run.length; j++) {
+        const key = reals - 1 + (j + 1) / (run.length + 1);
+        const tok = run[j];
+        if (tok.startsWith(BLOCK_TOK)) blocks.set(`${r}\u0000${tok.slice(BLOCK_TOK.length)}`, key);
+        else bends.set(tok, key);
+      }
+      run = [];
+    };
+    for (const tok of layer) {
+      // Ignore anything that is neither a live real node nor one of our own markers: a
+      // `layers` handed back after a removal still names ids that are gone, and counting
+      // those as items would slide every key in the rank.
+      if (g.rank.has(tok)) { flush(); reals++; }
+      else if (typeof tok === "string" && tok.indexOf("\u0000") >= 0) run.push(tok);
+    }
+    flush();
+  }
+  return { bends, blocks };
 }
 
 function link(a, b) { a.out.push(b); b.in.push(a); }
@@ -319,18 +441,52 @@ function lca(g, a, b) {
 
 // --------------------------------------------------------------------------- 4 ordering
 
+/**
+ * One ordering key per cluster, shared by every rank that cluster spans. `pref` is a single
+ * global rank-major counter, so a mean over the whole subtree is comparable between
+ * clusters — which is the point: sortRank uses this (not each rank's own local mean) to
+ * order sibling blocks, so a cluster cannot sit left of a sibling on one rank and right of
+ * it on the next. It used to be able to, and clusterBoxes' union-across-ranks then handed
+ * BOTH siblings a rect spanning the whole drawing, each swallowing the other's children.
+ */
+function clusterSeq(L) {
+  const seq = L.seq;
+  seq.clear();
+  for (const c of L.g.clusters) {
+    const ms = L.members.get(c);
+    let s = 0;
+    if (ms && ms.length) { for (const v of ms) s += v.pref; s /= ms.length; }
+    seq.set(c, s);
+  }
+}
+
 function orderLayers(L) {
-  sortAll(L, (v) => v.pref); // init: previous order (or DFS) drives everything
+  clusterSeq(L);
+  // Init: the previous drawing (or DFS) drives everything — including which side of a
+  // passing bend a container that spans this rank empty-handed sat on.
+  sortAll(L, (v) => v.pref, (c, r) => L.blockKeys.get(`${r}\u0000${c}`) ?? L.seq.get(c));
   let best = snapshot(L);
   let bestCross = countCrossings(L);
-  for (let it = 0; it < ITERATIONS && bestCross > 0; it++) {
-    const down = it % 2 === 0;
-    sweep(L, down);
-    transpose(L, it % 4 >= 2);
-    const c = countCrossings(L);
-    // Strictly fewer crossings only: an equal-crossing reshuffle loses to the order we
-    // already have, which is the previous layout's (stability beats one crossing).
-    if (c < bestCross) { bestCross = c; best = snapshot(L); }
+  // The search has to be idempotent, not merely bounded: it ends only once a full run of
+  // sweeps STARTED FROM `best` fails to improve on it. A loop that just stops after a fixed
+  // number of sweeps wanders away from `best` and stops there, leaving an arrangement the
+  // next solve — which starts from `best` — can still beat. Beating it is exactly what made
+  // a relayout of an unchanged graph reshuffle ranks nobody had touched.
+  for (let round = 0; round < ORDER_ROUNDS && bestCross > 0; round++) {
+    const before = bestCross;
+    let stale = 0;
+    for (let it = 0; it < MAX_ORDER_SWEEPS && bestCross > 0 && stale < ITERATIONS; it++) {
+      const down = it % 2 === 0;
+      sweep(L, down);
+      transpose(L, it % 4 >= 2);
+      const c = countCrossings(L);
+      stale = c < bestCross ? 0 : stale + 1;
+      // Strictly fewer crossings only: an equal-crossing reshuffle loses to the order we
+      // already have, which is the previous layout's (stability beats one crossing).
+      if (c < bestCross) { bestCross = c; best = snapshot(L); }
+    }
+    if (bestCross >= before) break;
+    restore(L, best); // improved: re-run the descent from where it actually got to
   }
   restore(L, best);
 }
@@ -342,16 +498,17 @@ function sweep(L, down) {
   }
 }
 
-function sortAll(L, keyOf) {
-  for (let r = 0; r <= L.maxRank; r++) sortRank(L, r, keyOf);
+function sortAll(L, keyOf, emptyKey) {
+  for (let r = 0; r <= L.maxRank; r++) sortRank(L, r, keyOf, emptyKey);
 }
 
 /**
- * Reorder one rank. Nodes are grouped into the (nested) cluster blocks they belong to;
- * a block sorts by the mean key of its members and always keeps its border pair at the
- * two ends, so cluster children stay contiguous within the rank.
+ * Reorder one rank. Nodes are grouped into the (nested) cluster blocks they belong to; a
+ * block takes the slot the mean key of its members earns and always keeps its border pair
+ * at the two ends, so cluster children stay contiguous within the rank. WHICH sibling block
+ * lands in which of those slots is not this rank's business — see clusterSeq.
  */
-function sortRank(L, r, keyOf) {
+function sortRank(L, r, keyOf, emptyKey) {
   const direct = new Map();
   for (const v of L.ranks[r]) if (v.kind !== 2) push(direct, v.cluster === undefined ? ROOT : v.cluster, v);
   const subs = L.spanClusters[r];
@@ -364,9 +521,22 @@ function sortRank(L, r, keyOf) {
       let sum = 0, n = 0;
       for (const it of kids) { sum += it.key; n++; }
       const rec = L.borders.get(c);
-      items.push({ cluster: c, items: kids, key: n ? sum / n : rec.l[r - rec.lo].pos });
+      // A block with no members on this rank (a container whose span was grown to cover a
+      // sibling's) has no local key. The initial sort supplies one on the pref scale; a
+      // median sweep keeps it where it is, which is the only value on the right scale there.
+      items.push({ cluster: c, items: kids, key: n ? sum / n : (emptyKey ? emptyKey(c, r) : rec.l[r - rec.lo].pos) });
     }
     items.sort((a, b) => a.key - b.key); // stable: equal keys keep the previous order
+    // Sibling cluster blocks keep the slots this rank's keys gave them, but which block
+    // lands in which slot is decided ONCE, globally (clusterSeq) — never per rank.
+    const slots = [];
+    for (let i = 0; i < items.length; i++) if (items[i].cluster !== undefined) slots.push(i);
+    if (slots.length > 1) {
+      const blocks = slots.map((i) => items[i]);
+      blocks.sort((a, b) => (L.seq.get(a.cluster) - L.seq.get(b.cluster))
+        || (L.g.nodes.get(a.cluster).index - L.g.nodes.get(b.cluster).index));
+      for (let i = 0; i < slots.length; i++) items[slots[i]] = blocks[i];
+    }
     return items;
   };
 
@@ -470,8 +640,28 @@ function assignCoords(L, g, o) {
   // Rank axis: cumulative max extent + ranksep.
   const ext = new Array(L.maxRank + 1).fill(0);
   for (const v of L.V) ext[v.rank] = Math.max(ext[v.rank], v.rh);
+  // Container chrome is reserved where it is actually claimed: the first and last rank a
+  // container spans. Nested rects stack, so a container pays for its deepest chain.
+  const opens = new Array(L.maxRank + 2).fill(0);
+  const closes = new Array(L.maxRank + 2).fill(0);
+  const nesting = new Map(); // deepest-first, so a child is measured before its parent
+  for (const c of g.clustersDeepFirst) {
+    let d = 1;
+    for (const kid of g.childrenOf.get(c) || []) if (nesting.has(kid)) d = Math.max(d, nesting.get(kid) + 1);
+    nesting.set(c, d);
+  }
+  for (const c of g.clusters) {
+    const rec = L.borders.get(c);
+    if (!rec) continue;
+    const claim = o.chromePad * nesting.get(c);
+    opens[rec.lo] = Math.max(opens[rec.lo], claim);
+    closes[rec.hi] = Math.max(closes[rec.hi], claim);
+  }
   let acc = 0;
-  for (let r = 0; r <= L.maxRank; r++) { L.y[r] = acc + ext[r] / 2; acc += ext[r] + o.ranksep; }
+  for (let r = 0; r <= L.maxRank; r++) {
+    L.y[r] = acc + ext[r] / 2;
+    acc += ext[r] + Math.max(o.ranksep, closes[r] + opens[r + 1]);
+  }
 
   // In-rank axis: pack by order, then relax toward neighbour medians, re-imposing the
   // separation constraints after every move.
@@ -497,8 +687,15 @@ function assignCoords(L, g, o) {
   // cluster to that cluster's *global* rect and let the separation pass push foreign
   // nodes out of the way; the rect widens, so repeat until it settles.
   if (g.clusters.length) {
+    // Each pass pushes members away from the borders, which grows the boxes, which moves
+    // the borders again: three passes was an arbitrary stop in the middle of that, and it
+    // left rects that no pass had ever been separated against. Run until the boxes stop
+    // moving (they do, quickly) and only then emit them.
+    let prev = null;
     for (let p = 0; p < ALIGN_PASSES; p++) {
       const boxes = clusterBoxes(L, g);
+      if (settled(prev, boxes)) break;
+      prev = boxes;
       for (let r = 0; r <= L.maxRank; r++) {
         const arr = L.ranks[r];
         const desired = arr.map((v) => borderTarget(v, boxes, o));
@@ -514,7 +711,7 @@ function borderTarget(v, boxes, o) {
   if (v.kind !== 2) return v.x;
   const b = boxes.get(v.of);
   if (!b) return v.x;
-  return v.side ? b.x1 + o.nodesep / 2 : b.x0 - o.nodesep / 2;
+  return v.side ? b.x1 + o.borderGap : b.x0 - o.borderGap;
 }
 
 function medianX(neighbors, fallback) {
@@ -526,6 +723,13 @@ function medianX(neighbors, fallback) {
 }
 
 function sepBetween(a, b, o) {
+  // Two borders are markers, not nodes. A nested pair (an outer container's border beside
+  // its child's) is exactly CLUSTER_PAD apart — that IS the step clusterBoxes puts between
+  // a parent rect and a child rect — so charging them a full node's gap makes the targets
+  // borderTarget asks for unreachable at two or more nesting levels: PAVA pools them and
+  // the corridor collapses onto itself. Only the facing pair of two disjoint blocks
+  // (a closing border meeting an opening one) has to keep real distance.
+  if (a.kind === 2 && b.kind === 2 && !(a.side === 1 && b.side === 0)) return CLUSTER_PAD;
   const gap = a.kind || b.kind ? o.nodesep / 2 : o.nodesep;
   return (a.rw + b.rw) / 2 + gap;
 }
@@ -555,6 +759,16 @@ function separate(arr, desired, weights, o) {
   }
   let i = 0;
   for (let b = 0; b < bv.length; b++) for (let k = 0; k < bn[b]; k++, i++) arr[i].x = bv[b] + off[i];
+}
+
+/** Have the container rects stopped moving between two alignment passes? */
+function settled(a, b) {
+  if (!a || a.size !== b.size) return false;
+  for (const [c, r] of b) {
+    const p = a.get(c);
+    if (!p || Math.abs(p.x0 - r.x0) > 1e-3 || Math.abs(p.x1 - r.x1) > 1e-3) return false;
+  }
+  return true;
 }
 
 /** Container rects in internal coordinates, deepest cluster first. */
@@ -631,6 +845,21 @@ function emit(L, g, o) {
   for (const e of Object.values(edges)) for (const p of e.points) { p.x = q(p.x + dx); p.y = q(p.y + dy); }
 
   const order = [];
-  for (let r = 0; r <= L.maxRank; r++) order.push(L.ranks[r].filter((v) => v.kind === 0).map((v) => v.node));
-  return { nodes, edges, order };
+  const layers = [];
+  for (let r = 0; r <= L.maxRank; r++) {
+    const row = [], full = [];
+    const arr = L.ranks[r];
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (v.kind === 0) { row.push(v.node); full.push(v.node); continue; }
+      if (v.kind === 1) { full.push(v.tok); continue; }
+      // A block that spans this rank holding nothing: its own pair, back to back. Record it,
+      // or the next solve has no idea which side of a passing bend the container sat on.
+      const next = arr[i + 1];
+      if (!v.side && next && next.kind === 2 && next.side === 1 && next.of === v.of) full.push(BLOCK_TOK + v.of);
+    }
+    order.push(row);
+    layers.push(full);
+  }
+  return { nodes, edges, order, layers };
 }

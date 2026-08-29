@@ -102,6 +102,11 @@ export interface LayoutResult {
   /** Final per-rank id sequences (real nodes only). Persisted by the caller and passed
    *  back as `LayoutOpts.prevOrder` for order stability across re-layouts (M3). */
   order: string[][];
+  /** The same per-rank sequences WITH each multi-rank edge's bends interleaved (opaque
+   *  tokens). `order` alone does not determine a drawing, so this is persisted and passed
+   *  back as `LayoutOpts.prevLayers` — together they make a re-layout of an unchanged graph
+   *  reproduce the identical picture. Empty for a solver that does not produce it. */
+  layers: string[][];
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +140,8 @@ export interface SolverResult {
   /** Bend chain included, >= 2 points, running source -> target. */
   edges: Record<string, { points: Point[] }>;
   order: string[][];
+  /** Optional: `order` with each edge bend interleaved, for full re-layout stability. */
+  layers?: string[][];
 }
 
 export type LayoutSolver = (input: SolverInput, opts: LayoutOpts) => SolverResult;
@@ -158,6 +165,8 @@ export interface LayoutOpts {
   /** Previous per-rank order, for stability across re-layouts. mount() persists this
    *  itself; pass one only when driving layout() directly. */
   prevOrder?: string[][];
+  /** The bend half of the same channel (LayoutResult.layers). Persist and pass both. */
+  prevLayers?: string[][];
   [key: string]: unknown;
 }
 

@@ -203,6 +203,27 @@ test("stability: a re-run fed its own order back is a fixed point", () => {
   assert.deepEqual(two.nodes, one.nodes);
 });
 
+test("stability: a graph with multi-rank edges is a fixed point too (order + layers)", () => {
+  // Regression: `order` names only the real nodes, so the bends of every multi-rank edge
+  // used to be re-derived from scratch on a re-solve. The re-solve therefore started from a
+  // differently-scored arrangement, some sweep looked "strictly better", and a relayout
+  // that changed nothing swapped nodes and moved every coordinate.
+  const input = {
+    nodes: nodes("n1", "n2", "n7", "n10", "n11", "n12", "n13", "n14", "n15", "n16", "n17"),
+    edges: [
+      edge("e1", "n15", "n17"), edge("e2", "n13", "n14"), edge("e3", "n1", "n16"),
+      edge("e4", "n2", "n17"), edge("e5", "n16", "n17"), edge("e6", "n2", "n7"),
+    ],
+  };
+  const one = engineSolve(input, OPTS);
+  assert.ok(one.layers.some((r, i) => r.length > one.order[i].length), "fixture has no bends");
+  const two = engineSolve(input, { ...OPTS, prevOrder: one.order, prevLayers: one.layers });
+  assert.deepEqual(two.order, one.order);
+  assert.deepEqual(two.layers, one.layers);
+  assert.deepEqual(two.nodes, one.nodes);
+  assert.deepEqual(two.edges, one.edges);
+});
+
 // -------------------------------------------------------------------------- determinism
 
 test("determinism: identical input and opts produce byte-identical output", () => {
@@ -394,6 +415,49 @@ test("nesting: a cluster spanning ranks it has no member on still reserves a cor
   }
 });
 
+test("nesting: two sibling containers trading edges never share a rect", () => {
+  // Regression: each rank picked its cluster block order from that rank's own members, so a
+  // container could sit left of its sibling on one rank and right of it on the next. The
+  // rect is the union of the members' cells across every rank, so BOTH siblings then got a
+  // rect spanning the whole drawing — byte-identical, each holding the other's children.
+  const input = {
+    nodes: [
+      { id: "A", ...WH }, { id: "B", ...WH },
+      { id: "a0", ...WH, parent: "A" }, { id: "a1", ...WH, parent: "A" },
+      { id: "b0", ...WH, parent: "B" }, { id: "b1", ...WH, parent: "B" },
+    ],
+    edges: [edge("e1", "a0", "b1"), edge("e2", "b0", "a1")],
+  };
+  const out = engineSolve(input, OPTS);
+  checkInvariants(input, out);
+  const inside = (n, c) => Math.abs(n.x - c.x) < c.w / 2 && Math.abs(n.y - c.y) < c.h / 2;
+  for (const [kid, foreign] of [["b0", "A"], ["b1", "A"], ["a0", "B"], ["a1", "B"]]) {
+    assert.ok(!inside(out.nodes[kid], out.nodes[foreign]), `${kid} landed inside ${foreign}`);
+  }
+});
+
+test("nesting: 3 levels deep, a container never overruns a sibling of its parent", () => {
+  // Regression: two nested borders were charged 1.5 * nodesep of separation while the rects
+  // they mark nest only CLUSTER_PAD apart, so the alignment targets were unreachable, the
+  // border pair pooled, and the corridor collapsed onto a sibling leaf.
+  const input = {
+    nodes: [
+      { id: "C0", w: 10, h: 10 },
+      { id: "C1", w: 10, h: 10, parent: "C0" },
+      { id: "C2", w: 10, h: 10, parent: "C1" },
+      { id: "leaf0", w: 120, h: 24, parent: "C2" }, { id: "leaf1", w: 60, h: 48, parent: "C2" },
+      { id: "leaf2", w: 80, h: 48, parent: "C2" }, { id: "leaf3", w: 140, h: 24, parent: "C2" },
+      { id: "sib0", w: 100, h: 32, parent: "C0" },
+      { id: "sib1", w: 60, h: 32, parent: "C1" },
+    ],
+    edges: [
+      edge("e0", "leaf0", "leaf1"), edge("e1", "leaf1", "leaf2"), edge("e2", "leaf2", "leaf3"),
+      edge("e3", "leaf2", "sib0"), edge("e4", "leaf0", "sib1"),
+    ],
+  };
+  checkInvariants(input, engineSolve(input, OPTS), OPTS, "3-level");
+});
+
 test("ordering: prevOrder entries for ids that no longer exist are ignored", () => {
   const input = { nodes: nodes("a", "b"), edges: [] };
   const out = engineSolve(input, { ...OPTS, prevOrder: [["gone", "b", "vanished", "a"]] });
@@ -416,10 +480,10 @@ test("nesting: a container's own w/h in the input is ignored, the rect comes fro
 // -------------------------------------------------------------------- degenerate input
 
 test("degenerate: empty graph", () => {
-  const out = engineSolve({ nodes: [], edges: [] }, OPTS);
-  assert.deepEqual(out, { nodes: {}, edges: {}, order: [] });
-  assert.deepEqual(engineSolve({}, OPTS), { nodes: {}, edges: {}, order: [] });
-  assert.deepEqual(engineSolve(undefined, undefined), { nodes: {}, edges: {}, order: [] });
+  const empty = { nodes: {}, edges: {}, order: [], layers: [] };
+  assert.deepEqual(engineSolve({ nodes: [], edges: [] }, OPTS), empty);
+  assert.deepEqual(engineSolve({}, OPTS), empty);
+  assert.deepEqual(engineSolve(undefined, undefined), empty);
 });
 
 test("degenerate: single node sits at the margin", () => {

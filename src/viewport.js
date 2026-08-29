@@ -25,9 +25,16 @@ export function createViewport(svgEl, viewportG, ticker) {
   let panning = null;   // {x, y} last client point
   let pinch = null;     // {dist, mid}
 
+  // Anything that wants to know the visible world rect just moved — culling, above all.
+  // Fired from apply(), so it covers every route the transform can change by: a drag, a
+  // pinch, a wheel zoom, fit()/zoomBy()/anchor(), and each tick of their tweens. Watching
+  // the svg's pointer events instead (which is what culling did) misses every programmatic
+  // move: g.fitView() left everything the last zoom had hidden hidden.
+  const changed = new Set();
   const round = (n) => Math.round((Number.isFinite(n) ? n : 0) * 1000) / 1000;
   function apply() {
     viewportG.setAttribute("transform", `translate(${round(state.x)},${round(state.y)}) scale(${round(state.k)})`);
+    for (const cb of changed) cb();
   }
 
   function size() {
@@ -221,9 +228,12 @@ export function createViewport(svgEl, viewportG, ticker) {
     contains,
     visibleWorldRect,
     zoomBy(factor, at) { zoomAbout(at || { x: size().w / 2, y: size().h / 2 }, factor); userMoved = true; },
+    /** Subscribe to "the transform just changed". Returns an unsubscribe. */
+    onChange(cb) { if (typeof cb === "function") changed.add(cb); return () => changed.delete(cb); },
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      changed.clear();
       stopTween();
       if (canListen) {
         svgEl.removeEventListener("pointerdown", onPointerDown);

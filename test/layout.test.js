@@ -112,6 +112,47 @@ test("re-solving with its own order back is a fixed point (stability channel)", 
   assert.deepEqual(again.nodes, first.nodes);
 });
 
+test("layout() hands `layers` back and threads it down as opts.prevLayers", () => {
+  const first = layout(fixtureLoop(), OPTS);
+  assert.ok(Array.isArray(first.layers) && first.layers.length > 0);
+  let received;
+  const spy = (input, opts) => {
+    received = opts.prevLayers;
+    return { nodes: {}, edges: {}, order: [], layers: [] };
+  };
+  layout(fixtureLoop(), { ...OPTS, solver: spy, prevLayers: first.layers });
+  assert.deepEqual(received, first.layers);
+  // A solver that does not produce layers (the dagre adapter) still yields a usable result.
+  const none = layout(fixtureLoop(), { ...OPTS, solver: () => ({ nodes: {}, edges: {}, order: [] }) });
+  assert.deepEqual(none.layers, []);
+});
+
+test("container chrome is reserved: tiny nodesep/ranksep still clear the padded rect", () => {
+  // Regression: the emitted rect is the children bbox grown by CLUSTER_PAD (engine) and then
+  // by CONTAINER_PAD (padContainers). Neither growth was reserved anywhere, so below
+  // ranksep ~12 or nodesep ~6 a container swallowed a node that is not its child.
+  const WH = { w: 100, h: 36 };
+  const view = {
+    nodes: [
+      { id: "C", ...WH }, { id: "c1", ...WH, parent: "C" }, { id: "c2", ...WH, parent: "C" },
+      { id: "p", ...WH }, { id: "q", ...WH }, { id: "r", ...WH },
+    ],
+    edges: [
+      { id: "e1", source: "c1", target: "c2" }, { id: "e2", source: "p", target: "q" },
+      { id: "e3", source: "q", target: "r" }, { id: "e4", source: "c2", target: "r" },
+    ],
+  };
+  for (const o of [{ ranksep: 8 }, { ranksep: 2 }, { nodesep: 6 }, { nodesep: 2 }]) {
+    const res = layout(view, { dir: "LR", nodesep: 28, ranksep: 56, ...o });
+    const c = res.nodes.C;
+    for (const id of ["p", "q", "r"]) {
+      const n = res.nodes[id];
+      const hit = Math.abs(n.x - c.x) < (n.w + c.w) / 2 && Math.abs(n.y - c.y) < (n.h + c.h) / 2;
+      assert.ok(!hit, `${id} overlaps container C at ${JSON.stringify(o)}`);
+    }
+  }
+});
+
 test("appending a node with prevOrder passed leaves every existing rank's order intact", () => {
   let order;
   let pinned;

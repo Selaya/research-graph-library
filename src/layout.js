@@ -7,6 +7,7 @@
 //     bounds: { x, y, w, h }
 //     reversedEdgeIds: Set<string>            // persist -> opts.pinnedReversals (D3)
 //     order:  string[][]                      // persist -> opts.prevOrder (order stability)
+//     layers: string[][]                      // persist -> opts.prevLayers (bend stability)
 //   }
 //
 // This file is the SHELL around a pluggable solver: `opts.solver` (default `engineSolve`)
@@ -41,6 +42,12 @@ export function layout(view, opts = {}) {
   const reversed = breakCycles(nodes, realEdges, o.pinnedReversals);
 
   const hasParents = nodes.some((n) => n.parent !== undefined);
+  // padContainers below grows every container rect past the solver's own idea of it, so the
+  // solver has to reserve that chrome up front or the grown rect lands on a neighbouring
+  // rank's nodes at small ranksep. One conservative scalar (the largest side) keeps the
+  // solver out of the business of knowing which screen axis a dir maps a rank onto.
+  const cpad = { ...CONTAINER_PAD, ...(o.containerPad || {}) };
+  o.chromePad = Math.max(cpad.top, cpad.side, cpad.bottom);
   // INVARIANT (solver contract): the edge set handed down is acyclic, and no edge touches
   // a node that has children — viewstate.js re-attaches those to the interior entry/exit
   // child before we ever get here (D5). Back edges are withheld entirely: we route them
@@ -95,6 +102,13 @@ export function layout(view, opts = {}) {
     // Persisted by the caller and handed back as opts.prevOrder next time — the solver's
     // order-stability channel (the role dagre's `useDynamic` played).
     order: Array.isArray(solved.order) ? solved.order : [],
+    // `order` names only the real nodes, and a drawing is not determined by those alone:
+    // the bends of every multi-rank edge sit between them. `layers` is the same per-rank
+    // sequence WITH the bends, and persisting it is what makes a re-layout of an unchanged
+    // graph land on the identical picture instead of re-deriving the bends, scoring the
+    // arrangement differently, and reshuffling ranks nobody touched. Solvers that do not
+    // produce it (the dagre adapter) simply return nothing here.
+    layers: Array.isArray(solved.layers) ? solved.layers : [],
   };
 }
 

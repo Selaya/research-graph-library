@@ -4,7 +4,7 @@
 // the in-house engine, and the dagre solver lives in the ESM-only src/adapters/dagre.js,
 // which no bundle here entry-points. assertNoDagre() below turns that from an intention
 // into a build failure.
-import { existsSync, mkdirSync, appendFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, appendFileSync, readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import * as esbuild from 'esbuild';
@@ -13,6 +13,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const entry = join(root, 'src', 'index.js');
 const outdir = join(root, 'dist');
+// The core-size metric bundle is a CI artifact, not a deliverable — see below. package.json
+// packs the whole of `dist`, so it has to live somewhere `files` does not name.
+const metricdir = join(root, 'build');
 
 if (!existsSync(entry)) {
   console.error(`build: entry ${entry} does not exist yet — nothing to build.`);
@@ -20,6 +23,9 @@ if (!existsSync(entry)) {
 }
 
 mkdirSync(outdir, { recursive: true });
+mkdirSync(metricdir, { recursive: true });
+// A metric bundle left in dist by an older checkout would still be published.
+rmSync(join(outdir, 'smv.core.esm.js'), { force: true });
 
 async function build() {
   // full ESM bundle, dagre included, unminified
@@ -51,10 +57,15 @@ async function build() {
 
   // core-size metric only ("core, no layout" — plan §8's public commitment). Through M2
   // that meant `external: ['@dagrejs/dagre']`; from M3 the layout engine is ours and lives
-  // in src/engine.js, so THAT is what gets subtracted. Metric bundle, never shipped.
+  // in src/engine.js, so THAT is what gets subtracted.
+  //
+  // Written to build/, NOT dist/: `external: ['./engine.js']` leaves an unresolvable import
+  // in it, so it is a broken module the moment anyone loads it — and package.json's `files`
+  // packs all of dist, which is how "never shipped" quietly became 106KB of dead, broken
+  // code in every published tarball. The size gate reads it from here.
   await esbuild.build({
     entryPoints: [entry],
-    outfile: join(outdir, 'smv.core.esm.js'),
+    outfile: join(metricdir, 'smv.core.esm.js'),
     bundle: true,
     format: 'esm',
     minify: true,
@@ -72,13 +83,13 @@ async function build() {
  */
 function assertNoDagre() {
   const files = [
-    { name: 'smv.esm.js', strict: false },
-    { name: 'smv.iife.min.js', strict: true },
-    { name: 'smv.core.esm.js', strict: true },
+    { name: 'smv.esm.js', dir: outdir, strict: false },
+    { name: 'smv.iife.min.js', dir: outdir, strict: true },
+    { name: 'smv.core.esm.js', dir: metricdir, strict: true },
   ];
   const bad = [];
   for (const f of files) {
-    const src = readFileSync(join(outdir, f.name), 'utf8');
+    const src = readFileSync(join(f.dir, f.name), 'utf8');
     if (/@dagrejs|graphlib/i.test(src)) bad.push(`${f.name}: bundles @dagrejs/graphlib code`);
     else if (f.strict && /dagre/i.test(src)) bad.push(`${f.name}: contains "dagre"`);
   }
@@ -91,7 +102,7 @@ function assertNoDagre() {
 
 build().then(() => {
   assertNoDagre();
-  console.log('build: wrote dist/smv.esm.js, dist/smv.iife.min.js, dist/smv.core.esm.js');
+  console.log('build: wrote dist/smv.esm.js, dist/smv.iife.min.js (+ build/smv.core.esm.js, metric only)');
 }).catch(err => {
   console.error(err);
   process.exit(1);

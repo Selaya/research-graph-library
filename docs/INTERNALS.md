@@ -653,7 +653,7 @@ M2 is DONE and merged (351 tests, e2e-m0/1/2, size, types green). Do not regress
 
 ```js
 engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},…]}},
-                             order: string[][] }
+                             order: string[][], layers: string[][] }
 ```
 
 - `input = { nodes: [{id, w, h, parent?}], edges: [{id, source, target}] }` with two
@@ -662,13 +662,28 @@ engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},
   entry/exit re-attachment, D5). Multi-edges (same endpoints, distinct ids) and
   disconnected components must work.
 - `opts = { dir:'LR'|'RL'|'TB'|'BT', nodesep, ranksep, marginx, marginy,
-  prevOrder?: string[][] }`. Implement internally for TB; transpose/flip for the others.
+  prevOrder?: string[][], prevLayers?: string[][], chromePad?: number }`. Implement
+  internally for TB; transpose/flip for the others.
 - Output: x,y are **centers**; container nodes (those that are some node's `parent`)
   get a rect covering their children (the shell's `padContainers` adds chrome after —
   engine padding just needs children strictly inside). Edge `points` include the bend
   chain (dummy positions), ≥2 points, running source→target. `order` = final per-rank
   id sequences (real nodes only) — the caller persists it and passes it back as
   `prevOrder` for order stability across re-layouts (the dagre `useDynamic` role).
+- **`layers` is the other half of that channel, and it is not optional.** `order` names
+  only the real nodes, and a drawing is *not* determined by those alone: every
+  multi-rank edge's bends sit between them, and a container that spans a rank without
+  holding anything there sits somewhere among them too. Re-deriving those on each solve
+  made a re-layout start from a differently-scored arrangement than the one it was
+  supposed to reproduce, so some sweep looked "strictly better" and ranks nobody had
+  touched got reshuffled. `layers` = the same per-rank sequences with those items
+  interleaved as opaque tokens; the caller persists it beside `order` and hands it back
+  as `prevLayers`. **Contract: `engineSolve(g, {prevOrder, prevLayers})` fed its own
+  output is a fixed point in `order`, `layers`, `nodes` AND `edges`.** A solver that
+  cannot produce `layers` (the dagre adapter) omits it, and the shell degrades to `[]`.
+- `chromePad` is how much padding the CALLER will add around a container rect after the
+  solve (layout.js passes its `CONTAINER_PAD`). The solver reserves it in the rank axis;
+  without that the padded rect eats the neighbouring rank whenever `ranksep` is small.
 - Passes (plan D2/M3, keep it the simple heuristic ON PURPOSE):
   1. **Nesting**: derive the cluster tree; constrain ranking so a cluster's nodes
      occupy a contiguous rank interval (nesting border ranks: reserve a top/bottom
@@ -682,10 +697,28 @@ engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},
      equal-crossing decisions always prefer the previous order** (stability beats one
      crossing); keep the best-crossing result; cluster children stay contiguous within
      a rank (sort by cluster block).
+     **A cluster's block order is global, not per-rank.** Which side of a sibling a
+     container's block sits on is decided once, for every rank it spans; letting each
+     rank pick from its own members lets a container sit left of a sibling on one rank
+     and right of it on the next, and since the emitted rect is the union of the
+     members' cells across all ranks, both siblings then get a rect spanning the whole
+     drawing — each containing the other's children.
+     **The search must be idempotent, not merely bounded**: it ends only once a full
+     run of sweeps started from the best arrangement fails to improve on it. Stopping
+     after a fixed sweep count leaves an order the next solve (which starts from that
+     best) can still beat, which is the fixed point above breaking.
   5. **Coordinates**: rank axis = cumulative max-extent + ranksep; in-rank positions by
      a few median-alignment relaxation sweeps (parent/child barycenter) with minimum
      separation `nodesep` enforced left-to-right then right-to-left (priority: dummies
      straighten first). NO Brandes–Köpf (plan explicitly ships the simpler heuristic).
+     Container chrome is **reserved, not assumed**: a border dummy is at least as wide
+     as the padding the rect grows by, its distance from the rect edge is what the
+     separation rule will demand of the first member inside, two nested borders are only
+     the nesting step apart (charging them a whole node's gap makes the alignment
+     targets unreachable at ≥2 levels and pools them instead), and the border-alignment
+     loop runs until the rects stop moving rather than for a fixed number of passes.
+     Two sibling containers whose rank spans overlap are grown to their common window,
+     so the band each reserves exists on every rank that can put them side by side.
   6. Margins applied last; deterministic throughout (no Math.random, stable sorts).
 - Determinism: same input+opts → identical output, byte for byte.
 - Target ≤ ~10KB gzip alone. No imports beyond possibly `./cycles.js` helpers (should
@@ -694,8 +727,10 @@ engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},
 ## `src/layout.js` — solver shell (integration agent)
 
 `layout(view, opts)` keeps its exact public shape and gains `opts.solver` (defaults to
-`engineSolve`) and `opts.prevOrder`; the result gains `order` (alongside
-`reversedEdgeIds`) for the caller to persist. Everything else in the shell (breakCycles
+`engineSolve`), `opts.prevOrder` and `opts.prevLayers`; the result gains `order` and
+`layers` (alongside `reversedEdgeIds`) for the caller to persist — both, together.
+The shell also derives `opts.chromePad` from its own `CONTAINER_PAD` so the solver can
+reserve the padding `padContainers` is about to add. Everything else in the shell (breakCycles
 + pinning, back-edge/self-loop arcs, `padContainers`, bounds) is UNCHANGED. The dagre
 import is REMOVED from this file.
 
@@ -719,7 +754,16 @@ the IIFE and default ESM path must not pull it in at all.
   it saves). Token layer (`run-render`) reads positions from `scene.visual` — culling
   must not corrupt tokens whose node is culled (skip drawing their pulse when outside).
 - index.js wires `renderer.setCull(() => viewport.visibleWorldRect())` after mount and
-  re-arms on pan/zoom (integration agent).
+  re-arms from **`viewport.onChange`**, not from the svg's pointer events (integration
+  agent). "Pan/zoom" includes `g.fitView()`, `viewport.zoomBy()`, the anchored
+  correction and every tick of their tweens — none of which fire a pointer event, and
+  all of which used to leave whatever the previous transform had hidden hidden for good.
+- Culling is live-DOM state, so anything that reads the live DOM has to account for it:
+  - `export.js` clones the live svg, so it **clears `data-culled`/`display:none` on the
+    clone**. A standalone export always draws the whole graph its viewBox claims.
+  - `a11y.js` never parks the roving tabindex on a culled group: `.focus()` on a hidden
+    element is a silent no-op, so committing `currentId` there strands real focus on the
+    element just demoted to `tabindex="-1"`. Arrow/Home/End walk the focusable subset.
 
 ## Gates & budget (integration + verify)
 

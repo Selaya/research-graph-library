@@ -96,7 +96,7 @@ g.layout({ dir: "TB" });
 
 // ---- M3: the layout solver seam + the optional dagre adapter --------------------------
 const solver: LayoutSolver = dagreSolver;
-g.layout({ dir: "LR", solver, prevOrder: [["ingest"], ["clean"]] });
+g.layout({ dir: "LR", solver, prevOrder: [["ingest"], ["clean"]], prevLayers: [["ingest"], ["clean"]] });
 
 const solved: SolverResult = solver(
   { nodes: [{ id: "a", w: 100, h: 36 }], edges: [] } satisfies SolverInput,
@@ -110,8 +110,9 @@ const adapted: LayoutResult = dagreLayout(
   { dir: "LR" }
 );
 const persistedOrder: string[][] = adapted.order;
+const persistedLayers: string[][] = adapted.layers;
 const persistedPins: Set<string> = adapted.reversedEdgeIds;
-void [persistedOrder, persistedPins];
+void [persistedOrder, persistedLayers, persistedPins];
 
 // ---- query sugar ----------------------------------------------------------------------
 const doneNodes: NodeSpec[] = g.nodes({ data: { status: "done" } });

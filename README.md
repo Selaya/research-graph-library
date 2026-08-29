@@ -175,10 +175,12 @@ g.layout({ dir: "TB" });    // relayout + animate into the new direction
 
 All four directions (`LR`/`RL`/`TB`/`BT`) are solved top-to-bottom internally and
 transposed on the way out, so they are exactly as good as each other. Order stability
-across re-layouts is automatic: `mount()` persists each layout's per-rank order and feeds
-it back as `prevOrder`, the same way it pins cycle-breaking reversals — appending a node
-does not reshuffle the ranks around it, and storyboard snapshots carry the order so a
-backward scrub restores the drawing it is replaying.
+across re-layouts is automatic: `mount()` persists each layout's per-rank order (`order`,
+plus `layers` — the same sequences with each multi-rank edge's bends interleaved, because
+the real nodes alone do not determine a drawing) and feeds both back as `prevOrder` /
+`prevLayers`, the same way it pins cycle-breaking reversals. Relaying out an unchanged
+graph reproduces it exactly, appending a node does not reshuffle the ranks around it, and
+storyboard snapshots carry both so a backward scrub restores the drawing it is replaying.
 
 *Want dagre back?* It lives on as an optional adapter behind the same solver seam —
 install the optional peer and pass a solver:
@@ -196,7 +198,8 @@ const result = dagreLayout(view, { dir: "LR" });   // or drive layout() directly
 
 Nothing on the default path imports dagre — the build hard-fails if it appears in any
 bundle — so the adapter costs non-users nothing. A solver is just
-`(input, opts) → {nodes, edges, order}`; the shell keeps cycle breaking, back-edge and
+`(input, opts) → {nodes, edges, order, layers?}` (`layers` is the bend-stability channel;
+omit it and the shell simply returns `[]`); the shell keeps cycle breaking, back-edge and
 self-loop arcs, container padding and bounds either way.
 
 **Exports.** ESM-only entries (not in the IIFE, D11):

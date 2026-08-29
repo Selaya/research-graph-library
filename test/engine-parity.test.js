@@ -116,7 +116,7 @@ function mulberry32(seed) {
   };
 }
 
-const KINDS = ["chain", "layered", "diamond", "fan", "multi", "disconnected", "nested", "wide"];
+const KINDS = ["chain", "layered", "diamond", "fan", "multi", "disconnected", "nested", "siblings", "wide"];
 
 /** Acyclic by construction: every edge runs from a lower to a higher node index. */
 function synth(kind, seed) {
@@ -198,6 +198,27 @@ function synth(kind, seed) {
     for (let i = 1; i < outside.length; i++) E(outside[i - 1], outside[i]);
     if (mid.length && outside.length) E(mid[0], outside[outside.length - 1]);
     if (outside.length > 1) E(outside[0], inner[0]);
+  } else if (kind === "siblings") {
+    // Two or three sibling containers whose members trade edges across the ranks they share
+    // — the shape that used to make a cluster's block sit left of a sibling on one rank and
+    // right of it on the next, and hand both of them the same full-width rect.
+    const groups = [];
+    for (let c = 0; c < 2 + pick(2); c++) {
+      N(`G${c}`, { w: 10, h: 10 });
+      const members = [];
+      for (let i = 0; i < 2 + pick(3); i++) members.push(N(`g${c}_${i}`, { parent: `G${c}` }));
+      for (let i = 1; i < members.length; i++) E(members[i - 1], members[i]);
+      groups.push(members);
+    }
+    for (let c = 1; c < groups.length; c++) {
+      const from = groups[c - 1], to = groups[c];
+      // Deliberately symmetric: each group feeds the other's tail, so neither has a reason
+      // to stay on one side of the other unless the solver makes it a hard constraint.
+      E(from[0], to[to.length - 1]);
+      E(to[0], from[from.length - 1]);
+      if (rnd() < 0.5) E(from[pick(from.length - 1)], to[1 + pick(to.length - 1)]);
+    }
+    for (let i = 0; i < 1 + pick(3); i++) N(`free${i}`);
   } else {
     // wide: two very wide ranks with a random matching between them
     const n = 10 + pick(10);
@@ -248,8 +269,8 @@ test("golden fixtures: engine invariants hold and crossings never regress on dag
   }
 });
 
-test("seeded synthetics: engine invariants hold on all 40 graphs", () => {
-  assert.equal(cases.length, 40);
+test("seeded synthetics: engine invariants hold on all 45 graphs", () => {
+  assert.equal(cases.length, 45);
   for (const { name, input } of cases) {
     const out = engineSolve(input, O);
     checkInvariants(input, out, O, name);
@@ -290,11 +311,17 @@ test("seeded synthetics: every solve is deterministic and pure", () => {
   }
 });
 
-test("seeded synthetics: feeding `order` back as prevOrder is a fixed point", () => {
+test("seeded synthetics: feeding the drawing back is a fixed point", () => {
+  // `order` names the real nodes; `layers` adds where each multi-rank edge bends. Both are
+  // the stability channel — the caller persists them and hands them straight back — and a
+  // re-solve of an unchanged graph has to land on the identical picture, not merely the
+  // same ranks.
   for (const { name, input } of cases) {
     const first = engineSolve(input, O);
-    const second = engineSolve(input, { ...O, prevOrder: first.order });
+    const second = engineSolve(input, { ...O, prevOrder: first.order, prevLayers: first.layers });
     assert.deepEqual(second.order, first.order, `${name} drifted on re-layout`);
+    assert.deepEqual(second.layers, first.layers, `${name}: bends drifted on re-layout`);
+    assert.deepEqual(second.nodes, first.nodes, `${name}: geometry drifted on re-layout`);
   }
 });
 
@@ -310,7 +337,7 @@ test("seeded synthetics: appending a node with prevOrder keeps every rank's orde
       nodes: [...input.nodes, { id: "__new", w: 90, h: 30 }],
       edges: [...input.edges, { id: "__enew", source: anchor.id, target: "__new" }],
     };
-    const second = engineSolve(grown, { ...O, prevOrder: first.order });
+    const second = engineSolve(grown, { ...O, prevOrder: first.order, prevLayers: first.layers });
     const was = countCrossings(drawn(input, first));
     const now = countCrossings(drawn(grown, second, input.edges));
     assert.ok(now <= was, `${name}: appending a node made the old edges cross more (${was} -> ${now})`);

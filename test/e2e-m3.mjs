@@ -251,13 +251,18 @@ try {
   check(sc.culledZoomed > 0, "zooming into a corner culls a real fraction of groups", String(sc.culledZoomed));
   check(sc.culledZoomed > sc.totalGroups * 0.3,
     "…specifically, more than 30% of groups are culled once zoomed in", `${sc.culledZoomed}/${sc.totalGroups}`);
+  // The demo zooms in with no pointer event at all, so this also gates that a purely
+  // programmatic viewport move re-arms the cull pass at all.
+  check(sc.culledAfterFit === 0,
+    "fitView() un-culls everything again (a programmatic move re-arms culling)", String(sc.culledAfterFit));
   check(Array.isArray(sc.nan) && sc.nan.length === 0, "no NaN/Infinity anywhere in the m3-scale DOM", JSON.stringify(sc.nan));
   check(Number.isFinite(sc.frameMedianMs) && sc.frameMedianMs >= 0, "pan frame median is a finite number",
     String(sc.frameMedianMs));
   check(sc.frameSamples > 30, "enough pan frames were sampled over 2s to be meaningful", String(sc.frameSamples));
 
   console.log(`m3-scale: nodes=${sc.totalNodes} groups=${sc.totalGroups} culledAtFit=${sc.culledAtFit} ` +
-    `culledZoomed=${sc.culledZoomed}/${sc.totalGroups} panMedian=${sc.frameMedianMs?.toFixed(2)}ms ` +
+    `culledZoomed=${sc.culledZoomed}/${sc.totalGroups} culledAfterFit=${sc.culledAfterFit} ` +
+    `panMedian=${sc.frameMedianMs?.toFixed(2)}ms ` +
     `panMean=${sc.frameMeanMs?.toFixed(2)}ms panMax=${sc.frameMaxMs?.toFixed(2)}ms samples=${sc.frameSamples}`);
 
   // Compositor-offload decision rule (docs/DEVIATIONS.md item 10, plan §7 M3): if the

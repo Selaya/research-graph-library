@@ -17,6 +17,20 @@ function fakeSvg() {
     ["class", "smv"],
     ["xmlns", "http://www.w3.org/2000/svg"],
   ]);
+  // Two groups the live renderer culled (M3): data-culled + inline display:none, exactly
+  // what cloneNode(true) carries over from the live scene.
+  const culledGroup = (id) => ({
+    attrs: new Map([["data-culled", ""], ["data-id", id], ["class", "smv-node"]]),
+    style: { display: "none" },
+    getAttribute(name) { return this.attrs.has(name) ? this.attrs.get(name) : null; },
+    removeAttribute(name) { this.attrs.delete(name); },
+    get outerHTML() {
+      const a = [...this.attrs.entries()].map(([k, v]) => `${k}="${v}"`).join(" ");
+      const st = this.style.display ? ` style="display: ${this.style.display}"` : "";
+      return `<g ${a}${st}></g>`;
+    },
+  });
+  const hidden = [culledGroup("b"), culledGroup("c")];
   const viewport = {
     attrs: new Map([["transform", "translate(10,20) scale(1.5)"]]),
     removeAttribute(name) {
@@ -24,7 +38,8 @@ function fakeSvg() {
     },
     get outerHTML() {
       const a = [...this.attrs.entries()].map(([k, v]) => `${k}="${v}"`).join(" ");
-      return `<g class="smv-viewport" ${a}><g class="smv-edges"></g><g class="smv-nodes"><g class="smv-node" data-id="a"><text>Ingest &amp; Go</text></g></g></g>`;
+      const h = hidden.map((x) => x.outerHTML).join("");
+      return `<g class="smv-viewport" ${a}><g class="smv-edges"></g><g class="smv-nodes"><g class="smv-node" data-id="a"><text>Ingest &amp; Go</text></g>${h}</g></g>`;
     },
   };
   const el = {
@@ -43,6 +58,9 @@ function fakeSvg() {
     },
     querySelector(sel) {
       return sel === ".smv-viewport" ? viewport : null;
+    },
+    querySelectorAll(sel) {
+      return sel === "[data-culled]" ? hidden.filter((x) => x.getAttribute("data-culled") !== null) : [];
     },
     get outerHTML() {
       const a = [...attrs.entries()].map(([k, v]) => `${k}="${v}"`).join(" ");
@@ -115,6 +133,18 @@ test("exportSVG: passes through rendered node markup", () => {
   const svg = exportSVG(fakeG());
   assert.match(svg, /data-id="a"/);
   assert.match(svg, /Ingest &amp; Go/);
+});
+
+test("exportSVG: un-hides everything viewport culling hid on the live scene", () => {
+  // Regression: the export is a clone of the LIVE svg, and M3 culling leaves off-screen
+  // groups at data-culled + display:none. Resetting the viewBox to the whole graph while
+  // leaving those in place produced a valid but near-empty document whenever the user
+  // exported while zoomed in — the metadata said "everything", the content was ~10% of it.
+  const svg = exportSVG(fakeG());
+  assert.doesNotMatch(svg, /data-culled/, "no culled markers survive into the export");
+  const markup = svg.slice(svg.indexOf("</style>")); // the CSS itself legitimately says display:none
+  assert.doesNotMatch(markup, /display:\s*none/, "no group is left hidden");
+  for (const id of ["a", "b", "c"]) assert.match(svg, new RegExp(`data-id="${id}"`), `${id} is in the export`);
 });
 
 test("exportPNG: rejects with a clear Error under Node", async () => {

@@ -70,6 +70,7 @@
   <div class="tile"><i>groups</i><span id="m-groups">—</span></div>
   <div class="tile"><i>culled at fit</i><span id="m-fit">—</span></div>
   <div class="tile"><i>culled zoomed</i><span id="m-zoom">—</span></div>
+  <div class="tile"><i>culled after re-fit</i><span id="m-refit">—</span></div>
   <div class="tile"><i>median frame</i><span id="m-frame">—</span></div>
 </div>
 
@@ -119,6 +120,7 @@
   var $ = function (sel) { return document.querySelector(sel); };
   var phaseEl = $("#phase"), reportEl = $("#report"), runBtn = $("#run");
   var mGroups = $("#m-groups"), mFit = $("#m-fit"), mZoom = $("#m-zoom"), mFrame = $("#m-frame");
+  var mRefit = $("#m-refit");
 
   var g;
   try {
@@ -245,12 +247,9 @@
     // graph off-screen while leaving the near corner populated (a partial cull count is a
     // more convincing demonstration than "everything vanished", and matches the shape the
     // culling agent measured: 280/399 then 364/399, never 0 or all).
+    // No synthetic pointermove: the viewport re-arms culling itself on every transform
+    // change, programmatic ones included (INTERNALS "Culling" contract).
     g.viewport.zoomBy(3, { x: 0, y: 0 });
-    // A programmatic transform change fires no scene frame — a real pan/zoom re-arms
-    // culling via a pointermove on the svg (INTERNALS "Culling" contract); do the same here.
-    g.renderer.svg.dispatchEvent(new PointerEvent("pointermove", {
-      clientX: 1, clientY: 1, bubbles: true, cancelable: true, pointerId: 424242,
-    }));
     await sleep(100);
 
     checks.culledZoomed = culledCount();
@@ -264,9 +263,13 @@
     checks.frameSamples = pan.count;
     mFrame.textContent = (Number.isFinite(pan.median) ? pan.median.toFixed(2) : "?") + "ms";
 
-    // Put the viewport back for a clean final screenshot/state.
+    // Put the viewport back for a clean final screenshot/state — and check it, because a
+    // fitView that does not re-arm culling leaves most of the graph hidden behind a
+    // viewBox that says otherwise.
     g.fitView({ animate: false });
     await sleep(150);
+    checks.culledAfterFit = culledCount();
+    mRefit.textContent = String(checks.culledAfterFit);
 
     checks.nan = scanNaN();
 
@@ -276,6 +279,7 @@
       "nodes/edges/groups     " + checks.totalNodes + " / " + checks.totalEdges + " / " + checks.totalGroups + "\n" +
       "culled at fit           " + checks.culledAtFit + "\n" +
       "culled zoomed in        " + checks.culledZoomed + "\n" +
+      "culled after re-fit     " + checks.culledAfterFit + "\n" +
       "pan frame median/mean   " + checks.frameMedianMs.toFixed(2) + "ms / " + checks.frameMeanMs.toFixed(2) + "ms (" + checks.frameSamples + " samples)\n" +
       "NaN in DOM              " + (checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
       "errors                  " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
