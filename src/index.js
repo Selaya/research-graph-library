@@ -14,6 +14,9 @@ import { createViewport } from "./viewport.js";
 import { injectStyles } from "./styles.js";
 import { createViewState } from "./viewstate.js";
 import { runCondense } from "./condense-anim.js";
+import { runSplit } from "./split-anim.js";
+import { makeQuery } from "./query.js";
+import { attachA11y } from "./a11y.js";
 import { createRunTransport } from "./run-transport.js";
 import { createRunRender } from "./run-render.js";
 import { createStoryboard } from "./storyboard.js";
@@ -182,6 +185,23 @@ export function mount(el, spec = {}, opts = {}) {
 
   const settled = () => thenable(Promise.resolve({ canceled: false }), () => {});
 
+  /** Nearest positioned ancestor of `id` (itself first) in a layout's node map. What makes
+   *  expandAll/collapseAll bloom from / fly into the RIGHT container when several, possibly
+   *  nested, containers move in one commit: a child three levels down still finds the
+   *  outermost box that is actually on screen in that layout. */
+  function anchorFrom(nodes, id) {
+    const seenUp = new Set();
+    let cur = id;
+    while (cur !== undefined && !seenUp.has(cur)) {
+      const r = nodes && nodes[cur];
+      if (r) return { x: r.x, y: r.y };
+      seenUp.add(cur);
+      const n = store.node(cur);
+      cur = n ? n.parent : undefined;
+    }
+    return null;
+  }
+
   // ---- M1: token run + storyboard + transport (D4/D8) --------------------------
   let runCtl = null;      // the run-transport driving compileRun on the shared ticker
   let runRender = null;   // the g.smv-tokens decoration layer
@@ -191,6 +211,7 @@ export function mount(el, spec = {}, opts = {}) {
   let sbPlaying = false;
   let transport = null;
   let preset = null;
+  let a11y = null;
   const tbus = emitter(); // transport-facing "something moved" channel
   const notify = () => tbus.emit("change", null);
 
@@ -520,7 +541,71 @@ export function mount(el, spec = {}, opts = {}) {
       return thenable(run.promise, run.cancel);
     },
 
-    /** D4 — the token run. Called with opts it (re)compiles; bare it returns the live one. */
+    /** D6 inverse — one node becomes N. Same discipline as condense: every guard that
+     *  store.split() will apply is asked here, synchronously, so a bad call throws at the
+     *  call site instead of 150ms later out of runSplit's async phase 2. */
+    split(id, parts) {
+      if (!store.hasNode(id)) throw new GraphError("missing", `node "${id}" does not exist`);
+      if (store.children(id).length > 0) {
+        throw new GraphError("split-container", `node "${id}" is a container (has children) and cannot be split`);
+      }
+      const list = (parts && parts.nodes) || [];
+      if (!list.length) throw new GraphError("missing", "split requires at least one new node");
+      const ids = new Set();
+      for (const n of list) {
+        if (!n || n.id == null || n.id === "") throw new GraphError("node-id", "every node needs a non-empty id");
+        if (ids.has(n.id)) throw new GraphError("dup-id", `duplicate node id "${n.id}" in split`);
+        // The split node itself is going away, so reusing its id is legal (store.split agrees).
+        if (n.id !== id && store.hasNode(n.id)) throw new GraphError("dup-id", `duplicate node id "${n.id}"`);
+        ids.add(n.id);
+      }
+      const run = runSplit(g, internals, id, parts);
+      return thenable(run.promise, run.cancel);
+    },
+
+    /** Every container open in ONE commit — the children bloom out of whichever box was
+     *  actually holding them, not out of a single global centroid. */
+    expandAll() {
+      const changed = vs.expandAll();
+      if (!changed.length) return settled();
+      bus.emit("expandAll", { ids: changed });
+      return commitOrDefer(changed[0], {
+        enterFrom: (res, prev) => {
+          const out = {};
+          if (!prev) return out;
+          for (const k of Object.keys(res.nodes)) {
+            if (prev.nodes[k]) continue;
+            const a = anchorFrom(prev.nodes, k);
+            if (a) out[k] = a;
+          }
+          return out;
+        },
+      });
+    },
+
+    /** The inverse: everything that just went away flies into its new collapsed box. */
+    collapseAll() {
+      const changed = vs.collapseAll();
+      if (!changed.length) return settled();
+      bus.emit("collapseAll", { ids: changed });
+      return commitOrDefer(changed[0], {
+        exitTo: (res, prev) => {
+          const out = {};
+          if (!prev) return out;
+          for (const k of Object.keys(prev.nodes)) {
+            if (res.nodes[k]) continue;
+            const a = anchorFrom(res.nodes, k);
+            if (a) out[k] = a;
+          }
+          return out;
+        },
+      });
+    },
+
+    /** D4 — the token run. Called with opts it (re)compiles; bare it returns the live one.
+     *  `{mode:'live'}` (Mode B) is a straight pass-through: run-transport owns the branch
+     *  and returns a wider surface (start/finish/spawn/follow/now). Storyboards stay Mode A
+     *  only in v1 — the op table is not live-aware. */
     run(o) { return o || !runCtl ? createRun(o || runOpts) : runCtl; },
 
     /** D8 — the JSON-op sequencer. Called with steps it (re)builds; bare it returns it. */
@@ -573,6 +658,7 @@ export function mount(el, spec = {}, opts = {}) {
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      if (a11y) { a11y.destroy(); a11y = null; }
       if (transport) { transport.destroy(); transport = null; }
       if (preset) { preset.destroy(); preset = null; }
       if (sb) { sb.pause(); sb = null; }
@@ -587,12 +673,20 @@ export function mount(el, spec = {}, opts = {}) {
     },
   };
 
+  // Query sugar (M2): nodes/edges/children/descendants/roots read straight off the store.
+  // The singular g.node/g.edge above are deliberately NOT clobbered — different arity,
+  // different meaning.
+  Object.assign(g, makeQuery(store));
+
   // The preset subscribes to "commit", so it has to exist before the first one.
   if (opts.preset === "pipeline") preset = applyPipelinePreset(g);
 
   // Initial paint: land immediately (nothing to tween from), then fit once (D10).
   relayout({ duration: 0 });
   viewport.fit(last.bounds, 24, false);
+
+  // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
+  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg });
 
   if (opts.storyboard) buildStoryboard(opts.storyboard);
   if (opts.controls) {

@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — M2 exit: generalization</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8; --card: #ffffff; --ink: #1b2230; --muted: #6b7488;
+    --line: rgba(128,138,160,.32); --accent: #5b6ef5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+             --line: rgba(128,138,160,.28); --accent: #8b9bff; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 76ch; }
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #stage {
+    height: 420px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+  .legend { margin-top: 14px; color: var(--muted); font-size: 12.5px; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Generalization <small>— M2 exit, live mode · split · a11y · exports</small></h1>
+  <p class="lede">
+    A scripted "live" feed drives tokens as they'd arrive from a real running pipeline
+    (start/finish/spawn, time-travel scrub, follow); <em>Automated prep</em> splits back
+    into three steps; every container flips open and shut in one transition; the graph is
+    fully keyboard-navigable; and the live scene exports to a standalone SVG/PNG.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="run" class="primary" type="button">Run checks</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="stage"></div>
+
+<p class="legend">
+  Legend — dashed pips under a node = live occupancy, <code>×N</code> badge = several
+  tokens sharing one node, chip = <code>data.duration</code>. The graph stays interactive
+  after the checks finish: Tab into it, arrow between steps, Enter/Space toggles a
+  container.
+</p>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script type="module">
+  // ESM-only entries (D11): not bundled into the IIFE, so exportSVG/exportPNG only exist
+  // when a page imports them itself — this is that import. Stashed on window so both the
+  // classic script above and test/e2e-m2.mjs (via page.evaluate) can reach it.
+  import { exportSVG, exportPNG } from "../src/export.js";
+  window.__smvExport = { exportSVG, exportPNG };
+</script>
+
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The spec. Four independent little stories share one canvas so each M2 feature gets a
+  // clean, uncontended piece of the graph:
+  //   - prep.a/b/c   -> condense() into prep.auto -> split() back into prep.x/y/z
+  //   - verifyA/verifyB -> two containers, for collapseAll()/expandAll()
+  //   - build --"final"--> ship -> a labeled edge between two ALWAYS-visible flat nodes
+  //     (never hidden behind a collapsed container, so its label is never a meta-edge
+  //     casualty — see the render-extras contract on meta-edge labels)
+  //   - ingest / build / buffer -> driven directly through g.run({mode:'live'})
+  // ---------------------------------------------------------------------------
+  var SPEC = {
+    nodes: [
+      { id: "ingest", label: "Ingest" },
+      { id: "prep.a", label: "Prep A", data: { duration: "20m" } },
+      { id: "prep.b", label: "Prep B", data: { duration: "15m" } },
+      { id: "prep.c", label: "Prep C", data: { duration: "25m" } },
+      { id: "build", label: "Build" },
+      { id: "verifyA", label: "Verify A", collapsed: true },
+      { id: "verifyA.unit", parent: "verifyA", label: "Unit" },
+      { id: "verifyA.e2e", parent: "verifyA", label: "E2E" },
+      { id: "verifyB", label: "Verify B", collapsed: true },
+      { id: "verifyB.unit", parent: "verifyB", label: "Unit" },
+      { id: "verifyB.e2e", parent: "verifyB", label: "E2E" },
+      { id: "ship", label: "Ship" },
+      { id: "buffer", label: "Buffer" },
+    ],
+    edges: [
+      { id: "e1", source: "ingest", target: "prep.a" },
+      { id: "e2", source: "prep.a", target: "prep.b" },
+      { id: "e3", source: "prep.b", target: "prep.c" },
+      { id: "e4", source: "prep.c", target: "build" },
+      { id: "e5", source: "build", target: "verifyA.unit" },
+      { id: "e6", source: "verifyA.unit", target: "verifyA.e2e" },
+      { id: "e7", source: "verifyA.e2e", target: "verifyB.unit" },
+      { id: "e8", source: "verifyB.unit", target: "verifyB.e2e" },
+      { id: "e9", source: "verifyB.e2e", target: "ship" },
+      { id: "e10", source: "build", target: "ship", label: "final" },
+    ],
+  };
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), reportEl = $("#report"), runBtn = $("#run");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#stage", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 22, ranksep: 42 },
+      animation: { duration: 300, easing: "cubic-out" },
+    });
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvM2 = { done: true, errors: errors, checks: {} };
+    return;
+  }
+  window.__g = g; // e2e drives a11y (keyboard) and export checks straight off this
+
+  // ---------------------------------------------------------------------------
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function nodeIds() {
+    var out = [];
+    document.querySelectorAll("#stage .smv-node").forEach(function (el) { out.push(el.getAttribute("data-id")); });
+    return out;
+  }
+
+  function labelInfo(edgeId) {
+    var el = document.querySelector('#stage .smv-edge[data-id="' + edgeId + '"] text.smv-edge-label');
+    if (!el) return null;
+    return { x: Number(el.getAttribute("x")), y: Number(el.getAttribute("y")), text: el.textContent };
+  }
+
+  // Occupancy badges live in the run-render decoration layer (g.smv-tokens), a SIBLING of
+  // .smv-node, not nested inside it — and carry no per-node id of their own (the pool key
+  // is internal). At most one node has occupancy > 1 in this script, so the plain class
+  // query is unambiguous.
+  function occupancyBadge() {
+    var el = document.querySelector('#stage .smv-tokens text.smv-token-badge');
+    return el ? el.textContent : null;
+  }
+
+  function countDone(state) {
+    var n = 0;
+    for (var k in state.nodes) if (state.nodes[k].status === "done") n++;
+    return n;
+  }
+
+  /** Any NaN/Infinity that reached an attribute or a text node under the mount root. */
+  function scanNaN() {
+    var bad = [];
+    var all = document.querySelectorAll("#stage *");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      for (var a = 0; a < el.attributes.length; a++) {
+        var at = el.attributes[a];
+        if (/NaN|Infinity/.test(at.value)) bad.push((el.getAttribute("class") || el.nodeName) + "@" + at.name + "=" + at.value);
+      }
+      if (el.children.length === 0 && /NaN|Infinity/.test(el.textContent || "")) {
+        bad.push((el.getAttribute("class") || el.nodeName) + "#text=" + el.textContent);
+      }
+    }
+    return bad;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1 — labels "before": captured before any structural mutation so the later
+  // "after" sample proves the label actually TRACKED the edge through a relayout, rather
+  // than just happening to still exist.
+  // ---------------------------------------------------------------------------
+  async function phaseLabelBefore(checks) {
+    await sleep(300); // let the initial fit land
+    checks.labelBefore = labelInfo("e10");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 — condense() then split(): the round trip (D6 + its inverse).
+  // ---------------------------------------------------------------------------
+  async function phaseSplit(checks) {
+    phaseEl.textContent = "condense -> split";
+    await g.condense(["prep.a", "prep.b", "prep.c"],
+      { id: "prep.auto", label: "Automated prep", data: { duration: "8s", mode: "automated" } });
+    await sleep(120);
+
+    checks.afterCondenseNodes = nodeIds();
+    var specA = g.spec();
+    var inEdge = specA.edges.find(function (e) { return e.target === "prep.auto"; });
+    var outEdge = specA.edges.find(function (e) { return e.source === "prep.auto"; });
+    checks.condenseInEdge = inEdge ? { id: inEdge.id, source: inEdge.source } : null;
+    checks.condenseOutEdge = outEdge ? { id: outEdge.id, target: outEdge.target } : null;
+
+    await g.split("prep.auto", {
+      nodes: [{ id: "prep.x", label: "Prep X" }, { id: "prep.y", label: "Prep Y" }, { id: "prep.z", label: "Prep Z" }],
+      edges: [{ id: "pxy", source: "prep.x", target: "prep.y" }, { id: "pyz", source: "prep.y", target: "prep.z" }],
+    });
+    await sleep(120);
+
+    checks.afterSplitNodes = nodeIds();
+    var specB = g.spec();
+    var inAfter = inEdge && specB.edges.find(function (e) { return e.id === inEdge.id; });
+    var outAfter = outEdge && specB.edges.find(function (e) { return e.id === outEdge.id; });
+    checks.splitInEdge = inAfter ? { id: inAfter.id, source: inAfter.source, target: inAfter.target } : null;
+    checks.splitOutEdge = outAfter ? { id: outAfter.id, source: outAfter.source, target: outAfter.target } : null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 3 — expandAll() then collapseAll(): every container flips in ONE transition.
+  // ---------------------------------------------------------------------------
+  async function phaseCollapseAll(checks) {
+    phaseEl.textContent = "expandAll / collapseAll";
+    checks.beforeExpandAll = nodeIds();
+    await g.expandAll();
+    await sleep(120);
+    checks.afterExpandAll = nodeIds();
+    await g.collapseAll();
+    await sleep(120);
+    checks.afterCollapseAll = nodeIds();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 4 — labels "after": same edge, now sampled post-relayout.
+  // ---------------------------------------------------------------------------
+  async function phaseLabelAfter(checks) {
+    checks.labelAfter = labelInfo("e10");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5 — Mode B "live": a scripted feed (start/finish, one spawn), time-travel seek
+  // clamped at "now", and events landing again after follow().
+  // ---------------------------------------------------------------------------
+  async function phaseLive(checks) {
+    phaseEl.textContent = "live run";
+    var run = g.run({ mode: "live", hopMs: 200 });
+
+    await sleep(120);
+    run.start("ingest");
+    await sleep(120);
+    run.finish("ingest");
+    var pastT = run.time();
+    checks.livePastT = pastT;
+
+    await sleep(280); // > hopMs
+    run.start("build");
+    await sleep(120);
+    run.finish("build");
+    await sleep(60);
+    run.spawn("buffer", 3);
+    await sleep(150);
+
+    var nowState = run.state();
+    checks.liveNowDone = countDone(nowState);
+    checks.liveNowT = run.time();
+    checks.liveOccupancyBadge = occupancyBadge();
+    checks.liveOccupancyState = nowState.nodes.buffer && nowState.nodes.buffer.occupancy;
+
+    run.seek(pastT);
+    var pastState = run.state();
+    checks.livePastDone = countDone(pastState);
+    checks.liveFollowingAfterSeek = run.following;
+
+    run.seek(1e9);
+    checks.liveClampOk = run.time() === run.now();
+
+    run.follow();
+    checks.liveFollowingAfterFollow = run.following;
+    await sleep(60);
+    run.start("buffer");
+    await sleep(150);
+    checks.liveAfterFollowStatus = run.state().nodes.buffer.status;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 6 — leave the graph in a known, interactive state: both remaining containers
+  // collapsed, so e2e's real-keyboard a11y pass has something to expand with Enter.
+  // ---------------------------------------------------------------------------
+  async function phaseSettle(checks) {
+    if (!g.viewstate.collapsed.has("verifyA")) await g.collapse("verifyA");
+    if (!g.viewstate.collapsed.has("verifyB")) await g.collapse("verifyB");
+    await sleep(80);
+    checks.finalNodeIds = nodeIds();
+  }
+
+  function writeReport(checks) {
+    reportEl.textContent = JSON.stringify(checks, null, 2);
+  }
+
+  async function runAll() {
+    runBtn.disabled = true;
+    var checks = {};
+    try {
+      await phaseLabelBefore(checks);
+      await phaseSplit(checks);
+      await phaseCollapseAll(checks);
+      await phaseLabelAfter(checks);
+      await phaseLive(checks);
+      await phaseSettle(checks);
+      checks.nan = scanNaN();
+      phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    } catch (err) {
+      errors.push("runAll: " + String((err && err.message) || err));
+      checks.nan = checks.nan || scanNaN();
+      phaseEl.textContent = "done — error";
+    }
+    writeReport(checks);
+    runBtn.disabled = false;
+    window.__smvM2 = { done: true, errors: errors, checks: checks };
+    return checks;
+  }
+
+  runBtn.addEventListener("click", function () { runAll(); });
+
+  if (AUTO) {
+    runAll();
+  }
+})();
+</script>
+
+</body>
+</html>

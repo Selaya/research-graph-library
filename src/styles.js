@@ -130,6 +130,16 @@ svg.smv.smv-grabbing{cursor:grabbing}
   stroke-linecap:round; stroke-linejoin:round;
 }
 .smv-edge path.smv-edge-arrow{fill:var(--smv-edge); stroke:none}
+/* Edge labels (M2): muted, small, with a background-colored stroke halo (paint-order)
+   so they stay legible crossing lines/nodes in both themes without a backing rect. */
+.smv-edge text.smv-edge-label{
+  fill:var(--smv-muted);
+  font:500 10px system-ui,-apple-system,'Segoe UI',sans-serif;
+  text-anchor:middle; dominant-baseline:central;
+  paint-order:stroke fill;
+  stroke:var(--smv-bg); stroke-width:3px; stroke-linejoin:round;
+  pointer-events:none;
+}
 /* Back edges read as loops, not glitches: muted + dashed, a distinct visual channel (D3). */
 .smv-edge[data-reversed] path.smv-edge-line{stroke-dasharray:4 3; opacity:.7}
 .smv-edge[data-reversed] path.smv-edge-arrow{opacity:.7}
