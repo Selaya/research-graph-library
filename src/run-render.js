@@ -117,7 +117,8 @@ export function createRunRender(internals, run) {
     }
   }
 
-  const centre = (r) => ({ x: r.x, y: r.y });
+  // `h` rides along so a node-hosted pulse can sit on the border instead of over the label.
+  const centre = (r) => ({ x: r.x, y: r.y, h: r.h });
 
   /** A token on something hidden inside a collapsed container renders on the container. */
   function anchorFor(kind, id, progress) {
@@ -263,16 +264,19 @@ export function createRunRender(internals, run) {
     for (const tk of st.tokens) {
       const pt = anchorFor(tk.at.kind, tk.at.id, tk.at.progress);
       if (!pt) continue;
-      let dx = 0;
+      let dx = 0, dy = 0;
       if (tk.at.kind === "node") {
         const total = perNode.get(tk.at.id) || 1;
         const i = seenNode.get(tk.at.id) || 0;
         seenNode.set(tk.at.id, i + 1);
         dx = (i - (total - 1) / 2) * TOKEN_FAN;
+        // A dwelling pulse rides the node's TOP border, never its middle: the label under
+        // it stays readable and the progress fill already says "working here".
+        if (Number.isFinite(pt.h)) dy = -pt.h / 2;
       }
       const el = dots.get(tk.id);
       el.setAttribute("cx", String(r2(pt.x + dx)));
-      el.setAttribute("cy", String(r2(pt.y)));
+      el.setAttribute("cy", String(r2(pt.y + dy)));
       el.setAttribute("data-where", tk.at.kind);
       if (tk.rate === 0) el.setAttribute("data-frozen", "");
       else el.removeAttribute("data-frozen");

@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — M1 exit: the pipeline story</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #pipe {
+    height: 420px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+
+  .legend { margin-top: 16px; color: var(--muted); font-size: 12.5px; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>The pipeline story <small>— M1 exit, one <code>&lt;script&gt;</code> tag</small></h1>
+  <p class="lede">
+    Steps assemble, a token run fans out three ways at visibly different rates into an
+    <code>all</code>-join, a retry loop ticks in place, <em>Clean data</em> opens into its three
+    manual substeps, and those condense into one automated step while the duration chip
+    odometers <strong>2h&nbsp;→&nbsp;8s</strong>. Scrub the bar at the bottom of the pane —
+    backward and forward — and every transition replays from snapshots.
+    Zoom is ctrl/⌘ + wheel; plain scroll is never hijacked.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>live tokens</i><span id="m-tokens">0</span></div>
+  <div class="tile"><i>join · report</i><span id="m-join">0/3</span></div>
+  <div class="tile"><i>retry loop</i><span id="m-loop">iter 0/5</span></div>
+</div>
+
+<p class="legend">
+  Legend — chip = duration (<code>durationAgg:'sum'</code> rolls a container up), ✋ manual /
+  ⚡ automated, <code>×N</code> = collapsed substep count, pips under <em>Report</em> = join slots,
+  dashed arc = the back edge (<code>loop:true, maxIterations:5</code>, this run capped at 3),
+  slim bar under the graph = total pipeline duration.
+</p>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The spec (§5.1 flavour). `clean` carries NO duration of its own: its 2h chip is a
+  // durationAgg:'sum' rollup of 30m + 1h + 30m, which is what keeps the 2h -> 8s claim
+  // numerically honest across expand/collapse (G5).
+  // ---------------------------------------------------------------------------
+
+  var SUBSTEPS = ["clean.dedupe", "clean.validate", "clean.normalize"];
+  var MERGED = {
+    id: "clean.auto", label: "Automated cleaning",
+    data: { duration: "8s", mode: "automated" },
+  };
+
+  // Mount holds only the first step; the storyboard appends the rest so the pipeline is
+  // seen assembling (§6.1). Waves, not one blob: three commits read as three beats.
+  var SEED = { nodes: [{ id: "ingest", label: "Ingest", data: { duration: "45m", mode: "manual" } }], edges: [] };
+
+  var WAVE_CLEAN = [
+    { op: "addNode", args: [{ id: "clean", label: "Clean data", collapsed: true, durationAgg: "sum", data: { mode: "manual" } }] },
+    { op: "addNode", args: [{ id: "clean.dedupe", parent: "clean", label: "Dedupe", data: { duration: "30m", mode: "manual" } }] },
+    { op: "addNode", args: [{ id: "clean.validate", parent: "clean", label: "Validate", data: { duration: "1h", mode: "manual" } }] },
+    { op: "addNode", args: [{ id: "clean.normalize", parent: "clean", label: "Normalize", data: { duration: "30m", mode: "manual" } }] },
+    { op: "addEdge", args: [{ id: "e1", source: "ingest", target: "clean.dedupe" }] },
+    { op: "addEdge", args: [{ id: "e2", source: "clean.dedupe", target: "clean.validate" }] },
+    { op: "addEdge", args: [{ id: "e3", source: "clean.validate", target: "clean.normalize" }] },
+  ];
+
+  var WAVE_FANOUT = [
+    { op: "addNode", args: [{ id: "collect", label: "Collect" }] },
+    { op: "addEdge", args: [{ id: "e4", source: "clean.normalize", target: "collect" }] },
+    // Three out-edges from one node IS the fan-out — no gateway syntax (D4).
+    { op: "addNode", args: [{ id: "lint", label: "Lint", data: { duration: "8s", mode: "automated" } }] },
+    { op: "addNode", args: [{ id: "unit", label: "Unit tests", data: { duration: "40s", mode: "automated" } }] },
+    { op: "addNode", args: [{ id: "e2e", label: "E2E suite", data: { duration: "3m", mode: "automated" } }] },
+    { op: "addEdge", args: [{ id: "f1", source: "collect", target: "lint" }] },
+    { op: "addEdge", args: [{ id: "f2", source: "collect", target: "unit" }] },
+    { op: "addEdge", args: [{ id: "f3", source: "collect", target: "e2e" }] },
+    { op: "addNode", args: [{ id: "report", label: "Report", join: "all" }] },
+    { op: "addEdge", args: [{ id: "j1", source: "lint", target: "report" }] },
+    { op: "addEdge", args: [{ id: "j2", source: "unit", target: "report" }] },
+    { op: "addEdge", args: [{ id: "j3", source: "e2e", target: "report" }] },
+  ];
+
+  var WAVE_DEPLOY = [
+    { op: "addNode", args: [{ id: "deploy", label: "Deploy", data: { duration: "20s", mode: "automated" } }] },
+    { op: "addEdge", args: [{ id: "d1", source: "report", target: "deploy" }] },
+    { op: "addNode", args: [{ id: "health", label: "Health check", data: { duration: "10s", mode: "automated" } }] },
+    { op: "addEdge", args: [{ id: "d2", source: "deploy", target: "health" }] },
+    { op: "addNode", args: [{ id: "announce", label: "Announce", data: { duration: "5s", mode: "automated" } }] },
+    { op: "addEdge", args: [{ id: "d3", source: "health", target: "announce" }] },
+    // maxIterations is mandatory on a loop edge; this run caps it lower still (run opts).
+    { op: "addEdge", args: [{ id: "retry", source: "health", target: "deploy", loop: true, maxIterations: 5 }] },
+  ];
+
+  var STEPS = [
+    { label: "assemble" },
+    { op: "batch", steps: WAVE_CLEAN },
+    { op: "batch", steps: WAVE_FANOUT },
+    { op: "batch", steps: WAVE_DEPLOY },
+    { label: "run" },
+    { op: "run.play", until: "clean" },
+    { label: "drill in" },
+    { op: "expand", args: ["clean"] },
+    { op: "run.play", until: "deploy" },
+    { label: "automate" },
+    { op: "condense", args: [SUBSTEPS, MERGED] },
+    { op: "run.play" },
+  ];
+
+  var EXPAND_AT = 7, CONDENSE_AT = 10;
+
+  // Pacing (D4 opts, not engine internals): a log curve over the graph's own durations so
+  // 8s / 40s / 3m read as three visibly different speeds instead of three near-equal
+  // 300ms dwells, and a rate event that makes lint actually sprint (§6.2).
+  var RUN_OPTS = {
+    iterations: { retry: 3 },          // capped to 3 of the edge's max 5
+    hopMs: 220,
+    rates: [{ t: 0, scope: "lint", factor: 1.8 }],
+    dwell: function (sec, ctx) {
+      if (sec == null) return 420;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 200 + 1100 * f;
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mTime = $("#m-time"), mTokens = $("#m-tokens"), mJoin = $("#m-join"), mLoop = $("#m-loop");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 26, ranksep: 46 },
+      animation: { duration: 420, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvM1 = { done: true, errors: errors, checks: {} };
+    return;
+  }
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Observations. Everything is sampled from the public surface — run.state() (which is
+  // stateAt(t)) and the rendered DOM — never from library internals.
+  // ---------------------------------------------------------------------------
+
+  var FAN = { f1: 1, f2: 1, f3: 1, lint: 1, unit: 1, e2e: 1 };
+  var obs = {
+    fanOutTokens: 0,
+    branchProgress: null,
+    branchSpread: 0,
+    joinNeeded: 0,
+    joinArrivedAtFire: null,
+    joinEvent: null,
+    loopIteration: 0,
+    loopMax: 0,
+    loopBadge: "",
+  };
+
+  var nodeEls = function () { return document.querySelectorAll("#pipe .smv-node"); };
+  var nodeIds = function () {
+    var out = [];
+    var list = nodeEls();
+    for (var i = 0; i < list.length; i++) out.push(list[i].getAttribute("data-id"));
+    return out;
+  };
+  var chipOf = function (id) {
+    var el = document.querySelector('#pipe .smv-node[data-id="' + id + '"] text.smv-chip');
+    return el ? el.textContent : null;
+  };
+  var substepsOnScreen = function () {
+    var ids = nodeIds();
+    return SUBSTEPS.filter(function (s) { return ids.indexOf(s) !== -1; }).length;
+  };
+  var loopBadgeText = function () {
+    var el = document.querySelector("#pipe .smv-loop-badge");
+    return el ? el.textContent : "";
+  };
+
+  /** Any NaN/Infinity that reached an attribute or a text node under the mount root. */
+  function scanNaN() {
+    var bad = [];
+    var all = document.querySelectorAll("#pipe *");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      for (var a = 0; a < el.attributes.length; a++) {
+        var at = el.attributes[a];
+        if (/NaN|Infinity/.test(at.value)) bad.push((el.getAttribute("class") || el.nodeName) + "@" + at.name + "=" + at.value);
+      }
+      if (el.children.length === 0 && /NaN|Infinity/.test(el.textContent || "")) {
+        bad.push((el.getAttribute("class") || el.nodeName) + "#text=" + el.textContent);
+      }
+    }
+    return bad;
+  }
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  // One sampler on the SHARED ticker (D1) — the same clock the run, the scene and the
+  // viewport are on, so nothing it reads is a frame out of date.
+  function sampleFrame() {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+
+    var inFan = 0;
+    for (var i = 0; i < st.tokens.length; i++) if (FAN[st.tokens[i].at.id]) inFan++;
+    if (inFan > obs.fanOutTokens) obs.fanOutTokens = inFan;
+
+    var L = st.nodes.lint, U = st.nodes.unit, E = st.nodes.e2e;
+    if (L && U && E && E.progress > 0 && E.progress < 1) {
+      var p = [L.progress, U.progress, E.progress];
+      var spread = Math.max(p[0], p[1], p[2]) - Math.min(p[0], p[1], p[2]);
+      if (spread > obs.branchSpread) {
+        obs.branchSpread = spread;
+        obs.branchProgress = { lint: p[0], unit: p[1], e2e: p[2], t: run.time() };
+      }
+    }
+
+    var j = st.joins.report;
+    if (j) {
+      obs.joinNeeded = j.needed;
+      if (j.fired && obs.joinArrivedAtFire == null) obs.joinArrivedAtFire = j.arrived;
+    }
+
+    var lp = st.loops.retry;
+    if (lp) {
+      if (lp.max > obs.loopMax) obs.loopMax = lp.max;
+      if (lp.iteration > obs.loopIteration) {
+        obs.loopIteration = lp.iteration;
+        obs.loopBadge = loopBadgeText() || obs.loopBadge;
+      }
+    }
+
+    // readouts
+    mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
+    mTokens.textContent = String(st.tokens.length);
+    mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "—";
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/5";
+  }
+  g.ticker.add(sampleFrame);
+
+  // The join's own event is the authoritative "fired after all three arrived" record.
+  g.run().on("join", function (ev) {
+    if (ev && ev.nodeId === "report") obs.joinEvent = { arrived: ev.arrived, needed: ev.needed, t: ev.t };
+  });
+
+  var checks = {};
+  var storyDone = false;
+
+  sb.on("step", function (ev) {
+    paintRail();
+    // The graph grows and shrinks a lot across this story; a scripted demo re-fits
+    // explicitly (D10 allows exactly that — it is never automatic).
+    g.fitView({ animate: true });
+    if (ev.index === EXPAND_AT) {
+      checks.substepsAfterExpand = substepsOnScreen();
+      checks.containerExpandedAfterExpand = !g.viewstate.collapsed.has("clean");
+    }
+    if (ev.index === CONDENSE_AT) {
+      checks.nodesAfterCondense = nodeEls().length;
+      checks.substepsAfterCondense = substepsOnScreen();
+      checks.odometerAfterCondense = chipOf("clean.auto");
+      checks.containerChipAfterCondense = chipOf("clean");
+    }
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+
+  // ---------------------------------------------------------------------------
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  function transportPlay() {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    transportPlay();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "fan-out tokens          " + checks.fanOutTokens + "\n" +
+      "branch progress         " + JSON.stringify(checks.branchProgress) + "\n" +
+      "join fired at           " + checks.joinArrivedAtFire + "/" + checks.joinNeeded + "\n" +
+      "loop iterations         " + checks.loopIteration + " of max " + checks.loopMax + "  (" + checks.loopBadge + ")\n" +
+      "substeps after expand   " + checks.substepsAfterExpand + "\n" +
+      "after condense          " + checks.nodesAfterCondense + " nodes, chip " + checks.odometerAfterCondense + "\n" +
+      "scrub back              " + JSON.stringify(checks.scrubBack) + "\n" +
+      "scrub forward           " + JSON.stringify(checks.scrubForward) + "\n" +
+      "NaN in DOM              " + (checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
+      "errors                  " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  /** The headless verification path: play through, scrub back before the condense, forward. */
+  async function auto() {
+    await sleep(300);              // mount's initial fit gets one beat
+    start();
+    await waitFor(function () { return storyDone; }, 60000);
+    await sleep(500);              // the last commit settles
+
+    Object.assign(checks, {
+      fanOutTokens: obs.fanOutTokens,
+      branchProgress: obs.branchProgress,
+      branchSpread: obs.branchSpread,
+      joinNeeded: obs.joinNeeded,
+      joinArrivedAtFire: obs.joinArrivedAtFire,
+      joinEvent: obs.joinEvent,
+      loopIteration: obs.loopIteration,
+      loopMax: obs.loopMax,
+      loopBadge: obs.loopBadge || loopBadgeText(),
+    });
+
+    // --- scrub BACKWARD to the marker before the condense step ---
+    phaseEl.textContent = "scrubbing back to “automate”…";
+    await sb.seek("automate");
+    await sleep(900);
+    checks.scrubBack = {
+      label: sb.position().label,
+      index: sb.position().index,
+      substeps: substepsOnScreen(),
+      mergedPresent: nodeIds().indexOf("clean.auto") !== -1,
+      expanded: !g.viewstate.collapsed.has("clean"),
+      nodes: nodeEls().length,
+    };
+
+    // --- and FORWARD to the end again: the condense replays from the snapshot ---
+    phaseEl.textContent = "scrubbing forward to the end…";
+    await sb.seek(STEPS.length);
+    await sleep(900);
+    checks.scrubForward = {
+      index: sb.position().index,
+      done: sb.position().done,
+      substeps: substepsOnScreen(),
+      mergedPresent: nodeIds().indexOf("clean.auto") !== -1,
+      chip: chipOf("clean.auto"),
+      nodes: nodeEls().length,
+    };
+
+    checks.nan = scanNaN();
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvM1 = { done: true, errors: errors, checks: checks };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      checks.nan = checks.nan || scanNaN();
+      writeReport();
+      window.__smvM1 = { done: true, errors: errors, checks: checks };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

@@ -65,6 +65,17 @@ export function compileRun(spec = {}, opts = {}) {
     if (!e.loop) inNonLoop.get(e.target).push(e);
   }
 
+  // D5 — a container is not an executable step: its activation IS its children's. It never
+  // seeds a source token (otherwise every compound node fabricates a phantom one), and its
+  // status window is the union of its descendants' below, so `play({until: container})`
+  // means "until everything inside it has finished".
+  const childrenOf = new Map();
+  for (const n of nodes.values()) {
+    if (n.parent == null || !nodes.has(n.parent)) continue;
+    if (!childrenOf.has(n.parent)) childrenOf.set(n.parent, []);
+    childrenOf.get(n.parent).push(n.id);
+  }
+
   // ---- pacing ----
   const hopMs = Number.isFinite(opts.hopMs) && opts.hopMs >= 0 ? opts.hopMs : DEFAULT_HOP_MS;
   const secOf = new Map();
@@ -251,6 +262,7 @@ export function compileRun(spec = {}, opts = {}) {
 
   // ---- run the queue ----
   for (const n of nodes.values()) {
+    if (childrenOf.has(n.id)) continue; // containers run through their children (D5)
     if (inNonLoop.get(n.id).length === 0) {
       const tk = newToken(1, new Set(), new Set(), null);
       arrive(tk, n.id, 0, undefined);
@@ -285,6 +297,22 @@ export function compileRun(spec = {}, opts = {}) {
     for (const s of segs) { if (s.t0 < from) from = s.t0; if (s.t1 > to) to = s.t1; }
     nodeWindow.set(id, { from, to });
   }
+  // …and a container's window is the union of its descendants' (D5, see above). Bottom-up
+  // by recursion; `rolled` also stops a malformed parent cycle from recursing forever.
+  const rolled = new Set();
+  function rollUp(id) {
+    if (rolled.has(id)) return nodeWindow.get(id);
+    rolled.add(id);
+    let win = nodeWindow.get(id);
+    for (const c of childrenOf.get(id) || []) {
+      const cw = rollUp(c);
+      if (!cw) continue;
+      win = win ? { from: Math.min(win.from, cw.from), to: Math.max(win.to, cw.to) } : { from: cw.from, to: cw.to };
+    }
+    nodeWindow.set(id, win || null);
+    return win || null;
+  }
+  for (const id of childrenOf.keys()) rollUp(id);
 
   const stalled = tokens.some((tk) => !Number.isFinite(tk.endT));
   events.push({ t: duration, type: "done", stalled });
@@ -339,6 +367,9 @@ export function compileRun(spec = {}, opts = {}) {
           const p = spanProgress(s, t);
           if (p > progress) progress = p;
         }
+        // A container dwells for nothing itself: its fill is how far through its children's
+        // combined span it has come, so a collapsed one still reads as working (D5).
+        if (!segs.length) progress = win.to > win.from ? clamp01((t - win.from) / (win.to - win.from)) : (t >= win.to ? 1 : 0);
       }
       nodesOut[id] = { status, progress, occupancy };
     }
