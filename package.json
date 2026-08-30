@@ -26,13 +26,15 @@
     }
   },
   "bin": {
-    "smv-pack": "bin/smv-pack.mjs"
+    "smv-pack": "bin/smv-pack.mjs",
+    "smv-record": "bin/smv-record.mjs"
   },
   "files": [
     "src",
     "dist",
     "types",
-    "bin"
+    "bin",
+    "scripts/harness.mjs"
   ],
   "scripts": {
     "build": "node scripts/build.js",

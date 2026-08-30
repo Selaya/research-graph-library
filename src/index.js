@@ -44,6 +44,11 @@ const EASINGS = {
  *  not graph state) — the only ops a forward scrub replays at zero duration. */
 const DIRECTOR_OPS = new Set(["camera", "highlight", "clearHighlight", "caption"]);
 
+/** Inside a batch, these are the ops that keep their own clock instead of folding into the
+ *  one shared relayout — so they, and only they, can make the batch step cost more than
+ *  that commit (D12: the declared duration must be the awaited one). */
+const PARALLEL_IN_BATCH = new Set(["wait", "camera", "condense", "split"]);
+
 /** True when `steps` (batches included) contains at least one camera op — D13's trigger for
  *  the script taking ownership of the viewport. */
 function hasCameraOp(steps) {
@@ -377,7 +382,20 @@ export function mount(el, spec = {}, opts = {}) {
       }
       case "batch": {
         const list = Array.isArray(step.steps) ? step.steps : Array.isArray(args[0]) ? args[0] : [];
-        return g.batch(() => { for (const s of list) applyStep(s); });
+        // D12 — what the step is AWAITED for has to be what durOf() declares. g.batch()
+        // hands back only the shared relayout, so a child that runs alongside it (a wait,
+        // a camera move, a condense choreography) would be dropped on the floor and every
+        // later step — and every cue offset after it — would land early, off the very cue
+        // sheet the frame renderer shares.
+        const kids = [];
+        const tr = g.batch(() => {
+          for (const s of list) {
+            const r = applyStep(s);
+            if (r && typeof r.then === "function") kids.push(r);
+          }
+        });
+        if (!kids.length) return tr;
+        return thenable(Promise.all([tr, ...kids]).then(() => ({ canceled: false })), () => tr.cancel());
       }
       default:
         return g[step.op](...args);
@@ -480,8 +498,13 @@ export function mount(el, spec = {}, opts = {}) {
       case "condense": case "split": return CHOREO_MS;
       case "batch": {
         const list = Array.isArray(step.steps) ? step.steps : (Array.isArray(a0) ? a0 : []);
-        // One commit, run in parallel — the batch is worth its longest member, not their sum.
-        return list.reduce((m, s) => Math.max(m, durOf(s)), 0);
+        // One commit, run in parallel — the batch is worth its longest member, not their
+        // sum. But a child that FOLDS into that shared commit cannot cost more than the
+        // commit does: applyStep restores the batch's own `dur` around every child, so a
+        // mutation child's `dur` is ignored at playback and counting it here would declare
+        // a length nothing waits for. Only the children that genuinely run alongside the
+        // commit can stretch the step.
+        return list.reduce((m, s) => (s && PARALLEL_IN_BATCH.has(s.op) ? Math.max(m, durOf(s)) : m), baseDuration);
       }
       default: return baseDuration;
     }

@@ -1,0 +1,13 @@
+{
+  "nodes": [
+    { "id": "ingest", "label": "Ingest", "data": { "duration": "45m", "mode": "manual" } },
+    { "id": "dedupe", "label": "Dedupe", "data": { "duration": "30m", "mode": "manual" } },
+    { "id": "validate", "label": "Validate", "data": { "duration": "1h", "mode": "manual" } },
+    { "id": "publish", "label": "Publish", "data": { "duration": "20s", "mode": "automated" } }
+  ],
+  "edges": [
+    { "id": "e1", "source": "ingest", "target": "dedupe" },
+    { "id": "e2", "source": "dedupe", "target": "validate" },
+    { "id": "e3", "source": "validate", "target": "publish" }
+  ]
+}

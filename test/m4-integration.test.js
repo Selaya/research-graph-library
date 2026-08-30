@@ -428,3 +428,63 @@ test("D12: step.dur is ambient for the whole op — a 900ms addNode, then back t
   assert.equal(durations.at(-1), 120, "the ambient dur never leaks past its step");
   g.destroy();
 });
+
+/** Play a storyboard on the manual clock, recording the ticker time each step landed at. */
+async function playTimed(g, maxTicks = 400, ms = 16) {
+  const sb = g.storyboard();
+  const landed = new Map();
+  let clock = 0;
+  sb.on("step", (e) => { if (!landed.has(e.index)) landed.set(e.index, clock); });
+  let finished = false;
+  Promise.resolve(sb.play()).then(() => { finished = true; });
+  await flush(); // let the sequencer reach its first awaiting step before the clock moves
+  for (let i = 0; i < maxTicks && !finished; i++) { clock += ms; g.ticker.tick(ms); await flush(); }
+  assert.ok(finished, "the story finished within the tick budget");
+  return landed;
+}
+
+test("D12: a batch is awaited for what durOf() declares — its parallel children, not just the shared commit", async () => {
+  const steps = [
+    { label: "go" },
+    { op: "batch", steps: [{ op: "wait", ms: 900 }, { op: "addNode", args: [{ id: "z" }] }] },
+    { op: "caption", args: ["after"] },
+    { op: "wait", ms: 200 },
+  ];
+  const { g } = mountM4({ storyboard: steps });
+  assert.equal(g.timeline().total, 900 + 200, "the batch is worth its wait child, not the 120ms commit");
+  assert.deepEqual(g.cues(), [
+    { kind: "label", at: 0, label: "go", index: 0 },
+    { kind: "caption", at: 900, text: "after", index: 2 },
+  ]);
+
+  // g.batch() hands back only the shared relayout, and applyOp threw the children's
+  // awaitables away: awaiting that alone landed the caption at 128ms, ~770ms ahead of
+  // where the cue sheet the frame renderer reads says it is.
+  const landed = await playTimed(g);
+  assert.equal(landed.get(1), 912, "the batch step waited for the wait child it declares (first tick past 900)");
+  assert.equal(landed.get(2), 912, "…so the caption lands on its 900ms cue, not 780ms early");
+  assert.ok(g.node("z"), "the mutation child still landed");
+  g.destroy();
+});
+
+test("D12: a batch's camera child is awaited too", async () => {
+  const steps = [
+    { op: "batch", steps: [{ op: "camera", args: [{ x: 60, y: 0, k: 1, dur: 800 }] }] },
+    { label: "after" },
+  ];
+  const { g } = mountM4({ storyboard: steps });
+  assert.equal(g.timeline().total, 800);
+  const landed = await playTimed(g);
+  assert.equal(landed.get(0), 800, "the batch waited out the camera tween");
+  close(g.viewport.transform.x, 60, "…which landed on its target");
+  g.destroy();
+});
+
+test("D12: a batch child's own dur is ignored at playback, so durOf() must not count it", () => {
+  // A mutation child folds into the ONE shared relayout, whose length is the batch's own
+  // dur (applyStep restores it around every child) — declaring 800ms for it would promise
+  // a length nothing waits for.
+  const { g } = mountM4({ storyboard: [{ op: "batch", steps: [{ op: "addNode", args: [{ id: "z" }], dur: 800 }] }] });
+  assert.equal(g.timeline().total, 120, "the shared commit's baseDuration, not the child's ignored 800");
+  g.destroy();
+});
