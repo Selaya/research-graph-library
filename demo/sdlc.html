@@ -61,6 +61,10 @@
   }
   .rail button[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
   .rail button[data-past] { color: var(--ink); border-color: var(--accent); }
+  /* One seek at a time: a forward jump replays the ops it passes over, and stacking a
+     second one on top of it just makes both slower. */
+  .rail[data-seeking] button { opacity: .5; pointer-events: none; }
+  .rail-note { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 16px; }
   .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
@@ -106,6 +110,12 @@
 <div id="pipe"></div>
 
 <div class="rail" id="rail"></div>
+<p class="rail-note">
+  Chapters. Jumping <em>back</em> restores the snapshot taken before that step, instantly.
+  Jumping <em>forward</em> past ground the story has not covered yet has to replay the ops in
+  between — the camera, highlight and caption beats are skipped, but the mutations and the
+  token run are not, so it fast-forwards rather than cuts.
+</p>
 
 <div class="grid">
   <div class="tile"><i>chapter</i><span id="m-chapter">—</span></div>
@@ -486,20 +496,51 @@
     railEl.appendChild(b);
   });
 
+  var seeking = null;   // the chapter a rail jump is currently replaying towards
+
   function transportClick(act) {
     var btn = document.querySelector('#pipe .smv-transport-btn[data-act="' + act + '"]');
     if (btn) { btn.click(); return true; }
     return false;
   }
 
-  /** Chapter jump. The transport owns the play/pause flag, so pause THROUGH it (its own
-   *  button) and then move the story head — otherwise the bar would still read "playing". */
+  /** Chapter jump.
+   *
+   *  Driven through the transport's OWN scrubber rather than `sb.seek(label)`: a bare
+   *  storyboard seek onto ground the story has not covered yet replays every step in
+   *  order at full length (correct — it is the only way the ops are valid — but it means
+   *  "jump to the end" screens the whole film). The transport's cumulative-timeline seek
+   *  does the same replay with camera/highlight/caption ops snapped to zero, which is
+   *  what makes it a jump. `g.cues()` gives every label its absolute ms offset off the
+   *  same declared timeline the scrubber is scaled to, so the two cannot disagree.
+   *
+   *  Math.ceil, not round: a marker sitting exactly on `ms` wins over the step that
+   *  follows it, so landing a hair EARLY would put the head in the previous chapter. */
   function jumpTo(label) {
     var tl = g.timeline();
-    if (tl && tl.playing) transportClick("play");   // the play button is a toggle
-    Promise.resolve(sb.seek(label)).then(paintRail, function (err) {
-      errors.push("seek: " + String((err && err.message) || err));
-    });
+    var scrub = document.querySelector("#pipe .smv-transport-scrub");
+    var at = null;
+    var cues = g.cues();
+    for (var i = 0; i < cues.length; i++) {
+      if (cues[i].kind === "label" && cues[i].label === label) { at = cues[i].at; break; }
+    }
+    if (at == null || !scrub || !(tl && tl.total > 0)) {
+      // No transport (or no cue): fall back to the sequencer's own seek.
+      if (tl && tl.playing) transportClick("play");   // the play button is a toggle
+      Promise.resolve(sb.seek(label)).then(paintRail, function (err) {
+        errors.push("seek: " + String((err && err.message) || err));
+      });
+      return;
+    }
+    seeking = label;
+    railEl.setAttribute("data-seeking", "");
+    phaseEl.textContent = "seeking → " + label + " …";
+    var max = Number(scrub.getAttribute("max")) || 1000;
+    scrub.value = String(Math.ceil(Math.max(0, Math.min(1, at / tl.total)) * max));
+    // The same three events a real drag fires: pause, seek, release.
+    scrub.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    scrub.dispatchEvent(new Event("input", { bubbles: true }));
+    scrub.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   function paintRail() {
@@ -638,7 +679,9 @@
 
   sb.on("step", function (ev) {
     paintRail();
-    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+    phaseEl.textContent = seeking != null
+      ? "seeking → " + seeking + " · step " + ev.index
+      : "step " + ev.index + " · " + (sb.position().label || "");
     // Snapshot the payoff the moment each condense commits.
     var step = STEPS[ev.index];
     if (step && step.op === "condense") {
@@ -651,7 +694,14 @@
       };
     }
   });
-  sb.on("seek", paintRail);
+  sb.on("seek", function (ev) {
+    if (seeking != null) {
+      seeking = null;
+      railEl.removeAttribute("data-seeking");
+      phaseEl.textContent = "at " + (sb.position().label || "") + " · paused";
+    }
+    paintRail();
+  });
   sb.on("done", function () {
     storyDone = true;
     paintRail();
