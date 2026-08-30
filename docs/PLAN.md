@@ -527,8 +527,12 @@ SparkleMotion.mount("#pipe", spec, {
   step paces its relayout without a signature change. What a step is worth without one:
   label 0 · `wait` its ms · camera 600 · highlight/clearHighlight/caption 0 ·
   `run.step`/`run.seek` 0 · condense/split 900 (the choreography's real cost) · batch the
-  max of its members (one commit, parallel) · every other mutation the mount's
-  `animation.duration` (350).
+  max of its own commit and its *parallel* members — `wait`/`camera`/`condense`/`split`,
+  the children that keep their own clock; a mutation child folds into the one shared
+  relayout, so its own `dur` is ignored at playback and is not counted here either ·
+  every other mutation the mount's `animation.duration` (350). A batch step is awaited for
+  all of that (the shared commit **and** every child awaitable), so the declared number is
+  the one playback actually spends.
 
 ---
 
@@ -623,6 +627,20 @@ to 3/5 — and scrubs backward/forward with no corruption.
   optional ESM adapter.
 - Selective compositor offload for non-choreographed motion (profiled), viewport culling.
 - Gantt/temporal layout mode (x = time, sweeping-line scrubber) **if demanded**.
+
+### M4 — Director & deterministic recording (D12–D15, §5.7)
+- **M4a** (done) — core director ops: `camera`/`highlight`/`clearHighlight`/`caption`,
+  per-step `dur`, the truthful timeline + `g.cues()`, and the record-mode mount plumbing.
+- **M4b** (done) — `bin/smv-record.mjs`: packs the record variant, steps the manual ticker
+  `1000/fps` per frame in headless chromium and writes a PNG sequence, byte-identical
+  across runs (`test/e2e-m4.mjs` is the gate). `scripts/harness.mjs` unifies the
+  chromium/static-server plumbing the four e2e scripts each had a copy of. No core file
+  changed — the whole milestone lives in `bin/`, `scripts/` and `test/`, at zero bundle
+  cost. Mode B (`run({mode:"live"})`) storyboards are refused: wall-clock, unreproducible.
+- **M4c** — ffmpeg piping behind `--out`, `--cues` (srt/json/chapters), `--from/--to`
+  range re-render, `--font` for cross-machine layout stability, `exportSVG({viewport:true})`.
+- **M4d** — `bin/smv-fit.mjs` (stretch `wait` steps onto voice-over marks), per-step
+  `props` custom-property overrides.
 
 Cut from v1 entirely (over-engineering, per critique): force-directed fallback,
 runtime `exportHTML()`, per-frame style reducers, selector-string stylesheets, plugin

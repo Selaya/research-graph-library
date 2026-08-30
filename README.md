@@ -247,6 +247,18 @@ npx smv-pack spec.json -o out.html --storyboard sb.json --preset pipeline --titl
 
 See `docs/EMBED.md` for the full recipe.
 
+**Deterministic video frames.** `smv-record` drives a record-mode pack (manual ticker,
+motion forced full, every CSS transition off) frame by frame in headless chromium and
+writes a PNG sequence — two runs of one script are byte-identical:
+
+```
+npx smv-record spec.json --storyboard sb.json --png-dir frames/ --fps 60 --scale 2
+ffmpeg -framerate 60 -i frames/frame-%05d.png -c:v libx264 -pix_fmt yuv420p -crf 18 story.mp4
+```
+
+The frame count is the declared timeline (D12), nothing wall-clock. `docs/RECORDING.md` §3
+has the full flag list; the built-in ffmpeg pipe behind `--out` is M4c.
+
 ## Size
 
 Enforced by a hard-fail CI budget (`npm run size`):
@@ -276,6 +288,7 @@ npm test          # node --test unit suite + golden-file layout snapshots
 npm run size      # build ESM + IIFE, verify no dagre leaked in, enforce the size budget
 npm run types     # tsc over types/check.ts (the hand-written .d.ts surface)
 node test/e2e-m0.mjs && node test/e2e-m1.mjs && node test/e2e-m2.mjs   # headless chromium
+node test/e2e-m3.mjs && node test/e2e-m4.mjs                          # engine gates, frame-render determinism
 ```
 
 `node test/golden/update.js` regenerates the layout goldens — only ever run deliberately,
@@ -291,7 +304,8 @@ Status: M0 (walking skeleton), M1 (pipeline demo end to end), M2 (live mode, spl
 edge labels, expand/collapse-all, query sugar, ARIA + table fallback, SVG/PNG export,
 `smv-pack`) and M3 (in-house layered engine, dagre demoted to an optional adapter,
 viewport culling, IIFE under 50KB gzip) complete; M4a (director ops: camera, highlight,
-caption, the declared timeline) landed — the deterministic frame renderer is M4b. Deliberate departures from the plan —
+caption, the declared timeline) and M4b (`smv-record`, the deterministic frame renderer)
+landed — ffmpeg piping, cue-sheet export and range re-renders are M4c. Deliberate departures from the plan —
 including what "parity with dagre" was gated on, and what M3 skipped — are recorded in
 `docs/DEVIATIONS.md`. Embedding: `docs/EMBED.md`.
 

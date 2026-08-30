@@ -919,9 +919,82 @@ vp.target                                 // getter: where a live tween is headi
   pass the reduced-computed duration into `fit`'s opts form (through M3 that tween ran a
   flat 350ms whatever the environment asked).
 
-## M4b (deterministic frame renderer) — not yet landed
+## M4b (deterministic frame renderer) — landed
 
-`bin/smv-record.mjs` + `scripts/harness.mjs` + `test/e2e-m4.mjs` per PLAN M4b scope.
-Everything it needs from core is already here: manual ticker, `motion:"full"`,
-`data-smv-record`, `setInteractive(false)`, the truthful timeline. Mode B (`run({mode:
-"live"})`) storyboards will be refused — wall-clock, unreproducible.
+`bin/smv-record.mjs` + `scripts/harness.mjs` + `test/e2e-m4.mjs`. Everything the renderer
+needs was already public after M4a — manual ticker, `motion:"full"`, `data-smv-record`,
+`setInteractive(false)`, `g.ticker`, `g.scene`, `g.viewport`, `g.timeline()`, `g.cues()` —
+so M4b is all `bin/`, at no cost against the size budget. The one core change it forced is
+in `applyOp`/`durOf`: a batch step now awaits its children's awaitables alongside the shared
+commit, and `durOf('batch')` stops counting a child `dur` that playback ignores (see D12).
+Without it a heterogeneous batch put every later step — and every cue offset after it —
+~450ms ahead of the cue sheet the frame renderer shares.
+
+- **`scripts/harness.mjs`** — `findChromium()` / `serveRoot(root = ROOT)` / `ROOT`. The
+  four e2e scripts each carried a byte-identical private copy; they now import this one.
+  `serveRoot` gained the `root` parameter (default: the repo) because the recorder serves
+  a temp directory holding one packed page, not the checkout.
+- **`bin/smv-pack.mjs --record`** — the D15 mount variant: `{controls:false,
+  captions:true, autoplay:false, ticker:"manual", motion:"full"}` (+ `--theme`), and
+  `window.__smv = SparkleMotion.mount(...)`, the CLI's only handle into the page. Autoplay
+  is deliberately OFF: the recorder starts the story itself, after `document.fonts.ready`
+  and after the interaction interlock, so frame 0 is the same frame every time. Without
+  `--record` the emitted bytes are unchanged (asserted in test/record-cli.test.js).
+- **`bin/smv-record.mjs`** — pack → serve → chromium at `{width, height,
+  deviceScaleFactor: scale}` → `document.fonts.ready` (text metrics decide node boxes, so
+  the layout is only reproducible once the fonts are) → `viewport.setInteractive(false)`
+  → measure `timeline()`/`cues()` → `storyboard().play()` → per frame:
+  `ticker.tick(frameMs)`, settle, `page.screenshot({clip: root box})`.
+  Defaults: fps 60, 1920×1080 @2x, tail 1200ms; `--png-dir` clears stale `frame-*.png`
+  first. `parseArgs` and `findLiveRun` are exported so test/record-cli.test.js covers the
+  flag grammar and the Mode B check without a browser.
+- **Measuring a `run.play` story.** `stepSlices()` prices a run step off the run
+  transport's own clock, and that transport only exists once a `run.*` op created it —
+  but the record pack does not autoplay, so at measuring time it does not. Measuring first
+  therefore priced a whole simulated run at one mutation's `baseDuration` and cut the take
+  off inside step 1, at exit 0. So when the storyboard contains a `run.play` (batches
+  walked), the CLI calls `g.run()` in the same evaluate, before `timeline()` — exactly what
+  `applyStep`'s `ensureRun()` does at the step. It also creates the token layer at frame 0,
+  which is a deliberate, visible change to frame 0's pixels.
+- **How long a take is.** The declared timeline is the **floor**, not the cut. Each async
+  phase boundary resolves on the first tick at or past its duration and the next phase's
+  `t0` is that tick, so a story of N boundaries runs up to N frames past `timeline().total`
+  (condense's highlight/converge/reveal chain ends ~58ms past its declared 900ms). Cutting
+  at `ceil((total + tail)/frameMs)` dropped the end-of-choreography state flip — with
+  `--tail 0` every written frame still carried `data-condense="reveal"` — and spent the
+  tail on the overrun instead of on the finished picture. The loop therefore shoots at
+  least `ceil(total/frameMs)` frames, then keeps going while `stepFrame` reports the story
+  unfinished (`storyboard().position().done` and no live `scene.transition`), capped at
+  2000ms past the declared total (a warning on stderr if that cap bites), and only then
+  writes `ceil(tail/frameMs)` held frames. Still wall-clock-free: every bound is ticks.
+- **Settling.** A step boundary lands on a promise chain (a transition resolving hands the
+  storyboard its next op), never on a timer, so one macrotask turn drains everything the
+  tick released. The loop turns at least 2 times (one drains, one proves nothing new was
+  queued) and at most 8, stopping as soon as the observable signature —
+  `timeline().index/time/steps`, the live transition, `viewport.transform` — repeats. Frame 0 is `tick(0)` + settle: play()'s first ops land, the clock does not move.
+- **Refusals.** Mode B is rejected before the browser launches — a live run replays a real
+  event log against real time. The check is scoped to a `run.play` step's own options
+  (`{op,args:[{mode}]}` or `{op,mode}`, batches recursed): node/edge `data` is an arbitrary
+  user payload the store preserves verbatim and `data:{mode:"live"}` is this project's own
+  pipeline idiom, so a deep walk refused perfectly recordable Mode A stories. `--out x.mp4`
+  *without* `--png-dir` reports the missing encoder and prints the `ffmpeg -framerate …`
+  line to run; with `--png-dir` it records and prints that line afterwards, naming the real
+  frame directory — refusing there would have told the user to pass the flag they passed.
+  The pipe itself is M4c.
+- **Direct-invocation guard.** Both bins compare `import.meta.url` against
+  `pathToFileURL(realpathSync(process.argv[1]))`, not against `` `file://${process.argv[1]}` ``:
+  npm installs `bin.smv-record` as a symlink (argv[1] is the link, `import.meta.url` the
+  realpath) and a space in the path is percent-encoded on one side only. Either divergence
+  made the documented `npx smv-record …` invocation a silent no-op at exit 0.
+- **Cleanup.** The mkdtemp serve directory holds the whole packed story (spec + the 128KB
+  IIFE), so it is created *inside* the try that also opens the browser: the paths the code
+  explicitly anticipates — no playwright-core, no chromium binary, a launch that rejects —
+  used to leak a copy of it per run. The finally is guarded, since it can now run before
+  the server and browser exist.
+- **e2e-m4** renders the fixture (`test/fixtures/record-demo.{spec,sb}.json`: camera,
+  highlight+dim, captions, condense, labels) twice at 10fps/480×270 and asserts every frame
+  is byte-identical across the two takes, that the frame count is at least the declared
+  timeline's (2900ms + 200ms tail) and within one frame per step boundary of it, that the
+  last two frames are identical (the tail holds a *settled* picture), that a `run.play`
+  story is measured at the compiled run's duration rather than 350ms, that `--out`
+  alongside `--png-dir` records and warns, and both refusals.
