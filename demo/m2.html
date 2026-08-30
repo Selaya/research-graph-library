@@ -140,13 +140,17 @@
   var $ = function (sel) { return document.querySelector(sel); };
   var phaseEl = $("#phase"), reportEl = $("#report"), runBtn = $("#run");
 
-  var g;
-  try {
-    g = SparkleMotion.mount("#stage", SPEC, {
+  function doMount() {
+    return SparkleMotion.mount("#stage", SPEC, {
       theme: "auto",
       layout: { dir: "LR", nodesep: 22, ranksep: 42 },
       animation: { duration: 300, easing: "cubic-out" },
     });
+  }
+
+  var g;
+  try {
+    g = doMount();
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -330,6 +334,15 @@
     runBtn.disabled = true;
     var checks = {};
     try {
+      // Fresh graph every run: phaseSplit() below condense()s prep.a/b/c then split()s the
+      // merge back apart — an irreversible structural mutation of the SPEC. Replaying the
+      // script a second time on the SAME instance would hand condense() ids it already
+      // consumed (prep.a/b/c no longer exist; prep.x/y/z do), throwing a GraphError. Destroy
+      // and remount so each run starts from the same clean SPEC a page reload would give it.
+      g.destroy();
+      g = doMount();
+      window.__g = g;
+
       await phaseLabelBefore(checks);
       await phaseSplit(checks);
       await phaseCollapseAll(checks);

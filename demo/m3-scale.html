@@ -52,15 +52,19 @@
   <h1>Scale + culling <small>— M3 exit, 300-node synthetic graph</small></h1>
   <p class="lede">
     A synthetic 20-rank &times; 15-node layered DAG (300 nodes, ~500 edges — well above the
-    150-element culling threshold). The story: mount and fit (everything visible, nothing
-    should need culling), zoom hard into one corner (most of the graph now sits outside the
-    viewport and should cull), then a simulated 2-second pointer pan whose per-frame cost is
-    measured on the page's own <code>requestAnimationFrame</code> clock.
+    150-element culling threshold). The whole graph fits the pane on load. The story: mount
+    and fit (everything visible, nothing should need culling), zoom hard into one corner to
+    show culling doing its job (culling only engages once you're zoomed in — most of the
+    graph now sits outside the viewport and should cull), then a simulated 2-second pointer
+    pan whose per-frame cost is measured on the page's own
+    <code>requestAnimationFrame</code> clock. Use <b>Fit all</b> any time — before, during,
+    or after a run — to snap straight back to the whole graph.
   </p>
 </header>
 
 <div class="controls">
   <button id="run" type="button">Run scale exit</button>
+  <button id="fitall" type="button">Fit all</button>
   <span id="phase">idle</span>
 </div>
 
@@ -118,7 +122,7 @@
   }
 
   var $ = function (sel) { return document.querySelector(sel); };
-  var phaseEl = $("#phase"), reportEl = $("#report"), runBtn = $("#run");
+  var phaseEl = $("#phase"), reportEl = $("#report"), runBtn = $("#run"), fitBtn = $("#fitall");
   var mGroups = $("#m-groups"), mFit = $("#m-fit"), mZoom = $("#m-zoom"), mFrame = $("#m-frame");
   var mRefit = $("#m-refit");
 
@@ -284,6 +288,14 @@
       "NaN in DOM              " + (checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
       "errors                  " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
+
+  // "Fit all" is the escape hatch: it works any time — mid-run, after the deliberate
+  // zoom-into-a-corner step, or after a user has panned around on their own — and never
+  // fights a deliberate zoom the user just asked for on their own initiative (nothing here
+  // auto-fits after a manual pan/zoom; this button is the explicit, one-click ask for it).
+  fitBtn.addEventListener("click", function () {
+    g.fitView();
+  });
 
   runBtn.addEventListener("click", runExit);
   if (AUTO) {

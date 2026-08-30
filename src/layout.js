@@ -28,8 +28,12 @@ import { sampleCubic } from "./path.js";
 
 const DEFAULTS = { dir: "LR", nodesep: 28, ranksep: 56, marginx: 20, marginy: 20 };
 
-/** Container chrome (D5): a 28px header strip on top, 12px of breathing room elsewhere. */
-export const CONTAINER_PAD = { top: 28, side: 12, bottom: 12 };
+/** Container chrome (D5): a 28px header strip on top, plus 12px of breathing room on
+ *  every side — including between the header strip and the first child, which used to
+ *  get none (children sat flush under the header, unlike the 12px they clear on the
+ *  other three edges). top = header height (render.js/preset-pipeline.js's HEADER_H)
+ *  + that same 12px gap. */
+export const CONTAINER_PAD = { top: 40, side: 12, bottom: 12 };
 
 export function layout(view, opts = {}) {
   const o = { ...DEFAULTS, ...opts };

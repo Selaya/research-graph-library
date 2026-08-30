@@ -216,9 +216,9 @@ vs.view() → { nodes, edges, sizes, meta }
 - `view()` output plugs into the existing `layout()` seam:
   - visible node = every ancestor expanded. Expanded containers appear WITH `parent`
     links on their children (dagre compound reserves the space — that is the dagre-era
-    implementation of D5's four-step; containers get `containerPad` {top:28 for the
-    header strip, side:12, bottom:12} passed via node w/h handling in dagre's cluster
-    result).
+    implementation of D5's four-step; containers get `containerPad` {top:40 — the 28px
+    header strip plus a 12px gap above the first child, matching the other three edges —
+    side:12, bottom:12} passed via node w/h handling in dagre's cluster result).
   - collapsed container = plain node sized by `sizeNode` + room for a ×N badge.
   - meta-edges: an edge whose endpoint is hidden re-attaches to the nearest visible
     ancestor; parallel meta-edges (same src→tgt) dedupe into id
