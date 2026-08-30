@@ -4,7 +4,7 @@
   { "op": "caption", "args": ["Two manual steps sit between ingest and publish."] },
   { "op": "wait", "ms": 400 },
   { "label": "focus" },
-  { "op": "highlight", "args": [{ "nodes": ["dedupe", "validate"], "dim": true }] },
+  { "op": "highlight", "args": [{ "nodes": ["dedupe", "validate"], "dim": true, "pulse": true }] },
   { "op": "camera", "args": [{ "nodes": ["dedupe", "validate"], "pad": 40, "dur": 400 }] },
   { "op": "wait", "ms": 300 },
   { "label": "automate" },

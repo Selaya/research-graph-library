@@ -364,6 +364,149 @@ test("emphasis is re-asserted onto the FRESH <g> of a removed-and-re-added node 
   g.destroy();
 });
 
+// ---------------------------------------------------------------------------
+// M4d — the props override layer (D16) and the ticker-driven pulse (D17).
+// ---------------------------------------------------------------------------
+
+const propOf = (el, k) => el.style.getPropertyValue(k);
+
+test("g.props(): the override layer lands on nodes AND edges, and clears with null (D16)", () => {
+  const { g } = mountM4();
+  g.props({ a: { "--smv-fill": "#7c5cff" }, e1: { "--smv-stroke": "#f5a" } });
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "#7c5cff");
+  assert.equal(propOf(g.renderer.edge("e1"), "--smv-stroke"), "#f5a", "the style fn is node-scoped; this is not");
+
+  // Replace-not-accumulate: what the last layer set and this one does not is REMOVED.
+  g.props({ a: { "--smv-stroke": "#0f0" } });
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "", "the dropped key was cleared, not left behind");
+  assert.equal(propOf(g.renderer.node("a"), "--smv-stroke"), "#0f0");
+  assert.equal(propOf(g.renderer.edge("e1"), "--smv-stroke"), "");
+
+  g.props(null);
+  assert.equal(propOf(g.renderer.node("a"), "--smv-stroke"), "");
+  g.destroy();
+});
+
+test("g.props() layers OVER the style function, and a non---smv-* key throws (D7)", () => {
+  const { g } = mountM4();
+  g.style((n) => ({ "--smv-fill": "#111", "--smv-stroke": n.id === "a" ? "#222" : "#333" }));
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "#111");
+
+  g.props({ a: { "--smv-fill": "#7c5cff" } });
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "#7c5cff", "the override wins over the style fn");
+  assert.equal(propOf(g.renderer.node("a"), "--smv-stroke"), "#222", "…and leaves the rest of it alone");
+
+  g.props(null);
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "#111", "clearing falls back to the style fn, not to nothing");
+
+  assert.throws(() => g.props({ a: { color: "red" } }), /props only sets --smv-\* properties \(D7\)/);
+  g.destroy();
+});
+
+test("a later g.style() call re-commits with the props layer still on top (styleNow reads both)", () => {
+  const { g } = mountM4();
+  g.props({ a: { "--smv-fill": "#7c5cff" } });
+  g.style(() => ({ "--smv-fill": "#111" }));
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "#7c5cff", "the override outlives a style fn swap");
+  assert.equal(propOf(g.renderer.node("b"), "--smv-fill"), "#111", "…and the new fn styles the rest");
+  g.props(null);
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "#111", "clearing falls back to the LATER fn");
+  g.destroy();
+});
+
+test("props survive a relayout and reach the FRESH <g> of a re-added node", async () => {
+  const { g } = mountM4();
+  g.props({ b: { "--smv-fill": "#7c5cff" } });
+  await settle(g.removeNode("b"), g);
+  g.ticker.tick(400); await flush();
+  await settle(g.addNode({ id: "b" }), g);
+  g.ticker.tick(16); await flush();
+  assert.equal(propOf(g.renderer.node("b"), "--smv-fill"), "#7c5cff", "the style commit runs before the element exists");
+  g.destroy();
+});
+
+test("a props storyboard op is a zero-duration state flip, snapshotted and restored (G2/D16)", async () => {
+  const steps = [
+    { label: "plain" },
+    { op: "props", args: [{ a: { "--smv-fill": "#7c5cff" } }] },
+    { op: "wait", ms: 100 },
+    { op: "props", args: [null] },
+  ];
+  const { g } = mountM4({ storyboard: steps });
+  assert.deepEqual(g.cues(), [{ kind: "label", at: 0, label: "plain", index: 0 }]);
+  assert.equal(g.timeline().total, 100, "props costs nothing on the declared timeline");
+
+  const sb = g.storyboard();
+  await settle(sb.next(), g);           // the label
+  await settle(sb.next(), g);           // props
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "#7c5cff");
+  await settle(sb.next(), g);           // wait
+  await settle(sb.next(), g);           // props(null)
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "");
+
+  await settle(sb.seek(1), g);          // back to just before the override was set
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "", "the snapshot had no layer");
+  await settle(sb.seek(3), g);          // back to just before it was cleared
+  assert.equal(propOf(g.renderer.node("a"), "--smv-fill"), "#7c5cff", "…and this one had");
+  g.destroy();
+});
+
+test("D17: highlight({pulse:true}) modulates one root property off the shared ticker", async () => {
+  const { root, g } = mountM4();
+  assert.equal(propOf(root, "--smv-pulse"), "", "nothing until something pulses");
+
+  g.highlight({ nodes: ["a"], variant: "warn", pulse: true });
+  assert.equal(g.renderer.node("a").getAttribute("data-emph"), "warn", "pulse is a modifier, not a variant");
+  assert.equal(propOf(root, "--smv-pulse"), "0");
+
+  const seen = [];
+  for (let i = 0; i < 12; i++) { g.ticker.tick(100); await flush(); seen.push(propOf(root, "--smv-pulse")); }
+  for (const v of seen) assert.ok(Number.isInteger(Number(v) * 12), `quantized to a bucket: ${v}`);
+  assert.equal(Math.max(...seen.map(Number)), 1);
+
+  // The same tick sequence on a second mount writes the same strings — no wall clock, so
+  // `data-smv-record` has nothing to kill here (D15 is not load-bearing for the pulse).
+  const other = mountM4();
+  other.g.highlight({ nodes: ["a"], pulse: true });
+  const again = [];
+  for (let i = 0; i < 12; i++) { other.g.ticker.tick(100); await flush(); again.push(propOf(other.root, "--smv-pulse")); }
+  assert.deepEqual(again, seen);
+
+  g.clearHighlight();
+  assert.equal(propOf(root, "--smv-pulse"), "", "clearHighlight takes it off the clock and off the root");
+  g.destroy();
+  other.g.destroy();
+});
+
+test("a backward seek past a pulsing highlight takes the pulse off the clock, not just off the root", async () => {
+  const steps = [
+    { label: "s" },
+    { op: "highlight", args: [{ nodes: ["a"], pulse: true }] },
+    { op: "wait", ms: 100 },
+  ];
+  const { root, g } = mountM4({ storyboard: steps });
+  await settle(g.storyboard().play(), g);
+  assert.notEqual(propOf(root, "--smv-pulse"), "", "pulsing after the story played");
+
+  await settle(g.storyboard().seek("s"), g);
+  assert.equal(propOf(root, "--smv-pulse"), "", "the restored snapshot has no pulse");
+  g.ticker.tick(100); await flush();
+  assert.equal(propOf(root, "--smv-pulse"), "", "…and no leftover callback writes it back");
+  g.destroy();
+});
+
+test("G9: under reduced motion the pulse is a static hold, never a dropped highlight", () => {
+  reduceFlag = true;
+  const { root, g } = mountM4();
+  reduceFlag = false;
+  g.highlight({ nodes: ["a"], pulse: true });
+  assert.equal(g.renderer.node("a").getAttribute("data-emph"), "focus", "the emphasis is still there");
+  assert.equal(propOf(root, "--smv-pulse"), "1", "…held at the peak, not animated");
+  g.ticker.tick(500);
+  assert.equal(propOf(root, "--smv-pulse"), "1", "and it does not move");
+  g.destroy();
+});
+
 test("g.caption() sets, updates and clears the overlay", () => {
   const { root, g } = mountM4();
   g.caption("hello", { variant: "note" });
