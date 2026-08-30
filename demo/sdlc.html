@@ -192,27 +192,44 @@
 
   var PHASES = ["plan", "dev", "build", "qa", "rel"];
 
+  /** A no-op patch, used ONLY to name the relayout's focal node (index.js takes the first
+   *  focal a batch produces). relayout() anchors that node's centre in SCREEN space and
+   *  reflows everything around it — which is what lets the camera arrive at an empty phase
+   *  box FIRST and have the phase bloom open around the shot, instead of growing off-frame
+   *  and needing a correction pan afterwards. */
+  function anchorOn(id) { return { op: "update", args: [id, {}] }; }
+
   // Mount holds only the (still empty) Planning phase; the storyboard grows the rest, so
   // the pipeline is SEEN assembling, phase by phase (§6.1).
   var SEED = { nodes: [phase("plan", "Planning")], edges: [] };
 
+  // Each wave FILLS the phase the camera is already framing, and plants the NEXT phase as
+  // an empty container wired to this one — so the following beat has something real to pan
+  // to before that phase fills. The seam edges deliberately target the CONTAINER: both the
+  // view (viewstate.attach) and the token engine (run.js's twin of it) re-point a container
+  // edge at the interior entry/exit child, so `dev.merge -> build` becomes
+  // `dev.merge -> build.compile` the moment build has children, with nothing to rewrite.
+
   var WAVE_PLAN = [
+    anchorOn("plan"),
     add(manual("plan.ticket", "plan", "Jira ticket", "30m")),
     add(manual("plan.triage", "plan", "Triage & size", "2h")),
     add(manual("plan.commit", "plan", "Sprint commit", "1h")),
     link("p1", "plan.ticket", "plan.triage"),
     link("p2", "plan.triage", "plan.commit"),
+    // …and the seam into Development, which the next beat pans to before filling it.
+    { op: "addNode", args: [phase("dev", "Development")] },
+    link("p3", "plan.commit", "dev"),
   ];
 
   var WAVE_DEV = [
-    { op: "addNode", args: [phase("dev", "Development")] },
+    anchorOn("dev"),
     add(manual("dev.branch", "dev", "Cut branch", "10m")),
     add(manual("dev.code", "dev", "Implement", "3d")),
     add(manual("dev.pr", "dev", "Open PR", "15m")),
     add(manual("dev.review", "dev", "Code review", "1d")),
     add(manual("dev.rework", "dev", "Address feedback", "4h")),
     add(manual("dev.merge", "dev", "Merge to main", "20m")),
-    link("p3", "plan.commit", "dev.branch"),
     link("d1", "dev.branch", "dev.code"),
     link("d2", "dev.code", "dev.pr"),
     link("d3", "dev.pr", "dev.review"),
@@ -220,45 +237,50 @@
     link("d5", "dev.rework", "dev.merge"),
     // The retry loop: iteration 1 flies the arc, 2..n tick in place on the review node.
     link("rework", "dev.rework", "dev.review", { loop: true, maxIterations: 4 }),
+    { op: "addNode", args: [phase("build", "Build & sign")] },
+    link("d6", "dev.merge", "build"),
   ];
 
   var WAVE_BUILD = [
-    { op: "addNode", args: [phase("build", "Build & sign")] },
+    anchorOn("build"),
     add(manual("build.compile", "build", "Build artifacts", "45m")),
     add(manual("build.ios", "build", "Sign · iOS", "4h")),
     add(manual("build.android", "build", "Sign · Android", "3h")),
     add(manual("build.tv", "build", "Sign · Smart TV", "4h")),
-    link("d6", "dev.merge", "build.compile"),
     // Three out-edges from one node IS the fan-out — there is no gateway syntax (D4).
     link("b1", "build.compile", "build.ios"),
     link("b2", "build.compile", "build.android"),
     link("b3", "build.compile", "build.tv"),
+    // The fan-IN keeps three separate edges (that is what makes qa.smoke an all-join);
+    // they land on the container, so they re-point at qa.smoke as soon as it exists.
+    { op: "addNode", args: [phase("qa", "QA & regression")] },
+    link("b4", "build.ios", "qa"),
+    link("b5", "build.android", "qa"),
+    link("b6", "build.tv", "qa"),
   ];
 
   var WAVE_QA = [
-    { op: "addNode", args: [phase("qa", "QA & regression")] },
+    anchorOn("qa"),
     add(manual("qa.smoke", "qa", "QA smoke pass", "2h", { join: "all" })),
     add(manual("qa.ios", "qa", "Regress · iOS", "2d")),
     add(manual("qa.android", "qa", "Regress · Android", "2d")),
     add(manual("qa.tv", "qa", "Regress · Smart TV", "3d")),
-    link("b4", "build.ios", "qa.smoke"),
-    link("b5", "build.android", "qa.smoke"),
-    link("b6", "build.tv", "qa.smoke"),
     link("q1", "qa.smoke", "qa.ios"),
     link("q2", "qa.smoke", "qa.android"),
     link("q3", "qa.smoke", "qa.tv"),
+    { op: "addNode", args: [phase("rel", "Release")] },
+    link("q4", "qa.ios", "rel"),
+    link("q5", "qa.android", "rel"),
+    link("q6", "qa.tv", "rel"),
   ];
 
   var WAVE_REL = [
-    { op: "addNode", args: [phase("rel", "Release")] },
+    anchorOn("rel"),
     add(manual("rel.gate", "rel", "Release sign-off", "3h", { join: "all" })),
     add(manual("rel.ios", "rel", "Deploy · iOS", "2h")),
     add(manual("rel.android", "rel", "Deploy · Android", "2h")),
     add(manual("rel.tv", "rel", "Deploy · Smart TV", "3h")),
     add(manual("rel.ga", "rel", "GA complete", "30m", { join: "all" })),
-    link("q4", "qa.ios", "rel.gate"),
-    link("q5", "qa.android", "rel.gate"),
-    link("q6", "qa.tv", "rel.gate"),
     link("r1", "rel.gate", "rel.ios"),
     link("r2", "rel.gate", "rel.android"),
     link("r3", "rel.gate", "rel.tv"),
@@ -276,59 +298,82 @@
   var SHIP_SET = ["rel.ios", "rel.android", "rel.tv"];
   var SHIP_AUTO = automated("rel.progressive", "Progressive delivery", "4m");
 
-  var collapseAllPhases = PHASES.map(function (id) { return { op: "collapse", args: [id] }; });
+  // Order matters, for the same anchoring reason `anchorOn` exists: the FIRST container
+  // that actually changes is the relayout's focal, so the fold pivots on the middle phase
+  // (the folded row ends up centred where the shot already is) and the unfold pivots on
+  // Planning (where the token run is about to start).
+  var collapseAllPhases = ["build", "plan", "dev", "qa", "rel"]
+    .map(function (id) { return { op: "collapse", args: [id] }; });
   var expandAllPhases = PHASES.map(function (id) { return { op: "expand", args: [id] }; });
 
   // ===========================================================================
   // 2. The storyboard — four acts, one serializable op array (D8 + the M4 director ops)
   // ===========================================================================
 
+  /** Global pacing dial. Acts 1, 2 and 4 (and the token run itself, further down) are
+   *  priced through P(); the automation act deliberately is NOT — its beats are tuned to
+   *  the condense choreography's own fixed 900ms and read correctly as they are, so it
+   *  uses the exact `camAt`/`holdAt` spellings instead. */
+  var PACE = 1.5;
+  var P = function (ms) { return Math.round(ms * PACE); };
+
   function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
-  function cam(target) { return { op: "camera", args: [target] }; }
-  function hold(ms) { return { op: "wait", ms: ms }; }
+  function camAt(target) { return { op: "camera", args: [target] }; }        // exact ms
+  function cam(target) {                                                     // × PACE
+    var t = {};
+    for (var k in target) t[k] = target[k];
+    t.dur = P(target.dur == null ? 600 : target.dur);
+    return camAt(t);
+  }
+  function holdAt(ms) { return { op: "wait", ms: ms }; }                     // exact ms
+  function hold(ms) { return holdAt(P(ms)); }                                // × PACE
+  function grow(steps, ms) { return { op: "batch", steps: steps, dur: P(ms) }; }
   function spot(ids, variant, dim) {
     return { op: "highlight", args: [{ nodes: ids, variant: variant, dim: !!dim, pulse: true }] };
   }
 
   var STEPS = [
     // ---- ACT 1 — the pipeline appears --------------------------------------
+    // One camera move per beat, and it always lands BEFORE the phase it frames fills up:
+    // each wave plants the next phase as an empty container, the camera pans to that box,
+    // and the wave that fills it is anchored on it (anchorOn) so the phase blooms open
+    // around the shot. No beat ever needs a second, corrective pan.
     { label: "assemble" },
     cap("One release, five phases. Watch the pipeline assemble."),
-    cam({ node: "plan", k: 1.1, pad: 48, dur: 700 }),
+    cam({ node: "plan", k: 1.15, pad: 44, dur: 700 }),
     hold(900),
 
     cap("Planning — a ticket is filed, sized, and committed to a sprint."),
-    { op: "batch", steps: WAVE_PLAN, dur: 900 },
-    cam({ node: "plan", k: 1.15, pad: 44, dur: 800 }),
+    grow(WAVE_PLAN, 900),                       // no pan: the opening shot already frames it
     hold(800),
 
     cap("Development — branch, implement, open a PR, review, merge."),
-    { op: "batch", steps: WAVE_DEV, dur: 1000 },
     cam({ node: "dev", k: 0.8, pad: 40, dur: 900 }),
+    grow(WAVE_DEV, 1000),
     hold(900),
 
     cap("Build & sign — one build, then one signing step per device type."),
-    { op: "batch", steps: WAVE_BUILD, dur: 900 },
     cam({ node: "build", k: 1.15, pad: 44, dur: 800 }),
+    grow(WAVE_BUILD, 900),
     hold(800),
 
     cap("QA — a smoke pass gates a regression run on all three device types."),
-    { op: "batch", steps: WAVE_QA, dur: 900 },
     cam({ node: "qa", k: 1.1, pad: 44, dur: 800 }),
+    grow(WAVE_QA, 900),
     hold(800),
 
     cap("Release — sign-off, a deploy per device type, then GA."),
-    { op: "batch", steps: WAVE_REL, dur: 900 },
     cam({ node: "rel", k: 1.0, pad: 44, dur: 800 }),
+    grow(WAVE_REL, 900),
     hold(900),
 
     { label: "overview" },
     cap("Twenty-two steps. Fold the phases up and the chips roll up with them."),
-    // Pull all the way back FIRST: a collapse framed on one phase would fold the graph
-    // out from under a camera pinned where that phase used to be.
-    cam({ fit: true, pad: 44, dur: 800 }),
-    { op: "batch", steps: collapseAllPhases, dur: 900 },
-    cam({ fit: true, pad: 48, dur: 900 }),
+    // The fold is the mirror image of a wave: pan ONCE, to the middle phase at the scale
+    // the folded row will want, then collapse anchored on that same phase so the five
+    // boxes land centred in the shot already framed for them.
+    cam({ node: "build", k: 1.0, pad: 44, dur: 800 }),
+    grow(collapseAllPhases, 900),
     hold(1600),
     cap("Every step is done by a person: ≈12.4 days of hands-on work per release."),
     hold(2000),
@@ -336,8 +381,10 @@
     // ---- ACT 2 — one release, the manual way -------------------------------
     { label: "run · manual" },
     cap("Open them up and run one release the way it runs today."),
-    { op: "batch", steps: expandAllPhases, dur: 900 },
+    // Pan to Planning FIRST; the unfold is anchored on it, so the phases bloom rightward
+    // out of the shot the run is about to start in. (No pan-in afterwards.)
     cam({ node: "plan", k: 1.1, pad: 44, dur: 800 }),
+    grow(expandAllPhases, 900),
     { op: "run.play", until: "plan.commit" },
 
     cap("Development. Three days of writing code is the honest part of this pipeline."),
@@ -350,11 +397,13 @@
     { op: "clearHighlight" },
 
     cap("Signing is manual, once per device type: 4h + 3h + 4h, then an all-join."),
-    cam({ node: "build", k: 1.15, pad: 44, dur: 800 }),
+    // Framed on the fan-out AND its join target, so the token never runs past the edge of
+    // the shot on its way into qa.smoke.
+    cam({ nodes: ["build", "qa.smoke"], pad: 52, dur: 800 }),
     { op: "run.play", until: "qa.smoke" },
 
     cap("Regression: three manual passes at three different speeds. The join waits."),
-    cam({ node: "qa", k: 1.1, pad: 44, dur: 800 }),
+    cam({ nodes: ["qa", "rel.gate"], pad: 52, dur: 800 }),
     { op: "run.play", until: "rel.gate" },
 
     cap("Sign-off, three hand-driven deploys, GA."),
@@ -364,47 +413,59 @@
     hold(2200),
 
     // ---- ACT 3 — automation lands ------------------------------------------
+    // PACE-exempt (camAt/holdAt): these beats are cut against the condense choreography's
+    // own fixed 900ms and the odometer's 600ms, and stretching them by 1.5 would leave the
+    // payoff hanging after the roll has already finished.
     { label: "automate" },
     cap("Automation lands. Signing first."),
-    cam({ nodes: SIGN_SET, k: 1.25, pad: 64, dur: 800 }),
+    camAt({ nodes: SIGN_SET, k: 1.25, pad: 64, dur: 800 }),
     spot(SIGN_SET, "warn", true),
-    hold(1500),
+    holdAt(1500),
     { op: "condense", args: [SIGN_SET, SIGN_AUTO] },
     { op: "highlight", args: [{ nodes: [SIGN_AUTO.id], variant: "ok" }] },
     cap("Three manual signings — 11h of certificate wrangling — become one CI service: 45s."),
-    hold(2200),
+    holdAt(2200),
 
     cap("Now the part that actually hurts: seven device-days of manual regression."),
-    cam({ nodes: REG_SET, k: 1.2, pad: 64, dur: 800 }),
+    camAt({ nodes: REG_SET, k: 1.2, pad: 64, dur: 800 }),
     spot(REG_SET, "warn", true),
-    hold(1500),
+    holdAt(1500),
     { op: "condense", args: [REG_SET, REG_AUTO] },
     { op: "highlight", args: [{ nodes: [REG_AUTO.id], variant: "ok" }] },
     cap("One suite, run on every device type in parallel: 7d → 12m."),
-    hold(2200),
+    holdAt(2200),
 
     cap("And the three hand-driven deploys."),
-    cam({ nodes: SHIP_SET, k: 1.2, pad: 64, dur: 800 }),
+    camAt({ nodes: SHIP_SET, k: 1.2, pad: 64, dur: 800 }),
     spot(SHIP_SET, "warn", true),
-    hold(1400),
+    holdAt(1400),
     { op: "condense", args: [SHIP_SET, SHIP_AUTO] },
     { op: "highlight", args: [{ nodes: [SHIP_AUTO.id], variant: "ok" }] },
     cap("Progressive delivery rolls all three out behind one automated gate: 7h → 4m."),
-    hold(2000),
+    holdAt(2000),
     { op: "clearHighlight" },
 
     // ---- ACT 4 — the same release, automated -------------------------------
+    // The camera LEADS the tokens: every run.play segment is bracketed by the shot that
+    // already contains the nodes that segment will light up, so nothing happens off-frame.
+    // (The automated steps are ~200ms blips — a camera chasing them would always lose.)
     { label: "re-run" },
     cap("Same pipeline, same release. Run it again."),
     cam({ node: "plan", k: 1.05, pad: 44, dur: 800 }),
     { op: "run.seek", ms: 0 },
     hold(900),
+    { op: "run.play", until: "plan.commit" },
+
+    cam({ node: "dev", k: 0.8, pad: 40, dur: 800 }),
     { op: "run.play", until: "dev.merge" },
 
     // The shared prefix is deliberately just as slow: writing the code still takes three
     // days. It is everything AFTER the merge that stopped costing human time.
     cap("Signing, regression and delivery were 7.7 days of hand-work. Now: about 17 minutes."),
-    cam({ nodes: ["build", "qa", "rel"], pad: 40, dur: 900 }),
+    cam({ nodes: ["build", "qa"], pad: 52, dur: 800 }),
+    { op: "run.play", until: "qa.smoke" },
+
+    cam({ nodes: ["qa", "rel"], pad: 52, dur: 800 }),
     { op: "run.play", until: "rel.ga" },
 
     { label: "wrap-up" },
@@ -413,9 +474,8 @@
     cap("GA — signing, regression and delivery took seconds instead of days."),
     hold(2400),
     { op: "clearHighlight" },
-    cam({ fit: true, pad: 44, dur: 800 }),
-    { op: "batch", steps: collapseAllPhases, dur: 900 },
-    cam({ fit: true, pad: 48, dur: 900 }),
+    cam({ node: "build", k: 1.0, pad: 44, dur: 800 }),
+    grow(collapseAllPhases, 900),
     cap("≈12.4d → ≈4.6d of hands-on work. What is left is mostly writing the code."),
     hold(2600),
   ];
@@ -438,18 +498,20 @@
 
   var RUN_OPTS = {
     iterations: { rework: 3 },      // 3 of the edge's max 4
-    hopMs: 150,
+    hopMs: P(150),
     rates: [
       { t: 0, scope: "qa.android", factor: 1.7 },   // one regression branch sprints,
       { t: 0, scope: "qa.ios", factor: 1.25 },      // one is middling, Smart TV crawls
     ],
+    // Everything the token does is on the same PACE dial as the storyboard, so the two
+    // acts that contain a run slow down together with the beats framing them.
     dwell: function (sec, ctx) {
       var n = ctx.node || {};
       var mode = n.data && n.data.mode;
-      if (mode === "automated" || mode === "auto") return 130;
-      if (sec == null) return 320;
+      if (mode === "automated" || mode === "auto") return P(130);
+      if (sec == null) return P(320);
       var f = Math.pow(sec / Math.max(ctx.maxSec, 1), 0.4);
-      return 260 + 1100 * f;
+      return P(260 + 1100 * f);
     },
   };
 
@@ -516,31 +578,86 @@
    *
    *  Math.ceil, not round: a marker sitting exactly on `ms` wins over the step that
    *  follows it, so landing a hair EARLY would put the head in the previous chapter. */
+  var seekWatchdog = null;
+
+  /** Drop the busy state, however the seek ended. */
+  function endSeek(note) {
+    if (seekWatchdog) { clearTimeout(seekWatchdog); seekWatchdog = null; }
+    if (seeking == null) return;
+    seeking = null;
+    railEl.removeAttribute("data-seeking");
+    phaseEl.textContent = note || ("at " + (sb.position().label || "") + " · paused");
+    paintRail();
+  }
+
+  /**
+   * Let the step that was mid-flight when we paused finish applying.
+   *
+   * This matters, and it is subtle: pause() stops the play LOOP but the step already in
+   * flight keeps going and still advances the play head when it lands. A forward seek
+   * issued before that happens voids the step's cursor write — but NOT the mutations it
+   * already committed — so the replay applies them a second time and the store throws
+   * `dup-id`. (Reachable from the transport's own scrubber too: drag it forward while a
+   * batch is committing.) One "step" event is all we need; the timeout covers the case
+   * where nothing was in flight at all.
+   */
+  function settleInFlight() {
+    return new Promise(function (resolve) {
+      var done = false;
+      var finish = function () {
+        if (done) return;
+        done = true;
+        sb.off("step", finish);
+        clearTimeout(t);
+        resolve();
+      };
+      var t = setTimeout(finish, 2200);   // longer than the slowest mutation step's dur
+      sb.on("step", finish);
+    });
+  }
+
   function jumpTo(label) {
-    var tl = g.timeline();
+    if (seeking != null) return;          // one seek at a time
     var scrub = document.querySelector("#pipe .smv-transport-scrub");
     var at = null;
     var cues = g.cues();
     for (var i = 0; i < cues.length; i++) {
       if (cues[i].kind === "label" && cues[i].label === label) { at = cues[i].at; break; }
     }
+    var targetIdx = -1;
+    for (var j = 0; j < LABELS.length; j++) if (LABELS[j].label === label) targetIdx = LABELS[j].index;
+
+    var tl = g.timeline();
+    var wasPlaying = !!(tl && tl.playing);
+    if (wasPlaying) transportClick("play");          // the play button is a toggle
     if (at == null || !scrub || !(tl && tl.total > 0)) {
       // No transport (or no cue): fall back to the sequencer's own seek.
-      if (tl && tl.playing) transportClick("play");   // the play button is a toggle
-      Promise.resolve(sb.seek(label)).then(paintRail, function (err) {
+      Promise.resolve(sb.seek(label)).then(function () { endSeek(); }, function (err) {
         errors.push("seek: " + String((err && err.message) || err));
+        endSeek("seek failed — see the report");
       });
       return;
     }
+
     seeking = label;
     railEl.setAttribute("data-seeking", "");
     phaseEl.textContent = "seeking → " + label + " …";
-    var max = Number(scrub.getAttribute("max")) || 1000;
-    scrub.value = String(Math.ceil(Math.max(0, Math.min(1, at / tl.total)) * max));
-    // The same three events a real drag fires: pause, seek, release.
-    scrub.dispatchEvent(new Event("pointerdown", { bubbles: true }));
-    scrub.dispatchEvent(new Event("input", { bubbles: true }));
-    scrub.dispatchEvent(new Event("change", { bubbles: true }));
+    // Never let a failed seek strand the rail: the transport discards the promise its
+    // scrubber creates, so a rejection would otherwise leave the busy flag up for good.
+    seekWatchdog = setTimeout(function () { endSeek("seek timed out"); }, 200000);
+
+    // Backward is a snapshot restore and is safe immediately; forward replays the steps in
+    // between, so the in-flight one has to land first (see settleInFlight).
+    var ready = (wasPlaying && targetIdx > sb.position().index) ? settleInFlight() : Promise.resolve();
+    ready.then(function () {
+      var t2 = g.timeline();
+      var max = Number(scrub.getAttribute("max")) || 1000;
+      scrub.value = String(Math.ceil(Math.max(0, Math.min(1, at / (t2.total || tl.total))) * max));
+      // The same three events a real drag fires: pause, seek, release.
+      scrub.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      scrub.dispatchEvent(new Event("input", { bubbles: true }));
+      scrub.dispatchEvent(new Event("change", { bubbles: true }));
+    });
   }
 
   function paintRail() {
@@ -572,8 +689,33 @@
     fanOutTokens: 0, branchSpread: 0, branchProgress: null,
     joinNeeded: 0, joinArrivedAtFire: null, loopIteration: 0, loopMax: 0, loopBadge: "",
     totalSeen: [],
+    // Camera choreography, measured rather than asserted: the worst number of pixels by
+    // which any RUNNING step has stuck out of the pane, per chapter. The whole point of
+    // leading the camera into each phase before its tokens move is that these stay 0.
+    overflow: {},
   };
   var FAN = { "qa.ios": 1, "qa.android": 1, "qa.tv": 1, q1: 1, q2: 1, q3: 1 };
+
+  /** How far outside the visible pane the worst currently-active STEP is, in px (0 = all
+   *  in frame). Containers are excluded on purpose: a phase box is legitimately allowed to
+   *  be wider than the shot; the steps lighting up inside it are not. The transport bar
+   *  owns the bottom 34px of the pane, so that strip does not count as visible. */
+  var TRANSPORT_H = 34;
+  function activeOverflowPx() {
+    var pane = document.querySelector("#pipe");
+    if (!pane || typeof pane.getBoundingClientRect !== "function") return 0;
+    var p = pane.getBoundingClientRect();
+    var worst = 0;
+    var list = document.querySelectorAll('#pipe .smv-node[data-run="active"]:not([data-container])');
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i].getBoundingClientRect();
+      if (!r.width && !r.height) continue;                 // culled, or not yet laid out
+      worst = Math.max(worst,
+        p.left - r.left, r.right - p.right,
+        p.top - r.top, r.bottom - (p.bottom - TRANSPORT_H));
+    }
+    return Math.max(0, Math.round(worst));
+  }
 
   var totalLabel = function () {
     var el = document.querySelector("#pipe .smv-totalbar-label");
@@ -657,6 +799,19 @@
       if (!j.fired) break;
     }
 
+    // Only while the run is actually driving: a paused frame mid-camera-move would report
+    // an "overflow" that no viewer ever sees a token in.
+    if (run.playing) {
+      var chapter = sb.position().label || "—";
+      var over = activeOverflowPx();
+      if (over > (obs.overflow[chapter] || 0)) obs.overflow[chapter] = over;
+      else if (obs.overflow[chapter] === undefined) obs.overflow[chapter] = 0;
+      if (over > obs.worstOverflow || obs.worstOverflow === undefined) {
+        obs.worstOverflow = over;
+        obs.worstOverflowAt = chapter;
+      }
+    }
+
     mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
     mTokens.textContent = String(st.tokens.length);
     mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/4";
@@ -694,13 +849,9 @@
       };
     }
   });
-  sb.on("seek", function (ev) {
-    if (seeking != null) {
-      seeking = null;
-      railEl.removeAttribute("data-seeking");
-      phaseEl.textContent = "at " + (sb.position().label || "") + " · paused";
-    }
-    paintRail();
+  sb.on("seek", function () {
+    if (seeking != null) endSeek();
+    else paintRail();
   });
   sb.on("done", function () {
     storyDone = true;
@@ -743,6 +894,8 @@
       "condense · regression       " + JSON.stringify(checks["qa.suite"]) + "\n" +
       "condense · delivery         " + JSON.stringify(checks["rel.progressive"]) + "\n" +
       "total-duration bar          " + JSON.stringify(checks.totalSeen) + "\n" +
+      "active step off-screen px   " + JSON.stringify(checks.overflow) +
+        " (worst " + checks.worstOverflow + "px in “" + checks.worstOverflowAt + "”)\n" +
       "scrub back to “automate”    " + JSON.stringify(checks.scrubBack) + "\n" +
       "scrub forward to the end    " + JSON.stringify(checks.scrubForward) + "\n" +
       "NaN in DOM                  " + (checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
@@ -768,6 +921,9 @@
       loopMax: obs.loopMax,
       loopBadge: obs.loopBadge || loopBadgeText(),
       totalSeen: obs.totalSeen,
+      overflow: obs.overflow,
+      worstOverflow: obs.worstOverflow || 0,
+      worstOverflowAt: obs.worstOverflowAt || null,
     });
 
     phaseEl.textContent = "scrubbing back to “automate”…";
