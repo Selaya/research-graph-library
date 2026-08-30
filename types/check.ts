@@ -241,6 +241,9 @@ g.destroy();
 // ---- export / a11y-table (ESM-only subpath entries) ------------------------------------
 const svgString: string = exportSVG(g, { pad: 16, theme: "light" });
 void svgString;
+// M4c — the shot: live pan/zoom transform and live culling kept, pane-sized viewBox.
+const shotString: string = exportSVG(g, { viewport: true, theme: "dark" });
+void shotString;
 exportPNG(g, { scale: 2, background: "#fff" }).then((blob: Blob) => blob.size);
 
 const rows = computeRows(g);

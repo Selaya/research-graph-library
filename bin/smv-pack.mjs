@@ -74,7 +74,37 @@ function htmlEscape(str) {
   }[c]));
 }
 
-export function buildHTML({ spec, storyboard, title, preset, iife, theme = null, record = false }) {
+/** The record variant's pinned-font layer (M4c `--font`), or "" when no font was passed.
+ *  `font` is `{file, format, family}` — `file` is served next to story.html by smv-record.
+ *
+ *  Two halves, because a browser has two font pipelines and the layout needs both pinned:
+ *  the @font-face + `font-family` override decides what is DRAWN, and the canvas patch
+ *  decides what is MEASURED — src/measure.js sizes every node box with `measureText`
+ *  against `500 13px system-ui, …`, and `system-ui` resolves to whatever the recording
+ *  machine calls its UI font (a generic family keyword cannot be redefined by @font-face).
+ *  Pinning only the drawing would leave the box widths machine-dependent, which is the
+ *  whole thing --font exists to fix. Scoped to this generated harness page. */
+function fontLayer(font) {
+  if (!font) return { style: "", boot: null };
+  const fam = JSON.stringify(font.family);
+  return {
+    style:
+      `<style>\n` +
+      `@font-face{font-family:${fam};src:url(${JSON.stringify(font.file)}) format(${JSON.stringify(font.format)});` +
+      `font-weight:1 1000;font-style:normal;font-display:block}\n` +
+      `#smv-pack-root,#smv-pack-root *{font-family:${fam}!important}\n` +
+      `</style>`,
+    boot:
+      `  var FAM = ${fam};\n` +
+      `  var d = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "font");\n` +
+      `  Object.defineProperty(CanvasRenderingContext2D.prototype, "font", {\n` +
+      `    configurable: true, get: d.get,\n` +
+      `    set: function (v) { d.set.call(this, String(v).replace(/((?:\\d*\\.)?\\d+px)\\s+.*$/, "$1 " + FAM)); }\n` +
+      `  });\n`,
+  };
+}
+
+export function buildHTML({ spec, storyboard, title, preset, iife, theme = null, record = false, font = null }) {
   // D15 — the record variant hands the clock to the renderer CLI: a manual ticker stepped
   // frame by frame, motion forced full whatever the machine's accessibility settings say,
   // no transport chrome in the shot, and the story parked at step 0 until smv-record has
@@ -91,6 +121,15 @@ export function buildHTML({ spec, storyboard, title, preset, iife, theme = null,
   const specJSON = escapeForScript(JSON.stringify(spec));
   const optsJSON = escapeForScript(JSON.stringify(mountOpts));
   const docTitle = htmlEscape(title || "sparkle-motion-vizualizer");
+  const pinned = fontLayer(record ? font : null);
+  const mountCall = `${record ? "window.__smv = " : ""}SparkleMotion.mount(document.getElementById("smv-pack-root"), spec, opts);`;
+  // With a pinned font the mount has to WAIT for it: node boxes are measured during mount,
+  // and measuring against a face that has not arrived yet would size the whole layout off
+  // the fallback. smv-record polls for window.__smv, so an async mount is fine.
+  const boot = pinned.boot
+    ? `${pinned.boot}  var go = function () { ${mountCall} };\n` +
+      `  if (document.fonts && document.fonts.load) document.fonts.load('500 13px ' + FAM).then(go, go);\n  else go();`
+    : `  ${mountCall}`;
 
   return `<!doctype html>
 <html>
@@ -98,7 +137,7 @@ export function buildHTML({ spec, storyboard, title, preset, iife, theme = null,
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${docTitle}</title>
-<style>html,body{margin:0;height:100%}#smv-pack-root{width:100%;height:100vh}</style>
+<style>html,body{margin:0;height:100%}#smv-pack-root{width:100%;height:100vh}</style>${pinned.style ? "\n" + pinned.style : ""}
 </head>
 <body>
 <div id="smv-pack-root"></div>
@@ -110,7 +149,7 @@ ${iife}
 (function () {
   var spec = ${specJSON};
   var opts = ${optsJSON};
-  ${record ? "window.__smv = " : ""}SparkleMotion.mount(document.getElementById("smv-pack-root"), spec, opts);
+${boot}
 })();
 </script>
 </body>
