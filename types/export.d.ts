@@ -7,6 +7,8 @@ import type { ThemeName } from "./index.js";
 export interface ExportableGraph {
   renderer: { svg: unknown };
   el?: unknown;
+  /** Only read by `viewport: true`, to size the shot's viewBox. */
+  viewport?: { size?(): { w: number; h: number } };
   bounds(): { x: number; y: number; w: number; h: number } | null | undefined;
 }
 
@@ -14,6 +16,11 @@ export interface ExportSVGOpts {
   pad?: number;
   theme?: ThemeName;
   width?: number;
+  /** Export the SHOT rather than the whole graph (M4c): keeps the live `.smv-viewport`
+   *  pan/zoom transform and the live culling state, with the on-screen pane as the viewBox
+   *  — a still that matches what is on screen (or in a `smv-record` frame). Default false,
+   *  which repositions to a whole-graph viewBox and un-culls everything. `pad` is ignored. */
+  viewport?: boolean;
 }
 
 export interface ExportPNGOpts extends ExportSVGOpts {

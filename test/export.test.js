@@ -147,6 +147,40 @@ test("exportSVG: un-hides everything viewport culling hid on the live scene", ()
   for (const id of ["a", "b", "c"]) assert.match(svg, new RegExp(`data-id="${id}"`), `${id} is in the export`);
 });
 
+test("exportSVG: viewport:true exports the SHOT — live transform AND live culling kept", () => {
+  // The deliberate inversion (M4c). The two defaults above exist so a whole-graph document
+  // is not silently near-empty; `viewport:true` asks for the opposite document — the frame
+  // as it is on screen — where the transform IS the framing and the culled elements are by
+  // definition outside it. Un-culling here would only pour off-screen nodes into a document
+  // that clips them anyway.
+  const svg = exportSVG(fakeG({ viewport: { size: () => ({ w: 640, h: 360 }) } }), { viewport: true });
+  assert.match(svg, /class="smv-viewport" transform="translate\(10,20\) scale\(1\.5\)"/, "the pan/zoom survives");
+  assert.match(svg, /data-culled/, "and so does the culling state");
+  const markup = svg.slice(svg.indexOf("</style>"));
+  assert.match(markup, /display: none/, "culled groups stay hidden");
+  // The viewBox is the pane the transform was computed against, not the graph bounds.
+  assert.match(svg, /viewBox="0 0 640 360"/);
+  assert.match(svg, /width="640"/);
+  assert.match(svg, /height="360"/);
+  // Everything else about the document is unchanged: theme, root class, inlined CSS.
+  assert.match(svg, /class="smv smv-root"/);
+  assert.match(svg, /data-smv-theme="dark"/);
+  assert.match(svg, /<style>/);
+});
+
+test("exportSVG: the shot's viewBox falls back to the element box, then to 800x600", () => {
+  const g = fakeG();
+  g.renderer.svg.getBoundingClientRect = () => ({ width: 500, height: 250 });
+  assert.match(exportSVG(g, { viewport: true }), /viewBox="0 0 500 250"/);
+  assert.match(exportSVG(fakeG(), { viewport: true }), /viewBox="0 0 800 600"/); // no viewport, no box
+});
+
+test("exportSVG: viewport defaults to false — the whole-graph document is untouched", () => {
+  const withViewport = fakeG({ viewport: { size: () => ({ w: 640, h: 360 }) } });
+  assert.equal(exportSVG(withViewport), exportSVG(fakeG()));
+  assert.equal(exportSVG(withViewport, { viewport: false }), exportSVG(fakeG()));
+});
+
 test("exportPNG: rejects with a clear Error under Node", async () => {
   await assert.rejects(exportPNG(fakeG()), /browser environment/);
 });

@@ -7,6 +7,22 @@ import { CSS } from "./styles.js";
 
 const r2 = (n) => Math.round((Number.isFinite(n) ? n : 0) * 100) / 100;
 
+/** The on-screen pane in CSS px — the viewBox of a `viewport:true` (shot) export.
+ *  `g.viewport.size()` is the very measurement the live transform was computed against;
+ *  the element's own box is the fallback for a partial `g` (a test double, a renderer used
+ *  without a mount), and 800x600 is viewport.js's own last resort. */
+function paneSize(g, svgEl) {
+  const vp = g.viewport;
+  if (vp && typeof vp.size === "function") {
+    const s = vp.size();
+    if (s && s.w > 0 && s.h > 0) return { w: s.w, h: s.h };
+  }
+  const r = svgEl && typeof svgEl.getBoundingClientRect === "function" ? svgEl.getBoundingClientRect() : null;
+  if (r && r.width > 0 && r.height > 0) return { w: r.width, h: r.height };
+  if (svgEl && svgEl.clientWidth > 0 && svgEl.clientHeight > 0) return { w: svgEl.clientWidth, h: svgEl.clientHeight };
+  return { w: 800, h: 600 };
+}
+
 function serialize(el) {
   if (typeof XMLSerializer !== "undefined") {
     try {
@@ -23,12 +39,17 @@ function serialize(el) {
  * exportSVG(g, opts) -> string — a standalone SVG document: the live scene cloned,
  * repositioned to a fixed viewBox (independent of the current pan/zoom), themed CSS
  * inlined, ready to save or paste as a `.svg` file.
+ *
+ * `opts.viewport: true` (M4c) exports THE SHOT INSTEAD: the frame as it is on screen right
+ * now — same pan/zoom, same culling — for a still that matches a recorded video or a live
+ * demo. Default false; the whole-graph document above is what an export means otherwise.
  */
 export function exportSVG(g, opts = {}) {
   if (!g || !g.renderer || !g.renderer.svg) {
     throw new Error("[smv:export] exportSVG needs a mounted instance (g.renderer.svg missing)");
   }
-  const pad = opts.pad ?? 24;
+  const asShot = opts.viewport === true;
+  const pad = asShot ? 0 : (opts.pad ?? 24);
   const src = g.renderer.svg;
   const bounds = (typeof g.bounds === "function" && g.bounds()) || { x: 0, y: 0, w: 0, h: 0 };
 
@@ -52,10 +73,14 @@ export function exportSVG(g, opts = {}) {
     "auto";
   clone.setAttribute("data-smv-theme", theme);
 
-  const x = (bounds.x || 0) - pad;
-  const y = (bounds.y || 0) - pad;
-  const w = Math.max(0, (bounds.w || 0) + pad * 2);
-  const h = Math.max(0, (bounds.h || 0) + pad * 2);
+  // In shot mode the viewBox is the PANE, not the graph: the .smv-viewport transform below
+  // stays in place, so the document's coordinate space has to be the same screen-pixel box
+  // that transform was computed against, or the kept pan/zoom would land somewhere else.
+  const pane = asShot ? paneSize(g, src) : null;
+  const x = pane ? 0 : (bounds.x || 0) - pad;
+  const y = pane ? 0 : (bounds.y || 0) - pad;
+  const w = pane ? pane.w : Math.max(0, (bounds.w || 0) + pad * 2);
+  const h = pane ? pane.h : Math.max(0, (bounds.h || 0) + pad * 2);
   clone.setAttribute("viewBox", `${r2(x)} ${r2(y)} ${r2(w)} ${r2(h)}`);
 
   const width = opts.width != null ? Math.max(1, Math.round(opts.width)) : Math.max(1, Math.round(w));
@@ -66,15 +91,26 @@ export function exportSVG(g, opts = {}) {
 
   // Reset pan/zoom: the export renders the whole graph via the viewBox above, not
   // whatever the live viewport happened to be scrolled/zoomed to.
+  //
+  // …unless `viewport:true`, where BOTH of the next two steps deliberately invert. Keeping
+  // the transform and keeping the culling is the same decision twice, and it is not an
+  // oversight to be tidied away: the two defaults below exist because a whole-graph
+  // document that shows only what was on screen is a bug (a silently near-empty file
+  // whenever the user was zoomed in). Shot mode asks for the opposite document — "the
+  // frame I am looking at" — where the transform IS the framing and the culled elements
+  // are, by definition, outside it. Un-culling here would not add anything visible; it
+  // would only pour every off-screen node back into a document that clips them anyway,
+  // which is the whole cost the culling avoids on a 300-node graph. Change one of these
+  // two and you must change the other.
   const viewportG = typeof clone.querySelector === "function" ? clone.querySelector(".smv-viewport") : null;
-  if (viewportG && typeof viewportG.removeAttribute === "function") viewportG.removeAttribute("transform");
+  if (!asShot && viewportG && typeof viewportG.removeAttribute === "function") viewportG.removeAttribute("transform");
 
   // Undo viewport culling (M3): render.js hides whatever is off screen on the LIVE elements
   // (`data-culled` + inline display:none), and this is a clone of those. Resetting the
   // viewBox alone would then produce a document that claims to show the whole graph while
   // most of it is still display:none — a silently near-empty .svg/.png whenever the user
   // happened to be zoomed in. A standalone export always draws everything.
-  const culled = typeof clone.querySelectorAll === "function" ? clone.querySelectorAll("[data-culled]") : null;
+  const culled = !asShot && typeof clone.querySelectorAll === "function" ? clone.querySelectorAll("[data-culled]") : null;
   if (culled) {
     for (const el of Array.from(culled)) {
       if (typeof el.removeAttribute === "function") el.removeAttribute("data-culled");

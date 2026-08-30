@@ -416,3 +416,29 @@ choreographies call it right after the store mutation and before the relayout. T
 **Why it was invisible:** `test/condense.test.js`'s fake host does not thread `prevOrder`
 through its relayout stub at all, so it structurally could not see this. The regression
 test (`test/mental-map.test.js`) drives the real `mount()` instead.
+
+## 17. `--font` pins the canvas metrics too, not just the CSS (M4c)
+
+**Plan (M4c):** "`--font` flag: serve a WOFF2 + inject `@font-face` for cross-machine
+layout stability."
+
+**Problem:** an `@font-face` plus a `font-family` override pins what the browser *draws*
+and nothing else. Node boxes are not sized from the drawn glyphs — `src/measure.js` sizes
+them from an offscreen canvas `measureText` against `500 13px system-ui, -apple-system,
+'Segoe UI', sans-serif`, and `system-ui` is a generic family keyword that `@font-face` is
+not allowed to redefine (it resolves to whatever the recording machine calls its UI font).
+So the plan's mechanism, implemented literally, would have restyled the text while leaving
+the *layout* — box widths, truncation points, therefore edge routes and the whole
+composition — exactly as machine-dependent as before. The flag would have looked like it
+worked.
+
+**Implementation:** the record variant of the packed page (`bin/smv-pack.mjs`, `--record`
+only) also patches the 2D-context `font` setter to swap the family list for the injected
+face, and defers the mount behind `document.fonts.load(...)` because the measuring happens
+*during* mount. Both pipelines then answer to the same file. Measured on this machine:
+pinning Liberation Serif moves the record fixture's node widths from 41/47/49/45px to
+36/41/43/41px — the difference the CSS-only version would have silently missed.
+
+**Scope:** the patch lives in the generated harness page, not in `src/` — the library
+keeps its one font stack, the size budget pays nothing, and no page but the recorder's own
+is touched.
