@@ -1,0 +1,16 @@
+[
+  { "label": "intro" },
+  { "op": "camera", "args": [{ "fit": true, "pad": 32, "dur": 300 }] },
+  { "op": "caption", "args": ["Two manual steps sit between ingest and publish."] },
+  { "op": "wait", "ms": 400 },
+  { "label": "focus" },
+  { "op": "highlight", "args": [{ "nodes": ["dedupe", "validate"], "dim": true }] },
+  { "op": "camera", "args": [{ "nodes": ["dedupe", "validate"], "pad": 40, "dur": 400 }] },
+  { "op": "wait", "ms": 300 },
+  { "label": "automate" },
+  { "op": "condense", "args": [["dedupe", "validate"], { "id": "auto", "label": "Automated clean", "data": { "duration": "8s", "mode": "automated" } }] },
+  { "op": "caption", "args": ["…now one automated step."] },
+  { "op": "clearHighlight" },
+  { "op": "camera", "args": [{ "fit": true, "pad": 32, "dur": 300 }] },
+  { "op": "wait", "ms": 300 }
+]
