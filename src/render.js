@@ -11,8 +11,10 @@ const NS = "http://www.w3.org/2000/svg";
 const CORNER = 8;
 const ARROW = "M 0 0 L -9 -3.8 L -9 3.8 Z"; // tip at the origin, pointing +x
 
-// Container chrome (D5) — HEADER_H mirrors layout.js CONTAINER_PAD.top, so the strip
-// always lands exactly in the gap the layout reserved above the first child.
+// Container chrome (D5) — HEADER_H is the drawn strip height; layout.js's
+// CONTAINER_PAD.top reserves HEADER_H plus a 12px gap above the first child (matching
+// the breathing room the other three edges get), so the strip never sits flush against
+// the top-most child.
 const HEADER_H = 28;
 const CHEV_X = 13;
 const LABEL_X = 26;
