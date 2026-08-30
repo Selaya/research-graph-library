@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>sparkle-motion-vizualizer — demos</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 22px; }
+  h1 { font-size: 21px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+  p.lede a { color: inherit; }
+
+  a.card {
+    display: block; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); text-decoration: none; color: inherit;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+    transition: border-color .15s ease, transform .15s ease;
+  }
+  a.card:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+  .featured {
+    padding: 22px 24px; margin: 22px 0 26px;
+  }
+  .featured .kicker {
+    font: 600 11px/1 inherit; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 8px;
+  }
+  .featured h2 { font-size: 20px; margin: 0 0 8px; letter-spacing: -.01em; }
+  .featured p { margin: 0; color: var(--muted); max-width: 68ch; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  .grid a.card { padding: 16px 18px; }
+  .grid h3 { font-size: 15px; margin: 0 0 6px; letter-spacing: -.005em; }
+  .grid p { margin: 0; color: var(--muted); font-size: 13px; }
+
+  h4.section {
+    font: 600 11px/1 inherit; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 10px;
+  }
+
+  footer {
+    margin-top: 36px; padding-top: 16px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 12.5px;
+  }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>sparkle-motion-vizualizer <small>— demos</small></h1>
+  <p class="lede">
+    A small, embeddable, <strong>animated</strong> graph visualization library — built for
+    narrating pipelines of work: steps appearing over time, tokens flowing through fan-outs
+    and joins, retry loops ticking, manual steps condensing into automated ones, and a
+    transport bar to play, pause, and scrub the whole story. One
+    <code>&lt;script&gt;</code> tag, no build step, no framework.
+    <a href="https://github.com/selaya/reaearch-graph-library">View the repo on GitHub →</a>
+  </p>
+</header>
+
+<h4 class="section">Flagship</h4>
+<a class="card featured" href="sdlc.html">
+  <p class="kicker">Featured demo</p>
+  <h2>SDLC release pipeline: from manual to automated</h2>
+  <p>
+    Jira ticket → branch → PR &amp; code-review loop → merge → per-device build &amp; signing
+    → QA + regression fan-out across device types → per-device deploy → GA — with manual
+    phases condensing into automated ones as the story plays out.
+  </p>
+</a>
+
+<h4 class="section">More demos</h4>
+<div class="grid">
+  <a class="card" href="pipeline.html">
+    <h3>Pipeline story</h3>
+    <p>The original pipeline narrative — fan-out/join, a retry loop, expand/condense with an odometer, and scrub.</p>
+  </a>
+  <a class="card" href="m2.html">
+    <h3>Live event feed</h3>
+    <p>A scripted live feed drives tokens as they'd arrive from a real run, with time-travel scrub, split, and export.</p>
+  </a>
+  <a class="card" href="m0.html">
+    <h3>Mutation stress check</h3>
+    <p>Appends land mid-transition on a looped graph — cancel-and-retarget under animation pressure.</p>
+  </a>
+  <a class="card" href="m3-scale.html">
+    <h3>Layout at scale</h3>
+    <p>A 300-node, ~500-edge layered DAG exercising the layout engine and viewport culling.</p>
+  </a>
+</div>
+
+<footer>
+  MIT licensed. <a href="https://github.com/selaya/reaearch-graph-library">selaya/reaearch-graph-library</a> on GitHub.
+</footer>
+
+</main>
+</body>
+</html>
