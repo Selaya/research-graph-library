@@ -10,8 +10,16 @@
 // would run on the wall clock, which the frame renderer (M4b) cannot reproduce.
 
 import { MIN_K, MAX_K } from "./viewport.js";
+import { GraphError } from "./store.js";
 
 const FIT_PAD = 24;
+
+/** M4d — the attention pulse (D17). One full breath, quantized into PULSE_STEPS buckets so
+ *  a frame's intensity is a function of the tick count and nothing else: the same tick
+ *  sequence writes the same string, which is what lets the frame renderer reproduce it
+ *  without the `data-smv-record` transition kill-switch having anything to kill. */
+const PULSE_MS = 1400;
+const PULSE_STEPS = 12;
 
 /** The camera's scale lid is the viewport's, not fit()'s FIT_MAX_K. It has to be applied
  *  HERE and not left to setTo(): setTo clamps `k` but copies x/y verbatim, so centring a
@@ -94,7 +102,8 @@ export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 
 
 /**
  * createDirector(internals) -> the emphasis + caption state machine.
- *   internals = { root, doc, lastLayout(), emphasize(id, value), dim(id, value), captions }
+ *   internals = { root, doc, lastLayout(), emphasize(id, value), dim(id, value), captions,
+ *                 ticker, reduced }
  * `captions:false` suppresses the overlay only — the caption text is still state, still
  * snapshotted, and still shows up in g.cues(), so a suppressed run still renders subtitles.
  */
@@ -103,8 +112,11 @@ export function createDirector(internals = {}) {
   const dimmed = new Set();
   const wroteE = new Map();    // id -> variant currently written to the DOM
   const wroteD = new Set();
+  const props = new Map();     // id -> {--smv-*: value}, the DESIRED override layer (D16)
+  const wroteP = new Map();    // id -> the keys the last layer handed to the renderer
   let caption = null;          // {text, place?, variant?}
   let capEl = null;
+  let pulsing = false;
   let destroyed = false;
 
   const emphasize = (id, v) => internals.emphasize && internals.emphasize(id, v);
@@ -132,8 +144,45 @@ export function createDirector(internals = {}) {
     return [...Object.keys(res.nodes || {}), ...Object.keys(res.edges || {})];
   }
 
+  // ---- the pulse (D17) -------------------------------------------------------------
+  // A gentle attention beat on whatever is emphasised, and NOT a CSS animation: the one
+  // shared ticker (D1) drives it, exactly like every other moving thing here, so under a
+  // manual clock the same tick sequence produces the same DOM and the frame renderer needs
+  // no kill-switch. One custom property on the mount root carries it — the CSS reads
+  // `var(--smv-pulse, 0)`, so "not pulsing" and "unset" are the same picture.
+  function writePulse(v) {
+    const st = internals.root && internals.root.style;
+    if (!st) return;
+    if (v == null) st.removeProperty("--smv-pulse");
+    else st.setProperty("--smv-pulse", String(v));
+  }
+
+  let pulseT0 = 0;
+  function onPulse(now) {
+    const p = ((now - pulseT0) % PULSE_MS) / PULSE_MS;
+    // Bucketed, not continuous: a float of the raw cosine would make one frame's markup
+    // depend on the exact tick arithmetic. 0..1 in PULSE_STEPS discrete stops.
+    writePulse(Math.round(((1 - Math.cos(p * 2 * Math.PI)) / 2) * PULSE_STEPS) / PULSE_STEPS);
+  }
+
+  /** Registers with the ticker only while it is actually pulsing, so clearHighlight(), a
+   *  snapshot restore and destroy() all let the rAF loop go idle again (ticker.remove()
+   *  stops the loop on the last callback). G9 — reduced motion holds the peak statically
+   *  rather than dropping the emphasis: shrink the motion, never skip the state. */
+  function setPulse(on) {
+    if (on === pulsing || destroyed) return;
+    pulsing = on;
+    const t = internals.ticker;
+    if (!on) { if (t) t.remove(onPulse); writePulse(null); return; }
+    if (internals.reduced || !t) { writePulse(1); return; }
+    pulseT0 = t.now();
+    onPulse(pulseT0);
+    t.add(onPulse);
+  }
+
   /** Replace-not-accumulate: one highlight is the whole emphasis state, so a script never
-   *  has to remember to clear the last one before setting the next. */
+   *  has to remember to clear the last one before setting the next. `pulse` is a modifier
+   *  on top of `variant`, not one of them — a warning that breathes is still a warning. */
   function highlight(sel = {}) {
     emph.clear();
     dimmed.clear();
@@ -142,12 +191,54 @@ export function createDirector(internals = {}) {
     for (const id of sel.edges || []) emph.set(id, variant);
     if (sel.dim) for (const id of drawnIds()) if (!emph.has(id)) dimmed.add(id);
     apply();
+    setPulse(!!sel.pulse && emph.size > 0);
   }
 
   function clear() {
     emph.clear();
     dimmed.clear();
     apply();
+    setPulse(false);
+  }
+
+  // ---- per-step property overrides (D16) ---------------------------------------------
+  // The same --smv-* channel the user style function writes (D7), one layer above it: the
+  // renderer merges this over `style(n)` at commit time, so a script can recolour one node
+  // for one beat without the mount owning a style function that knows about the story.
+
+  /** `map` = {id: {"--smv-fill": "#7c5cff"}}; null clears the whole layer. Replace, not
+   *  accumulate — like highlight, this call IS the override state. Validated in full before
+   *  anything is written, so a rejected key leaves the previous layer intact. */
+  function setPropsMap(map) {
+    const next = new Map();
+    for (const [id, p] of Object.entries(map || {})) {
+      if (!p) continue;
+      for (const k of Object.keys(p)) {
+        if (!k.startsWith("--smv-")) {
+          throw new GraphError("props-key", `props only sets --smv-* properties (D7): "${k}" on "${id}" is not one`);
+        }
+      }
+      next.set(id, { ...p });
+    }
+    props.clear();
+    for (const [id, p] of next) props.set(id, p);
+  }
+
+  /** What renderer.styleCommit merges in, as `Map<id, {key: value|null}>` — every key the
+   *  LAST layer set starts out null, because setProps() only removes what it is handed and
+   *  an inline property would otherwise outlive the override that wrote it. Consumed once
+   *  per style commit (it rolls the shadow forward), which is why it is read at the two
+   *  styleCommit call sites and nowhere else. */
+  function propsLayer() {
+    const out = new Map();
+    for (const [id, p] of wroteP) {
+      const gone = {};
+      for (const k in p) gone[k] = null;
+      out.set(id, gone);
+    }
+    wroteP.clear();
+    for (const [id, p] of props) { out.set(id, Object.assign(out.get(id) || {}, p)); wroteP.set(id, p); }
+    return out.size ? out : null;
   }
 
   // ---- caption overlay -------------------------------------------------------------
@@ -188,13 +279,20 @@ export function createDirector(internals = {}) {
     highlight,
     clearHighlight: clear,
     caption: setCaption,
+    props: setPropsMap,
+    propsLayer,
     /** What the caption currently says (cue metadata reads this even when suppressed). */
     captionText: () => (caption ? caption.text : null),
     /** Re-assert onto elements the renderer may have just rebuilt (commit). */
     reassert: () => apply(true),
-    /** G2 — emphasis and caption are state a step moves, so they are part of the snapshot. */
+    /** G2 — emphasis, the caption, the pulse and the property layer are all state a step
+     *  moves, so they are all part of the snapshot. */
     snapshot() {
-      return { emphasis: { emph: [...emph], dim: [...dimmed] }, caption: caption && { ...caption } };
+      return {
+        emphasis: { emph: [...emph], dim: [...dimmed], pulse: pulsing },
+        caption: caption && { ...caption },
+        props: [...props].map(([id, p]) => [id, { ...p }]),
+      };
     },
     restore(snap) {
       const e = (snap && snap.emphasis) || { emph: [], dim: [] };
@@ -203,12 +301,17 @@ export function createDirector(internals = {}) {
       dimmed.clear();
       for (const id of e.dim || []) dimmed.add(id);
       apply();
+      setPulse(!!e.pulse && emph.size > 0);
+      props.clear();
+      for (const [id, p] of (snap && snap.props) || []) props.set(id, { ...p });
       caption = (snap && snap.caption) ? { ...snap.caption } : null;
       renderCaption();
     },
     destroy() {
+      setPulse(false);   // before `destroyed`: the ticker registration has to come off
       destroyed = true;
       emph.clear(); dimmed.clear(); wroteE.clear(); wroteD.clear();
+      props.clear(); wroteP.clear();
       caption = null;
       if (capEl) { capEl.remove(); capEl = null; }
     },

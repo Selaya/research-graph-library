@@ -27,7 +27,8 @@
   },
   "bin": {
     "smv-pack": "bin/smv-pack.mjs",
-    "smv-record": "bin/smv-record.mjs"
+    "smv-record": "bin/smv-record.mjs",
+    "smv-fit": "bin/smv-fit.mjs"
   },
   "files": [
     "src",

@@ -373,7 +373,16 @@ export interface HighlightSelection {
   variant?: EmphasisVariant;
   /** Spotlight: everything currently drawn and NOT selected gets `data-dim`. */
   dim?: boolean;
+  /** M4d/D17 — a gentle attention beat on the emphasised elements, driven per frame off
+   *  the one shared ticker (never a CSS animation, so a frame capture reproduces it).
+   *  A modifier on `variant`, not one of them. Reduced motion holds it static (G9). */
+  pulse?: boolean;
 }
+
+/** M4d/D16 — the per-step custom-property override layer: `{id: {"--smv-*": value}}`,
+ *  merged OVER the mount's style function at commit time. `null`/`false` on a key removes
+ *  it; only `--smv-*` keys are accepted (D7) and anything else throws. */
+export type PropsOverride = Record<string, Record<string, string | number | false | null>>;
 
 export interface CaptionOpts {
   place?: "bottom" | "top";
@@ -409,6 +418,7 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "highlight"; args: [HighlightSelection] }
   | { op: "clearHighlight"; args?: [] }
   | { op: "caption"; args: [string | null, CaptionOpts?] }
+  | { op: "props"; args: [PropsOverride | null] }
   | { label: string }
 );
 
@@ -637,6 +647,9 @@ export interface Graph {
 
   /** User style functions set `--smv-*` custom properties only (D7). Pass `null` to clear. */
   style(fn: StyleFn | null): Graph;
+  /** M4d/D16 — the per-step override layer, merged over `style()`. Replace-not-accumulate
+   *  (this call IS the layer) and snapshotted like emphasis. `null` clears it. */
+  props(map: PropsOverride | null): Graph;
   theme(t: ThemeName): Graph;
   layout(o?: LayoutOpts): Awaitable;
   fitView(o?: { pad?: number; animate?: boolean; duration?: number }): Graph;

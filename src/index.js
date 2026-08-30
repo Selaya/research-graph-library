@@ -42,7 +42,7 @@ const EASINGS = {
 
 /** The director ops: instantaneous state flips (plus the camera, whose tween is scenery,
  *  not graph state) — the only ops a forward scrub replays at zero duration. */
-const DIRECTOR_OPS = new Set(["camera", "highlight", "clearHighlight", "caption"]);
+const DIRECTOR_OPS = new Set(["camera", "highlight", "clearHighlight", "caption", "props"]);
 
 /** Inside a batch, these are the ops that keep their own clock instead of folding into the
  *  one shared relayout — so they, and only they, can make the batch step cost more than
@@ -134,6 +134,10 @@ export function mount(el, spec = {}, opts = {}) {
   const director = createDirector({
     root,
     captions: opts.captions,
+    // D1/D17 — the attention pulse rides the ONE shared clock, and G9 turns it into a
+    // static hold instead of dropping it when the environment asks for less motion.
+    ticker,
+    reduced,
     lastLayout: () => last,
     emphasize: (id, v) => renderer.emphasize(id, v),
     dim: (id, v) => renderer.dim(id, v),
@@ -151,6 +155,20 @@ export function mount(el, spec = {}, opts = {}) {
   let scrubDepth = 0;
   // D13 — the script has taken the camera, so viewport state joins the G2 snapshot.
   let cameraOwned = false;
+
+  /** A style-only commit: what g.style()/g.props() need, since neither moves any geometry
+   *  and neither should pay for a relayout to be seen. Sizes are the LAST LAYOUT's where
+   *  there is one, exactly as in relayout — a container's real box is solver-computed, and
+   *  taking the spec's instead would re-truncate its label to a width it does not have. */
+  function styleNow() {
+    const v = vs.view();
+    const sizes = { ...v.sizes };
+    if (last) for (const [id, r] of Object.entries(last.nodes)) sizes[id] = { w: r.w, h: r.h };
+    renderer.styleCommit({
+      nodes: v.nodes, edges: v.edges, reversed: pinnedReversals,
+      style: styleFn, sizes, props: director.propsLayer(),
+    });
+  }
 
   scene.onFrame((visual) => renderer.frame(visual));
 
@@ -219,6 +237,10 @@ export function mount(el, spec = {}, opts = {}) {
     renderer.styleCommit({
       nodes: v.nodes, edges: v.edges,
       reversed: pinnedReversals, style: styleFn, sizes,
+      // D16 — the director's override layer, merged over styleFn by the renderer. Read
+      // here (and in styleNow) and nowhere else: propsLayer() rolls its own shadow
+      // forward, so exactly one read per style commit is the contract.
+      props: director.propsLayer(),
     });
 
     // D12 — an explicit argument still wins; `stepDur` is the storyboard step's declared
@@ -441,6 +463,11 @@ export function mount(el, spec = {}, opts = {}) {
       // *future* order and lands in a different arrangement than the one being replayed.
       lastOrder = (snap.order || []).map((rank) => [...rank]);
       lastLayers = (snap.layers || []).map((rank) => [...rank]);
+      // BEFORE the relayout, unlike the camera below: the property override layer (D16) is
+      // read by the style commit *inside* relayout, so restoring it afterwards would leave
+      // the step's overrides on screen for a whole commit. Emphasis is re-asserted off the
+      // "commit" event either way, so moving the whole director restore up is free.
+      director.restore(snap);
       const tr = relayout({});
       // AFTER relayout, at duration 0: relayout's own anchor/auto-refit correction has just
       // been written into the viewport synchronously, so restoring the camera first would
@@ -449,7 +476,6 @@ export function mount(el, spec = {}, opts = {}) {
         viewport.moveTo(snap.camera, { duration: 0 });
         viewport.userMoved = !!snap.userMoved;
       }
-      director.restore(snap);
       // Re-seat the SAME transport in place: g.run() identity (and every listener on it)
       // has to survive a backward seek.
       if (snap.runOpts) {
@@ -493,8 +519,8 @@ export function mount(el, spec = {}, opts = {}) {
     switch (step.op) {
       case "wait": return Math.max(0, step.ms ?? a0 ?? 0);
       case "camera": return Math.max(0, (a0 && a0.dur) ?? CAMERA_MS);
-      case "highlight": case "clearHighlight": case "caption":
-      case "run.step": case "run.seek": return 0;      // discrete state flips, D14
+      case "highlight": case "clearHighlight": case "caption": case "props":
+      case "run.step": case "run.seek": return 0;      // discrete state flips, D14/D16
       case "condense": case "split": return CHOREO_MS;
       case "batch": {
         const list = Array.isArray(step.steps) ? step.steps : (Array.isArray(a0) ? a0 : []);
@@ -855,8 +881,18 @@ export function mount(el, spec = {}, opts = {}) {
     /** User style functions set --smv-* custom properties only (D7). */
     style(fn) {
       styleFn = typeof fn === "function" ? fn : null;
-      const v = vs.view();
-      renderer.styleCommit({ nodes: v.nodes, edges: v.edges, reversed: pinnedReversals, style: styleFn, sizes: v.sizes });
+      styleNow();
+      return g;
+    },
+
+    /** M4d — the per-step override layer (D16): `{id: {"--smv-fill": "#7c5cff"}}` merged
+     *  OVER the style function, `g.props(null)` to clear. Replace-not-accumulate like
+     *  highlight, and state like it too — snapshotted, restored, and re-applied to the
+     *  fresh <g> a commit builds for a re-added id (it rides the style commit, which runs
+     *  before the elements exist). Only --smv-* keys, same as every other styling path. */
+    props(map) {
+      director.props(map);
+      styleNow();
       return g;
     },
 

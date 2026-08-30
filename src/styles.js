@@ -168,9 +168,12 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-node[data-run="done"]{--smv-fill:var(--smv-ok); --smv-stroke:var(--smv-ok-stroke)}
 
 /* Director emphasis (D14): discrete state, no transition — a wall clock cannot reproduce
-   byte-for-byte under frame capture. */
+   byte-for-byte under frame capture. --smv-pulse (D17) is written per tick by the
+   director; unset reads as 0, so a still highlight is the rule it always was. */
 .smv-node[data-emph] rect.smv-node-box,
-.smv-edge[data-emph] path.smv-edge-line{stroke:var(--smv-emph); stroke-width:2.5}
+.smv-edge[data-emph] path.smv-edge-line{
+  stroke:var(--smv-emph); stroke-width:calc(2.5px + var(--smv-pulse,0) * 2px);
+}
 .smv-edge[data-emph] path.smv-edge-arrow{fill:var(--smv-emph)}
 .smv-node[data-emph="focus"],.smv-edge[data-emph="focus"]{--smv-emph:var(--smv-accent)}
 .smv-node[data-emph="warn"],.smv-edge[data-emph="warn"]{--smv-emph:var(--smv-condense)}
