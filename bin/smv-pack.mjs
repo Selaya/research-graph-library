@@ -4,8 +4,8 @@
 // No deps, no shelling out: if dist/smv.iife.min.js is missing we just tell the user to
 // build it (`npm run build`) rather than trying to build it ourselves.
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, basename } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -14,15 +14,20 @@ const root = join(__dirname, "..");
 function usage() {
   return (
     "Usage: smv-pack <spec.json> [-o out.html] [--storyboard sb.json] [--title T] [--preset pipeline]\n" +
+    "                   [--theme dark|light] [--record]\n" +
     "\n" +
     "  Packs a graph spec (and optional storyboard) with the prebuilt smv.iife.min.js\n" +
     "  into one self-contained HTML file — open it directly, no server, no build step.\n" +
-    "  Run `npm run build` first if dist/smv.iife.min.js does not exist yet.\n"
+    "  Run `npm run build` first if dist/smv.iife.min.js does not exist yet.\n" +
+    "\n" +
+    "  --record emits the frame-renderer variant (D15): manual ticker, forced full motion,\n" +
+    "  no transport chrome, the story NOT autoplayed, and the instance on window.__smv.\n" +
+    "  That is the page bin/smv-record.mjs drives; on its own it just sits at step 0.\n"
   );
 }
 
 function parseArgs(argv) {
-  const out = { spec: null, out: null, storyboard: null, title: null, preset: null };
+  const out = { spec: null, out: null, storyboard: null, title: null, preset: null, theme: null, record: false };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -30,6 +35,8 @@ function parseArgs(argv) {
     else if (a === "--storyboard") out.storyboard = argv[++i];
     else if (a === "--title") out.title = argv[++i];
     else if (a === "--preset") out.preset = argv[++i];
+    else if (a === "--theme") out.theme = argv[++i];
+    else if (a === "--record") out.record = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else positional.push(a);
   }
@@ -67,12 +74,19 @@ function htmlEscape(str) {
   }[c]));
 }
 
-export function buildHTML({ spec, storyboard, title, preset, iife }) {
-  const mountOpts = { controls: true };
+export function buildHTML({ spec, storyboard, title, preset, iife, theme = null, record = false }) {
+  // D15 — the record variant hands the clock to the renderer CLI: a manual ticker stepped
+  // frame by frame, motion forced full whatever the machine's accessibility settings say,
+  // no transport chrome in the shot, and the story parked at step 0 until smv-record has
+  // fonts and the viewport interlock in place. `window.__smv` is the CLI's only handle.
+  const mountOpts = record
+    ? { controls: false, captions: true, autoplay: false, ticker: "manual", motion: "full" }
+    : { controls: true };
   if (preset) mountOpts.preset = preset;
+  if (theme) mountOpts.theme = theme;
   if (storyboard) {
     mountOpts.storyboard = storyboard;
-    mountOpts.autoplay = true;
+    if (!record) mountOpts.autoplay = true;
   }
   const specJSON = escapeForScript(JSON.stringify(spec));
   const optsJSON = escapeForScript(JSON.stringify(mountOpts));
@@ -96,7 +110,7 @@ ${iife}
 (function () {
   var spec = ${specJSON};
   var opts = ${optsJSON};
-  SparkleMotion.mount(document.getElementById("smv-pack-root"), spec, opts);
+  ${record ? "window.__smv = " : ""}SparkleMotion.mount(document.getElementById("smv-pack-root"), spec, opts);
 })();
 </script>
 </body>
@@ -132,6 +146,8 @@ function main(argv) {
     storyboard,
     title: args.title,
     preset: args.preset,
+    theme: args.theme,
+    record: args.record,
     iife,
   });
 
@@ -140,7 +156,17 @@ function main(argv) {
   process.stderr.write(`smv-pack: wrote ${outPath}\n`);
 }
 
-// Only run when invoked directly (so buildHTML is importable from tests).
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Only run when invoked directly (so buildHTML is importable from tests). Resolved file
+// URLs on both sides: argv[1] is the npm .bin symlink, not the realpath, and a space in the
+// path is percent-encoded in import.meta.url only — either would silently skip main().
+if (import.meta.url === entryURL()) {
   main(process.argv.slice(2));
+}
+
+function entryURL() {
+  try {
+    return pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return null;
+  }
 }
