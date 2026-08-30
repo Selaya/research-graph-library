@@ -10,6 +10,9 @@ const OPS = new Set([
   "addNode", "addEdge", "removeNode", "removeEdge", "update",
   "expand", "collapse", "condense", "batch",
   "run.play", "run.step", "run.seek", "wait",
+  // M4 director ops — method-shaped like the mutations, so applyStep's default branch
+  // dispatches them straight to g.camera/g.highlight/g.clearHighlight/g.caption.
+  "camera", "highlight", "clearHighlight", "caption",
 ]);
 
 function validate(steps) {
@@ -175,6 +178,7 @@ const NAMED = {
   addNode: "addNode", addEdge: "addEdge", removeNode: "removeNode", removeEdge: "removeEdge",
   update: "update", expand: "expand", collapse: "collapse", condense: "condense", batch: "batch",
   run: "run.play", runStep: "run.step", runSeek: "run.seek",
+  camera: "camera", highlight: "highlight", clearHighlight: "clearHighlight", caption: "caption",
 };
 
 export function timeline(_g) {

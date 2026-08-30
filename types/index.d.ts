@@ -190,6 +190,15 @@ export interface MountOpts {
   interaction?: { tapToggle?: boolean };
   storyboard?: StoryboardStep[];
   autoplay?: boolean;
+  /** D15 (M4) — `'manual'` drives the shared ticker by hand (`g.ticker.tick(ms)`) instead
+   *  of rAF, and stamps `data-smv-record` on the root to kill every CSS transition. What
+   *  the deterministic frame renderer mounts with. */
+  ticker?: "manual";
+  /** D15 — `'full'` forces reduced motion OFF regardless of the environment (recording). */
+  motion?: "full";
+  /** `false` suppresses the `.smv-caption` overlay. The caption is still snapshotted state
+   *  and still appears in `g.cues()`, so subtitles can be burned in separately. */
+  captions?: boolean;
 }
 
 /** Node-scoped user style function (§5.6) — return `--smv-*` custom-property values only. */
@@ -331,7 +340,58 @@ export type Run = SimRun | LiveRun;
 // Storyboard (src/storyboard.js's op table, as index.js's applyStep dispatches it)
 // ---------------------------------------------------------------------------
 
-export type StoryboardStep =
+/** Where a `camera` op is pointed. First match wins, in declaration order: absolute
+ *  `x`/`y` -> `node` -> `nodes` -> `fit` -> relative `zoom`/`by`. */
+export interface CameraTarget {
+  /** Absolute transform (screen px / scale). `k` alone is a relative zoom-to-scale. */
+  x?: number;
+  y?: number;
+  k?: number;
+  /** Frame one node's box. */
+  node?: string;
+  /** Frame the union of several nodes' boxes. */
+  nodes?: string[];
+  /** Frame the whole graph. */
+  fit?: boolean;
+  /** Screen-px nudge, applied after any zoom. */
+  by?: { dx?: number; dy?: number };
+  /** Scale multiplier about the pane centre. */
+  zoom?: number;
+  /** Padding around a framed box (default 24). */
+  pad?: number;
+  /** Move duration in ms (default 600). Reduced motion shrinks it to 1 (G9). */
+  dur?: number;
+  ease?: EasingName;
+}
+
+export type EmphasisVariant = "focus" | "warn" | "ok" | "mute";
+
+/** Replace-not-accumulate: one call IS the emphasis state. */
+export interface HighlightSelection {
+  nodes?: string[];
+  edges?: string[];
+  variant?: EmphasisVariant;
+  /** Spotlight: everything currently drawn and NOT selected gets `data-dim`. */
+  dim?: boolean;
+}
+
+export interface CaptionOpts {
+  place?: "bottom" | "top";
+  variant?: string;
+}
+
+/** One entry of the cue sheet (`g.cues()`), at an ABSOLUTE ms offset on the story clock. */
+export interface Cue {
+  kind: "label" | "caption";
+  at: number;
+  label?: string;
+  text?: string | null;
+  index: number;
+}
+
+/** D12 — every step may declare its own duration; scrubber, cue sheet and frame renderer
+ *  all read the same number. Omitted, the op's own default applies. */
+export type StoryboardStep = { dur?: number } & (
   | { op: "addNode"; args: [NodeSpec, ({ after?: string } | undefined)?] }
   | { op: "addEdge"; args: [EdgeSpec] }
   | { op: "removeNode"; args: [string] }
@@ -345,7 +405,12 @@ export type StoryboardStep =
   | { op: "run.step"; token?: string; args?: [{ token?: string }?] }
   | { op: "run.seek"; ms?: number; args?: [number] }
   | { op: "wait"; ms?: number; args?: [number] }
-  | { label: string };
+  | { op: "camera"; args: [CameraTarget] }
+  | { op: "highlight"; args: [HighlightSelection] }
+  | { op: "clearHighlight"; args?: [] }
+  | { op: "caption"; args: [string | null, CaptionOpts?] }
+  | { label: string }
+);
 
 export interface StoryboardPosition {
   index: number;
@@ -435,15 +500,48 @@ export interface Renderer {
   styleCommit(like: unknown): void;
   frame(visual: unknown): void;
   mark(id: string, value: string | null): void;
+  /** Director emphasis (D14) — `data-emph` / `data-dim` on a node's or edge's group. */
+  emphasize(id: string, value: string | null): void;
+  dim(id: string, value: boolean | null): void;
   node(id: string): Element | undefined;
   edge(id: string): Element | undefined;
   destroy(): void;
 }
 
+export interface Transform {
+  x: number;
+  y: number;
+  k: number;
+}
+
+export interface FitOpts {
+  pad?: number;
+  duration?: number;
+  ease?: EasingFn;
+  /** Scale lid. Defaults to 1.5 (the initial-auto-fit rule); pass 4 to frame one node. */
+  maxK?: number;
+}
+
+/** A camera move in flight: awaitable, and cancelable into `{canceled:true}` (D9). */
+export interface ViewportMove {
+  promise: Promise<{ canceled: boolean }>;
+  cancel(): void;
+}
+
 export interface Viewport {
-  transform: { x: number; y: number; k: number };
+  transform: Transform;
+  /** Where a live tween is HEADING; the current transform when none is. */
+  readonly target: Transform;
   userMoved: boolean;
-  fit(bounds: Rect, pad?: number, animate?: boolean): void;
+  fit(bounds: Rect, opts?: FitOpts): Promise<{ canceled: boolean }>;
+  /** The M0 spelling, still supported. */
+  fit(bounds: Rect, pad?: number, animate?: boolean): Promise<{ canceled: boolean }>;
+  /** Drive the camera to an absolute transform. Starting one cancels the in-flight move. */
+  moveTo(to: Partial<Transform>, opts?: { duration?: number; ease?: EasingFn }): ViewportMove;
+  /** Detach/attach every pointer + wheel listener in one flip (frame capture uses this). */
+  setInteractive(on: boolean): void;
+  /** The pane's client size. */
+  size(): { w: number; h: number };
   screenToWorld(pt: Point): Point;
   worldToScreen(pt: Point): Point;
   anchor(before: Point, after: Point, duration: number): void;
@@ -522,6 +620,18 @@ export interface Graph {
   /** The transport-facing view of where the story is (also what `.smv-transport` renders from). */
   timeline(): Timeline;
 
+  /** M4/D13 — the scripted camera. The first call hands the viewport to the script, so
+   *  relayout stops auto-refitting over composed shots and viewport state joins the G2
+   *  snapshot. A second call cancels-and-retargets the first (D9). */
+  camera(target?: CameraTarget): Awaitable;
+  /** M4/D14 — emphasis. Replace-not-accumulate: this call IS the emphasis state. */
+  highlight(selection?: HighlightSelection): Graph;
+  clearHighlight(): Graph;
+  /** M4/D14 — the caption overlay. `null` clears it. */
+  caption(text: string | null, opts?: CaptionOpts): Graph;
+  /** D12 — every label and caption in the storyboard at its absolute ms offset. */
+  cues(): Cue[];
+
   /** One relayout for many ops (batches into a single commit + awaitable). */
   batch(fn: (g: Graph) => void): Awaitable;
 
@@ -529,7 +639,7 @@ export interface Graph {
   style(fn: StyleFn | null): Graph;
   theme(t: ThemeName): Graph;
   layout(o?: LayoutOpts): Awaitable;
-  fitView(o?: { pad?: number; animate?: boolean }): Graph;
+  fitView(o?: { pad?: number; animate?: boolean; duration?: number }): Graph;
   destroy(): void;
 
   // Query sugar (M2, src/query.js) — spread onto `g`; `node`/`edge` above stay singular.

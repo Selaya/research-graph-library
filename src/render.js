@@ -377,6 +377,18 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
       const e = nodeEls.get(id);
       if (e) setData(e.g, "data-condense", value);
     },
+    /** Director emphasis (D14) — discrete state, never tweened. Deliberately NOT folded
+     *  into mark(): data-condense is the condense choreography's own channel, and a
+     *  highlight that outlives a merge must not fight it for the same attribute. */
+    emphasize(id, value) {
+      const e = nodeEls.get(id) || edgeEls.get(id);
+      if (e) setData(e.g, "data-emph", value);
+    },
+    /** The spotlight's other half: everything NOT emphasised (D14). */
+    dim(id, value) {
+      const e = nodeEls.get(id) || edgeEls.get(id);
+      if (e) setData(e.g, "data-dim", value);
+    },
     node(id) { const e = nodeEls.get(id); return e && e.g; },
     edge(id) { const e = edgeEls.get(id); return e && e.g; },
     destroy() {

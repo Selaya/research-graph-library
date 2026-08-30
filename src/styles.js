@@ -167,6 +167,39 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-node[data-run="active"]{--smv-fill:var(--smv-active); --smv-stroke:var(--smv-active-stroke)}
 .smv-node[data-run="done"]{--smv-fill:var(--smv-ok); --smv-stroke:var(--smv-ok-stroke)}
 
+/* Director emphasis (D14): discrete state, no transition — a wall clock cannot reproduce
+   byte-for-byte under frame capture. */
+.smv-node[data-emph] rect.smv-node-box,
+.smv-edge[data-emph] path.smv-edge-line{stroke:var(--smv-emph); stroke-width:2.5}
+.smv-edge[data-emph] path.smv-edge-arrow{fill:var(--smv-emph)}
+.smv-node[data-emph="focus"],.smv-edge[data-emph="focus"]{--smv-emph:var(--smv-accent)}
+.smv-node[data-emph="warn"],.smv-edge[data-emph="warn"]{--smv-emph:var(--smv-condense)}
+.smv-node[data-emph="ok"],.smv-edge[data-emph="ok"]{--smv-emph:var(--smv-ok-stroke)}
+.smv-node[data-emph="mute"],.smv-edge[data-emph="mute"]{--smv-emph:var(--smv-muted)}
+/* Spotlight half of highlight({dim:true}). The opacity PROPERTY beats the per-frame
+   presentation attribute render.js writes — that is what makes it stick. */
+.smv-node[data-dim],.smv-edge[data-dim]{opacity:.28}
+
+/* Caption overlay (D14) — narration, not graph content: plain HTML over the pane, never
+   SVG text inside the a11y tree. Steps up over the transport like .smv-totalbar. */
+.smv-caption{
+  position:absolute; left:50%; bottom:12px; transform:translateX(-50%);
+  max-width:80%; box-sizing:border-box; padding:6px 12px;
+  border:1px solid var(--smv-stroke); border-radius:var(--smv-radius);
+  background:var(--smv-container); color:var(--smv-text);
+  font:500 13px system-ui,-apple-system,'Segoe UI',sans-serif; line-height:1.35;
+  text-align:center; pointer-events:none;
+}
+.smv-caption[data-place="top"]{top:12px; bottom:auto}
+.smv-caption[data-variant="note"]{color:var(--smv-muted); font-style:italic}
+.smv-root.smv-has-transport .smv-caption{bottom:46px}
+
+/* D15 — record mode: the affordance transitions above run on the wall clock, so two
+   captures of one frame would differ. Kill every one of them. */
+[data-smv-record] *,[data-smv-record] *::before,[data-smv-record] *::after{
+  transition:none !important; animation:none !important;
+}
+
 /* Transport bar (opts.controls). Chrome, not choreography — plain HTML over the pane. */
 .smv-transport{
   position:absolute; left:0; right:0; bottom:0; height:34px; box-sizing:border-box;

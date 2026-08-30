@@ -795,3 +795,133 @@ the IIFE and default ESM path must not pull it in at all.
   300-node run; if median frame ≤ 8ms headless, record "not justified at v1 scale" in
   DEVIATIONS instead of building it. Gantt mode: skipped by default per plan (no
   demand); note in DEVIATIONS.
+
+---
+
+# M4 contracts (director ops: camera · highlight · caption · declared timeline)
+
+M3 is DONE and green (435 tests, e2e-m0/1/2/3, size, types). Do not regress it. M4a lands
+the core director ops (D12–D15 in PLAN.md, op shapes in §5.7); the deterministic frame
+renderer is M4b and its plumbing (`opts.ticker/motion`, `data-smv-record`,
+`setInteractive`) is landed here so M4b touches no core file.
+
+## `src/director.js` — camera targeting + emphasis/caption state (D12–D14)
+
+Same `internals`-taking contract as condense-anim.js: no renderer import, no global
+document, runs against a fake host in tests.
+
+```js
+resolveCameraTarget(opts, layoutResult, size, current) → {x, y, k}   // PURE
+createDirector(internals) → d
+  internals = { root, lastLayout(), emphasize(id, value), dim(id, value), captions }
+d.highlight(sel), d.clearHighlight(), d.caption(text, opts) , d.captionText()
+d.reassert()                       // apply(force): rewrite every data-emph/data-dim
+d.snapshot() → {emphasis, caption} / d.restore(snap), d.destroy()
+```
+
+- `resolveCameraTarget` resolution order, first match wins: absolute `x`/`y` (+`k`) →
+  `node` → `nodes` (union box) → `fit:true` (layout bounds) → relative `zoom`/`k` +
+  `by:{dx,dy}`. Boxes come from `layoutResult.nodes[id]` (centre-origin {x,y,w,h}); a box
+  target centres it, `k` on it is explicit scale, else fit with `pad` (default 24). Bare
+  `k`/`zoom` scale about the pane centre; `by` is a screen-px nudge applied after any
+  zoom. Relative moves compose onto `current` — index.js passes `viewport.target`, the
+  frame the move is written into, never a mid-tween sample (viewport.anchor's reasoning).
+  Unknown node ids resolve to "stay put". Every derived `k` (fitted, explicit-on-a-box,
+  `zoom`) is clamped to the viewport's own `MIN_K..MAX_K` BEFORE x/y are derived from it —
+  `setTo` clamps `k` but copies x/y verbatim, so an unclamped fit would centre the shot at
+  a scale the viewport never applies and land it off-screen by the clamp ratio. FIT_MAX_K
+  is structurally absent from the camera path.
+- Emphasis: `Map<id, variant>` + dim `Set`, replace-not-accumulate (D14). `apply()` diffs
+  desired vs a `written` shadow (Map + Set) and writes only what differs;
+  `apply(force)` clears the shadow first — that is `reassert()`, for elements the
+  renderer just rebuilt. `highlight({dim:true})` dims every id the last layout drew
+  (nodes AND edges) that is not emphasised.
+- Caption: lazily-created `div.smv-caption` on the mount root (transport.js pattern),
+  `role="status"`, never `aria-live="assertive"`; `data-place`/`data-variant` attrs.
+  Inert with no document. `internals.captions === false` suppresses the DOM only: the
+  caption stays state — snapshotted, restored, readable via `captionText()` for cues.
+
+## `src/viewport.js` additions
+
+```js
+vp.fit(bounds, {pad=24, duration=0, ease, maxK=FIT_MAX_K}) → Promise<{canceled}>
+vp.fit(bounds, pad, animate)              // M0 spelling still works (object-vs-scalar sniff)
+vp.moveTo({x?,y?,k?}, {duration=0, ease}={}) → { promise, cancel }
+vp.setInteractive(bool)                   // attach/detach ALL pointer+wheel listeners
+vp.size() → {w, h}
+vp.target                                 // getter: where a live tween is heading, else state
+```
+
+- **`stopTween(canceled)` settles the tween's promise on every exit path** — landing,
+  retarget, `setNow`, destroy, clock teardown. Through M3 it dropped tweens silently;
+  that would strand `moveTo`'s awaitable (D9: a canceled move resolves `{canceled:true}`).
+  A `ticker.onDestroy` subscription covers the clock being torn down under a live tween
+  (`g.ticker` is public).
+- `tick()` uses the tween's own `ease` (default still cubicOut). `fit`'s `maxK` overrides
+  the FIT_MAX_K=1.5 auto-fit lid (`MAX_K`/`FIT_MAX_K` now exported). No
+  `prefersReducedMotion()` in this file — index.js owns `reduced` and passes the duration.
+
+## `src/render.js` + `src/styles.js` + `src/storyboard.js`
+
+- `r.emphasize(id, value)` / `r.dim(id, value)` — lookup in nodeEls then edgeEls, write
+  `data-emph` / `data-dim` on the group. NOT folded into `mark()`: `data-condense` is the
+  condense choreography's channel and a highlight outliving a merge must not fight it.
+- CSS: `[data-emph]` variants (focus/warn/ok/mute) via a `--smv-emph` indirection over the
+  existing color vars; `.smv-node[data-dim],.smv-edge[data-dim]{opacity:.28}` (scoped, so
+  it can't leak onto host markup — the opacity property beats the per-frame presentation
+  attribute); `.smv-caption` with `data-place`/`data-variant` and a `.smv-has-transport`
+  bottom offset mirroring `.smv-totalbar`; the `[data-smv-record] *` transition/animation
+  kill-switch (D15). No transitions on any of it (D14).
+- storyboard.js: `"camera" | "highlight" | "clearHighlight" | "caption"` join OPS and
+  NAMED — method-shaped, so applyStep's default branch dispatches them.
+
+## `src/index.js` — the director surface
+
+- `g.camera(o) → Awaitable` — `resolveCameraTarget(o, last, viewport.size(),
+  viewport.target)` → `viewport.moveTo(to, {duration, ease})`. Duration:
+  `stepDur ?? o.dur ?? 600` — step-first, the same order `durOf()` reads, so a step
+  declaring both durations cannot play at one length and be measured at the other —
+  reduced → 1, forward-scrub `instant` → 0. Ease: string key
+  into EASINGS, default cubic-in-out. First call sets `cameraOwned = true` AND
+  `viewport.userMoved = true` (reuses the auto-refit suppression signal, D13).
+  Deliberately not routed through `viewport.fit()` — see the FIT_MAX_K note above.
+- `g.highlight(sel)` / `g.clearHighlight()` / `g.caption(text, o?)` — thin delegates to
+  the director; return `g`.
+- `g.cues() → [{kind:"label"|"caption", at, label?, text?, index}]` — absolute ms offsets
+  off the same `durOf()` table the scrubber reads (D12); truthful under `captions:false`.
+- **`durOf(step)`** replaces NOMINAL_STEP_MS: `step.dur` wins; else label 0, wait its ms,
+  camera `args[0].dur ?? 600`, highlight/clearHighlight/caption 0, `run.step`/`run.seek` 0
+  (instantaneous: nothing to await), condense/split `CHOREO_MS` (the CONDENSE_PHASES sum,
+  900), batch max of members (one commit, parallel), default `baseDuration`.
+  `run.play` slices still come from the run's own clock.
+- **`stepDur` ambient (D12):** `applyStep` saves/sets `stepDur = step.dur ?? null` around
+  the op and restores after (a batch's `dur` survives its children); `relayout` reads
+  `duration ?? stepDur ?? baseDuration` (reduced → 1). Every mutation op gains per-step
+  pacing with zero signature churn.
+- **Snapshot gating (D13):** `host.snapshot()` always spreads `director.snapshot()`
+  (emphasis + caption, D14); `camera: viewport.target` + `userMoved` join it ONLY when
+  `cameraOwned` — set at `buildStoryboard` time by `hasCameraOp(steps)` (batches
+  recursed), because the step-0 snapshot is taken before any op runs. `restore()` drives
+  the camera AFTER `relayout()` returns, at duration 0 (relayout's anchor/auto-refit has
+  just written the viewport synchronously), then `director.restore(snap)`.
+- **Reassertion:** `bus.on("commit", () => director.reassert())` — render.js builds a
+  fresh `<g>` for a re-added id, so a commit reviving an emphasised node hands back a
+  blank element.
+- **Forward scrub:** `seekTimeline` raises a `scrubDepth` counter (a depth, not a boolean:
+  a drag seeks on every `input`, so scrubs overlap and an earlier one settling must not
+  lower the flag under a newer replay); `applyStep` snaps ONLY the
+  four director ops to `instant` (duration 0). Mutations keep their real timing —
+  test/e2e-m3's scrubForward leans on the condense choreography; widening is a
+  deliberate later decision.
+- **Record plumbing (D15):** `opts.ticker === "manual"` → `createTicker({manual:true})` +
+  `data-smv-record` on the root; `opts.motion === "full"` → `reduced = false`;
+  `opts.captions` → director. `g.ticker` is public. `fitView` and relayout's auto-refit
+  pass the reduced-computed duration into `fit`'s opts form (through M3 that tween ran a
+  flat 350ms whatever the environment asked).
+
+## M4b (deterministic frame renderer) — not yet landed
+
+`bin/smv-record.mjs` + `scripts/harness.mjs` + `test/e2e-m4.mjs` per PLAN M4b scope.
+Everything it needs from core is already here: manual ticker, `motion:"full"`,
+`data-smv-record`, `setInteractive(false)`, the truthful timeline. Mode B (`run({mode:
+"live"})`) storyboards will be refused — wall-clock, unreproducible.

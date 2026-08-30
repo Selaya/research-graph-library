@@ -13,8 +13,9 @@ import { createRenderer } from "./render.js";
 import { createViewport } from "./viewport.js";
 import { injectStyles } from "./styles.js";
 import { createViewState } from "./viewstate.js";
-import { runCondense } from "./condense-anim.js";
+import { runCondense, CONDENSE_PHASES } from "./condense-anim.js";
 import { runSplit } from "./split-anim.js";
+import { createDirector, resolveCameraTarget } from "./director.js";
 import { makeQuery } from "./query.js";
 import { attachA11y } from "./a11y.js";
 import { attachTapToggle } from "./interact.js";
@@ -26,8 +27,11 @@ import { applyPipelinePreset } from "./preset-pipeline.js";
 
 export const version = "0.1.0";
 
-/** What a non-run storyboard step is worth on the transport's cumulative timeline. */
-const NOMINAL_STEP_MS = 400;
+/** A camera move with no declared `dur`. */
+const CAMERA_MS = 600;
+/** What condense/split actually cost — the M3 timeline's flat 400ms guess was wrong here
+ *  by more than a factor of two, which is what D12 exists to fix. */
+const CHOREO_MS = CONDENSE_PHASES.highlight + CONDENSE_PHASES.converge + CONDENSE_PHASES.reveal;
 
 const EASINGS = {
   "linear": EASE.linear,
@@ -35,6 +39,21 @@ const EASINGS = {
   "cubic-in-out": EASE.cubicInOut,
   "overshoot": EASE.overshoot,
 };
+
+/** The director ops: instantaneous state flips (plus the camera, whose tween is scenery,
+ *  not graph state) — the only ops a forward scrub replays at zero duration. */
+const DIRECTOR_OPS = new Set(["camera", "highlight", "clearHighlight", "caption"]);
+
+/** True when `steps` (batches included) contains at least one camera op — D13's trigger for
+ *  the script taking ownership of the viewport. */
+function hasCameraOp(steps) {
+  return (steps || []).some((s) => {
+    if (!s) return false;
+    if (s.op === "camera") return true;
+    if (s.op !== "batch") return false;
+    return hasCameraOp(Array.isArray(s.steps) ? s.steps : (s.args && s.args[0]) || []);
+  });
+}
 
 /** Awaitable + cancelable handle handed back by every mutation (§5.3). */
 function thenable(promise, cancel) {
@@ -73,17 +92,23 @@ export function mount(el, spec = {}, opts = {}) {
   const store = new Store(spec);
   const vs = createViewState(store);
   const bus = emitter();
-  const ticker = createTicker();
+  // D15 — recording mode overrides the environment: a manual ticker is stepped frame by
+  // frame by the renderer CLI (M4b) instead of riding rAF, and `data-smv-record` on the
+  // root kills every wall-clock CSS transition so two captures of one frame are identical.
+  const recording = opts.ticker === "manual";
+  const ticker = createTicker({ manual: recording });
   const scene = createScene(ticker);
   const renderer = createRenderer(root, root.ownerDocument || doc);
   const viewport = createViewport(renderer.svg, renderer.viewportG, ticker);
 
   root.classList.add("smv-root");
   root.setAttribute("data-smv-theme", opts.theme || "auto");
+  if (recording) root.setAttribute("data-smv-record", "");
 
   const layoutOpts = { dir: "LR", ...(opts.layout || {}) };
   const anim = opts.animation || {};
-  const reduced = prefersReducedMotion();
+  // D15 — `motion:"full"` is the recorder saying "the environment is not the audience".
+  const reduced = opts.motion === "full" ? false : prefersReducedMotion();
   // G9: reduced motion shrinks durations, it never removes steps.
   const baseDuration = reduced ? 1 : (anim.duration ?? 350);
   const easing = (typeof anim.easing === "function" ? anim.easing : EASINGS[anim.easing]) || EASE.cubicOut;
@@ -99,6 +124,28 @@ export function mount(el, spec = {}, opts = {}) {
   let batchFocal = null;
   let batchExtra = null;
   let destroyed = false;
+
+  // ---- M4 director state (D12–D14) ---------------------------------------------------
+  const director = createDirector({
+    root,
+    captions: opts.captions,
+    lastLayout: () => last,
+    emphasize: (id, v) => renderer.emphasize(id, v),
+    dim: (id, v) => renderer.dim(id, v),
+  });
+  // D12 — the step's declared `dur` is ambient for the whole op, so every mutation op gets
+  // per-step pacing without a single signature change. null = "the step didn't say".
+  let stepDur = null;
+  // Forward scrub replays director ops instantly: a camera tween is scenery, and a scrub
+  // that animates it takes as long as the story it is skipping. Mutations deliberately keep
+  // their real durations (test/e2e-m3 scrubForward leans on the condense choreography).
+  let instant = false;
+  // A DEPTH, not a boolean: the transport seeks on every `input` event of a drag, so scrubs
+  // overlap, and a boolean would be cleared by whichever seek settled first — leaving the
+  // newer replay to fly its camera moves at full length (exactly what this exists to stop).
+  let scrubDepth = 0;
+  // D13 — the script has taken the camera, so viewport state joins the G2 snapshot.
+  let cameraOwned = false;
 
   scene.onFrame((visual) => renderer.frame(visual));
 
@@ -169,7 +216,9 @@ export function mount(el, spec = {}, opts = {}) {
       reversed: pinnedReversals, style: styleFn, sizes,
     });
 
-    const dur = reduced ? 1 : (duration ?? baseDuration);
+    // D12 — an explicit argument still wins; `stepDur` is the storyboard step's declared
+    // pacing, and baseDuration the mount-wide default.
+    const dur = reduced ? 1 : (duration ?? stepDur ?? baseDuration);
     const prev = last;
     transition = scene.commit({ nodes: res.nodes, edges: res.edges }, {
       duration: dur, easing,
@@ -185,7 +234,9 @@ export function mount(el, spec = {}, opts = {}) {
       const before = focal && prev.nodes[focal] ? prev.nodes[focal] : centerOf(prev.bounds);
       const after = focal && res.nodes[focal] && prev.nodes[focal] ? res.nodes[focal] : centerOf(res.bounds);
       viewport.anchor(before, after, dur);
-      if (!viewport.userMoved && !viewport.contains(res.bounds)) viewport.fit(res.bounds, 24, dur > 1);
+      // The auto-refit rides the SAME computed duration, so reduced motion shrinks it too
+      // (through M3 it was a flat 350ms tween whatever the environment asked for).
+      if (!viewport.userMoved && !viewport.contains(res.bounds)) viewport.fit(res.bounds, { pad: 24, duration: dur });
     }
 
     bus.emit("commit", {
@@ -294,8 +345,18 @@ export function mount(el, spec = {}, opts = {}) {
    *  exists to prevent). */
   const untilOf = (s) => (s.until != null ? s.until : (s.args && s.args[0] && s.args[0].until));
 
-  /** The storyboard's op dispatch (§5.5). Mutation ops are just the public API. */
+  /** The storyboard's op dispatch (§5.5). Mutation ops are just the public API.
+   *  `step.dur` is published as the ambient `stepDur` for the whole call and restored to
+   *  whatever enclosed it (a batch's own `dur` survives its children) — D12. */
   function applyStep(step) {
+    const prevDur = stepDur, prevInstant = instant;
+    stepDur = step.dur ?? null;
+    if (scrubDepth > 0 && DIRECTOR_OPS.has(step.op)) instant = true;
+    try { return applyOp(step); }
+    finally { stepDur = prevDur; instant = prevInstant; }
+  }
+
+  function applyOp(step) {
     const args = step.args || [];
     switch (step.op) {
       case "wait":
@@ -337,6 +398,12 @@ export function mount(el, spec = {}, opts = {}) {
         layers: lastLayers.map((rank) => [...rank]),
         runTime: runCtl ? runCtl.time() : 0,
         runOpts: runCtl ? runCtl.options() : null,
+        // D14 — emphasis and the caption are state a step moves, so they are always here.
+        ...director.snapshot(),
+        // D13 — the camera is NOT, unless the script has taken it. Snapshotting it
+        // unconditionally would yank an interactive storyboard's viewport back on every
+        // seek, undoing a pan the reader made between two steps.
+        ...(cameraOwned ? { camera: viewport.target, userMoved: viewport.userMoved } : null),
       };
     },
     restore(snap) {
@@ -357,6 +424,14 @@ export function mount(el, spec = {}, opts = {}) {
       lastOrder = (snap.order || []).map((rank) => [...rank]);
       lastLayers = (snap.layers || []).map((rank) => [...rank]);
       const tr = relayout({});
+      // AFTER relayout, at duration 0: relayout's own anchor/auto-refit correction has just
+      // been written into the viewport synchronously, so restoring the camera first would
+      // simply be overwritten by it.
+      if (snap.camera) {
+        viewport.moveTo(snap.camera, { duration: 0 });
+        viewport.userMoved = !!snap.userMoved;
+      }
+      director.restore(snap);
       // Re-seat the SAME transport in place: g.run() identity (and every listener on it)
       // has to survive a backward seek.
       if (snap.runOpts) {
@@ -370,6 +445,9 @@ export function mount(el, spec = {}, opts = {}) {
 
   function buildStoryboard(steps) {
     sbSteps = [...steps];
+    // Decided up front, not on the first camera op: the snapshot for step 0 is taken before
+    // any step runs, and it has to already know whether the camera is the script's (D13).
+    if (hasCameraOp(sbSteps)) cameraOwned = true;
     sb = createStoryboard(host, sbSteps);
     sb.on("step", notify);
     sb.on("seek", notify);
@@ -385,20 +463,41 @@ export function mount(el, spec = {}, opts = {}) {
    *  total longer than the run, a thumb that jumps at every step boundary, and a scrub
    *  that rewinds the engine). `base` is also what maps a position inside the step back
    *  onto the run's own clock. */
+  /** D12 — the declared timeline IS the contract: what a step is worth is what it actually
+   *  takes, and `dur` on the step overrides. The flat NOMINAL_STEP_MS=400 this replaces was
+   *  a guess that no op honoured — condense really costs 900ms, a camera move 600, and a
+   *  label or a highlight nothing at all. The scrubber, g.cues() and the frame renderer all
+   *  read this one number, so they cannot disagree about where a step sits. */
+  function durOf(step) {
+    if (!step || step.op === undefined) return 0;      // labels are zero-duration positions
+    if (step.dur != null) return Math.max(0, step.dur);
+    const a0 = step.args && step.args[0];
+    switch (step.op) {
+      case "wait": return Math.max(0, step.ms ?? a0 ?? 0);
+      case "camera": return Math.max(0, (a0 && a0.dur) ?? CAMERA_MS);
+      case "highlight": case "clearHighlight": case "caption":
+      case "run.step": case "run.seek": return 0;      // discrete state flips, D14
+      case "condense": case "split": return CHOREO_MS;
+      case "batch": {
+        const list = Array.isArray(step.steps) ? step.steps : (Array.isArray(a0) ? a0 : []);
+        // One commit, run in parallel — the batch is worth its longest member, not their sum.
+        return list.reduce((m, s) => Math.max(m, durOf(s)), 0);
+      }
+      default: return baseDuration;
+    }
+  }
+
   function stepSlices() {
     let base = 0; // absolute run time at the start of the step being measured
     return (sbSteps || []).map((s) => {
-      if (s.op === undefined) return { dur: 0, base }; // labels are zero-duration positions
-      if (s.op === "wait") return { dur: Math.max(0, s.ms ?? (s.args && s.args[0]) ?? 0), base };
-      if (s.op === "run.play") {
-        if (!runCtl) return { dur: NOMINAL_STEP_MS, base };
+      if (s.op === "run.play" && runCtl) {
         const u = untilOf(s);
         const end = u != null ? runCtl.timeOf(u) : runCtl.duration;
         const slice = { dur: Math.max(0, end - base), base };
         base = Math.max(base, end);
         return slice;
       }
-      return { dur: NOMINAL_STEP_MS, base };
+      return { dur: durOf(s), base };
     });
   }
 
@@ -449,12 +548,21 @@ export function mount(el, spec = {}, opts = {}) {
       if (ms <= offsets[i] || ms < offsets[i] + durs[i]) { idx = i; break; }
     }
     const off = Math.max(0, ms - offsets[idx]);
+    // A forward scrub replays the ops it passes over. Camera moves replayed at full length
+    // would make the scrub take as long as the story it is skipping, so applyStep snaps
+    // director ops to zero while this flag is up (M4a: mutations keep their real timing).
+    // Counted, not set: a drag issues overlapping seeks, and an earlier one settling (its
+    // replay voided by the newer seek's stepGen bump) must not lower the flag under the
+    // replay still running.
+    scrubDepth++;
+    const done = () => { scrubDepth = Math.max(0, scrubDepth - 1); };
     return Promise.resolve(sb.seek(idx)).then(() => {
+      done();
       const step = sbSteps[idx];
       // `off` is story-relative; the run's clock is absolute, hence + the step's base.
       if (step && step.op === "run.play" && runCtl) runCtl.seek(slices[idx].base + Math.max(0, off));
       notify();
-    });
+    }, (err) => { done(); throw err; });
   }
 
   const controller = {
@@ -737,9 +845,58 @@ export function mount(el, spec = {}, opts = {}) {
     },
 
     fitView(o = {}) {
-      if (last) viewport.fit(last.bounds, o.pad ?? 24, o.animate !== false);
+      // G9 — the fit tween shrinks under reduced motion instead of running at full length.
+      const dur = o.animate === false ? 0 : (reduced ? 1 : (o.duration ?? baseDuration));
+      if (last) viewport.fit(last.bounds, { pad: o.pad ?? 24, duration: dur });
       viewport.userMoved = false;
       return g;
+    },
+
+    /** M4 — the scripted camera (D13). `{node}` / `{nodes}` / `{fit:true}` frame something,
+     *  `{x,y,k}` sets the transform outright, `{by}` / `{zoom}` nudge it. The move rides the
+     *  shared ticker like everything else, and a second call cancels-and-retargets (D9)
+     *  rather than queueing. Deliberately NOT routed through viewport.fit(): fit's
+     *  FIT_MAX_K=1.5 lid is an initial-auto-fit rule, and framing one node is exactly the
+     *  case that wants to go past it (viewport's own MAX_K=4 still applies). */
+    camera(o = {}) {
+      // Taking the camera reuses the auto-refit suppression signal: from here on relayout
+      // must not "helpfully" refit over a shot the script composed.
+      cameraOwned = true;
+      viewport.userMoved = true;
+      const to = resolveCameraTarget(o, last, viewport.size(), viewport.target);
+      // D12 — the declared timeline is the contract, and durOf() reads `step.dur` FIRST, so
+      // the tween has to as well: args-first here would let a step declaring both durations
+      // play for one length while the scrubber, cues and frame count measured the other.
+      const dur = instant ? 0 : reduced ? 1 : Math.max(0, stepDur ?? o.dur ?? CAMERA_MS);
+      const m = viewport.moveTo(to, { duration: dur, ease: EASINGS[o.ease] || EASE.cubicInOut });
+      return thenable(m.promise, m.cancel);
+    },
+
+    /** M4 — emphasis (D14). Replace-not-accumulate: this IS the emphasis state, not an
+     *  addition to it. `dim:true` makes it a spotlight (everything else drops back). */
+    highlight(sel) { director.highlight(sel || {}); return g; },
+    clearHighlight() { director.clearHighlight(); return g; },
+
+    /** M4 — the caption overlay (D14). `g.caption(null)` clears it. */
+    caption(text, o) { director.caption(text, o); return g; },
+
+    /** The cue sheet: every label and caption in the story with its ABSOLUTE ms offset, off
+     *  the same durOf() table the scrubber reads (D12). What a voice-over/subtitle tool
+     *  consumes — and it stays truthful even when opts.captions is false. */
+    cues() {
+      const slices = stepSlices();
+      const out = [];
+      let at = 0;
+      (sbSteps || []).forEach((s, index) => {
+        const start = at;
+        at += slices[index] ? slices[index].dur : 0;
+        if (s.op === undefined) out.push({ kind: "label", at: start, label: s.label, index });
+        else if (s.op === "caption") {
+          const text = s.args && s.args[0];
+          out.push({ kind: "caption", at: start, text: text == null ? null : String(text), index });
+        }
+      });
+      return out;
     },
 
     destroy() {
@@ -748,6 +905,7 @@ export function mount(el, spec = {}, opts = {}) {
       if (a11y) { a11y.destroy(); a11y = null; }
       if (tap) { tap.destroy(); tap = null; }
       if (transport) { transport.destroy(); transport = null; }
+      director.destroy();
       if (preset) { preset.destroy(); preset = null; }
       if (sb) { sb.pause(); sb = null; }
       offCull();
@@ -760,6 +918,7 @@ export function mount(el, spec = {}, opts = {}) {
       root.classList.remove("smv-root");
       root.classList.remove("smv-has-transport");
       root.removeAttribute("data-smv-theme");
+      root.removeAttribute("data-smv-record");
     },
   };
 
@@ -771,9 +930,16 @@ export function mount(el, spec = {}, opts = {}) {
   // The preset subscribes to "commit", so it has to exist before the first one.
   if (opts.preset === "pipeline") preset = applyPipelinePreset(g);
 
+  // Highlight reassertion (D14): render.js builds a FRESH <g> for a re-added id, so a
+  // commit that revives an emphasised node (a backward seek, an expand) hands back a blank
+  // element. Re-writing after every commit is the cheapest place to keep the two in step —
+  // scene.commit() has already fired one frame by the time "commit" is emitted, so the
+  // elements exist.
+  bus.on("commit", () => director.reassert());
+
   // Initial paint: land immediately (nothing to tween from), then fit once (D10).
   relayout({ duration: 0 });
-  viewport.fit(last.bounds, 24, false);
+  viewport.fit(last.bounds, { pad: 24 });
 
   // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
   if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg });

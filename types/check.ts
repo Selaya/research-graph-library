@@ -18,6 +18,9 @@ import {
   type Run,
   type StoryboardStep,
   type Timeline,
+  type CameraTarget,
+  type HighlightSelection,
+  type Cue,
   type LayoutResult,
   type LayoutSolver,
   type SolverInput,
@@ -188,6 +191,49 @@ void pos.done;
 
 const timeline: Timeline = g.timeline();
 void timeline.total;
+
+// ---- M4: director ops ----------------------------------------------------------------------
+const shot: CameraTarget = { node: "clean", k: 1.8, pad: 60, dur: 700, ease: "cubic-in-out" };
+const cam: Awaitable = g.camera(shot);
+cam.cancel();
+g.camera({ nodes: ["ingest", "build"], pad: 48, dur: 600 });
+g.camera({ fit: true, pad: 24, dur: 800 });
+g.camera({ x: 120, y: -40, k: 1.25, dur: 500 });
+g.camera({ by: { dx: -200, dy: 0 }, dur: 400 });
+g.camera({ zoom: 1.6 });
+
+const spotlight: HighlightSelection = { nodes: ["build"], edges: ["e3"], variant: "focus", dim: true };
+g.highlight(spotlight).clearHighlight();
+g.caption("Now the build fans out.", { place: "bottom", variant: "note" }).caption(null);
+
+const directed: StoryboardStep[] = [
+  { label: "open" },
+  { op: "camera", args: [{ node: "clean", dur: 700 }], dur: 700 },
+  { op: "highlight", args: [{ nodes: ["clean"], dim: true }] },
+  { op: "caption", args: ["Cleaning the data", { place: "bottom" }] },
+  { op: "wait", ms: 800 },
+  { op: "clearHighlight" },
+  { op: "expand", args: ["clean"], dur: 900 },
+];
+g.storyboard(directed);
+const cues: Cue[] = g.cues();
+void cues[0]?.at;
+
+// The camera/emphasis primitives underneath, and the record-mode mount opts (D15).
+const move = g.viewport.moveTo({ x: 0, y: 0, k: 2 }, { duration: 400 });
+move.promise.then((r) => r.canceled);
+move.cancel();
+g.viewport.fit({ x: 0, y: 0, w: 100, h: 100 }, { pad: 12, duration: 300, maxK: 4 });
+g.viewport.fit({ x: 0, y: 0, w: 100, h: 100 }, 12, true); // the M0 spelling still compiles
+g.viewport.setInteractive(false);
+const paneSize: { w: number; h: number } = g.viewport.size();
+const heading = g.viewport.target;
+void [paneSize, heading.k];
+g.renderer.emphasize("build", "focus");
+g.renderer.dim("build", null);
+
+const recordOpts: MountOpts = { ticker: "manual", motion: "full", captions: false, autoplay: true };
+void recordOpts;
 
 // ---- destroy --------------------------------------------------------------------------
 g.destroy();

@@ -321,6 +321,39 @@ A self-contained single-`.html` export is a **docs recipe + optional tiny CLI**,
 runtime feature (`exportHTML()` at runtime would require the bundle to embed its own
 source — cut). CI enforces a hard size budget from M0.
 
+### D12 — The declared timeline is the contract (M4)
+
+Every storyboard step is worth a specific number of milliseconds — its own `dur` field, or
+the op's default — and the scrubber, `g.cues()` and the frame renderer all read that one
+number, so they cannot disagree about where a step sits. Replaces the flat
+`NOMINAL_STEP_MS = 400` guess, which no op honoured (condense actually costs 900ms, a
+camera move 600, a label or a highlight nothing at all). `dur` is published as an ambient
+value for the whole op, so every existing mutation gains per-step pacing with no signature
+change.
+
+### D13 — The script may take the camera (M4)
+
+A storyboard containing at least one `camera` op owns the viewport for the duration of
+playback: `{x,y,k}` + `userMoved` join the G2 snapshot, and the first camera move sets
+`userMoved` so relayout's auto-refit stops landing on top of composed shots. Gated on that
+op being present — snapshotting the camera unconditionally would yank an existing
+interactive storyboard's viewport back on every seek, undoing a pan the reader just made.
+Camera moves ride the shared ticker and cancel-and-retarget like everything else (D1/D9).
+
+### D14 — Emphasis and captions are discrete state, not motion (M4)
+
+`data-emph` / `data-dim` flips plus one DOM overlay (`.smv-caption`), snapshotted as state
+and never tweened in v1. Highlights are replace-not-accumulate: one call IS the emphasis
+state. Deliberately not CSS-transitioned — a wall-clock transition is nondeterministic
+under frame capture, which is the whole point of the renderer that consumes this.
+
+### D15 — Recording mode overrides the environment (M4)
+
+`opts.motion:"full"` forces `reduced = false`; `opts.ticker:"manual"` builds the shared
+clock with `createTicker({manual:true})` so the renderer steps it frame by frame instead of
+riding rAF; and the root gets `data-smv-record`, which disables every CSS transition and
+animation beneath it. Together these make two captures of the same frame byte-identical.
+
 ---
 
 ## 5. Data model & API
@@ -452,6 +485,50 @@ g.style(n => ({ "--smv-fill": statusColor[n.data.status],
 .smv-node[data-status="done"]   { --smv-fill: var(--ok); }
 .smv-edge[data-back-edge]       { stroke-dasharray: 4 3; opacity: .7; }
 ```
+
+### 5.7 Director ops (M4 — camera · highlight · caption · pacing)
+
+The same serializable op array (§5.5), four more ops. They dispatch through the ordinary
+`g[op](...args)` branch, and every step may carry `dur` — the declared timeline (D12) that
+the scrubber, `g.cues()` and the frame renderer all read.
+
+```js
+SparkleMotion.mount("#pipe", spec, {
+  controls: true,
+  storyboard: [
+    { "op": "camera", "args": [{ "node": "clean", "k": 1.8, "pad": 60, "dur": 700, "ease": "cubic-in-out" }], "dur": 700 },
+    { "op": "camera", "args": [{ "nodes": ["a", "b"], "pad": 48 }] },      // union box
+    { "op": "camera", "args": [{ "fit": true, "pad": 24, "dur": 800 }] },  // whole graph
+    { "op": "camera", "args": [{ "x": 120, "y": -40, "k": 1.25 }] },       // absolute transform
+    { "op": "camera", "args": [{ "by": { "dx": -200, "dy": 0 } }] },       // screen-px pan
+    { "op": "camera", "args": [{ "zoom": 1.6 }] },                         // × about the pane centre
+    { "op": "highlight", "args": [{ "nodes": ["a"], "edges": ["e1"], "variant": "focus", "dim": true }] },
+    { "op": "clearHighlight" },
+    { "op": "caption", "args": ["Some narration text", { "place": "bottom", "variant": "note" }] },
+    { "op": "caption", "args": [null] },                                   // clear
+  ],
+});
+```
+
+- **camera** target resolution, first match wins: absolute `x`/`y` (+`k`) → `node` →
+  `nodes` → `fit:true` → relative `zoom`/`k` + `by:{dx,dy}`. A box target centres the box;
+  `k` on it is an explicit scale, else the box is fitted with `pad` (default 24). `zoom`
+  and a bare `k` scale about the pane centre; `by` is a screen-px nudge applied after any
+  zoom. Relative moves compose onto the *target* transform, never a mid-tween sample (D9).
+  Default `dur` 600, `ease` `"cubic-in-out"` (ease ∈ `linear | cubic-out | cubic-in-out |
+  overshoot`). An unknown node id means "stay put", not "fly to the origin".
+- **highlight** is replace-not-accumulate (D14): one call IS the emphasis state.
+  `variant ∈ focus | warn | ok | mute`; `dim:true` makes it a spotlight — everything drawn
+  and not selected gets `data-dim`.
+- **caption** writes one `role="status"` overlay; `place ∈ bottom (default) | top`,
+  `variant:"note"` mutes it. `captions:false` at mount suppresses the overlay only — the
+  text stays snapshotted and stays in `g.cues()`.
+- **`dur` on any step** (not just these four) is ambient for the whole op, so a mutation
+  step paces its relayout without a signature change. What a step is worth without one:
+  label 0 · `wait` its ms · camera 600 · highlight/clearHighlight/caption 0 ·
+  `run.step`/`run.seek` 0 · condense/split 900 (the choreography's real cost) · batch the
+  max of its members (one commit, parallel) · every other mutation the mount's
+  `animation.duration` (350).
 
 ---
 
