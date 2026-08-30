@@ -61,9 +61,10 @@ ESM for bundler users: `import { mount } from "sparkle-motion-vizualizer"`.
   snapshotted so scrubbing backward through structural changes just works.
 - **Director ops** — scripts also drive the camera (`{node}` / `{nodes}` / `{fit}` /
   absolute / relative moves), highlights and spotlights (`data-emph`/`data-dim`, four
-  variants), a caption overlay, and per-step pacing via `dur` — the declared timeline
-  the scrubber and cue sheet both read. See `docs/RECORDING.md` for the full recipe,
-  including recording a story as video.
+  variants, an optional ticker-driven pulse), a caption overlay, per-element `--smv-*`
+  overrides, and per-step pacing via `dur` — the declared timeline the scrubber and cue
+  sheet both read. See `docs/RECORDING.md` for the full recipe, including recording a
+  story as video and fitting its holds to a recorded voice-over.
 - **Pipeline preset** — duration chips, sum/max rollups, manual/auto badges, the
   `2h → 8s` odometer + delta badge when automation lands, a total-duration bar.
 - **Sane viewport** — anchored (the focal node holds still; the graph reflows around
@@ -93,6 +94,7 @@ g.expand(id)   g.collapse(id)   g.expandAll()   g.collapseAll()
 g.condense([ids], newNode)   g.split(id, { nodes, edges })
 g.run(opts)    g.storyboard(steps)   g.timeline()
 g.camera(target)   g.highlight(sel)   g.clearHighlight()   g.caption(text, o)   g.cues()
+g.props({ id: { "--smv-fill": "#7c5cff" } })   // per-step overrides; null clears
 g.layout(opts) g.fitView()   g.bounds()  g.layoutResult()  g.spec()  g.destroy()
 g.on(type, fn) / g.off(type, fn)
 ```
@@ -133,7 +135,9 @@ drive the presentation, not just the graph:
 await g.camera({ node: "clean", k: 1.8, pad: 60, dur: 700 });   // also {nodes:[…]},
 g.camera({ fit: true });     g.camera({ zoom: 1.6 });           // {x,y,k}, {by:{dx,dy}}
 g.highlight({ nodes: ["a"], edges: ["e1"], variant: "focus", dim: true });  // spotlight
+g.highlight({ nodes: ["a"], variant: "warn", pulse: true });     // + an attention beat
 g.clearHighlight();
+g.props({ clean: { "--smv-fill": "#7c5cff" } });   g.props(null);  // override layer
 g.caption("Three manual steps become one.", { place: "bottom" });  g.caption(null);
 g.cues();   // every label + caption with its absolute ms offset — the voice-over sheet
 ```
@@ -141,7 +145,10 @@ g.cues();   // every label + caption with its absolute ms offset — the voice-o
 Camera moves ride the shared clock and cancel-and-retarget like everything else; the
 first one in a script takes the viewport (auto-refit stops, the camera joins the scrub
 snapshots). A highlight *is* the emphasis state (replace, not accumulate) and survives
-relayouts and backward scrubs. Every storyboard step takes an optional `dur` (ms) —
+relayouts and backward scrubs — and so does the `props` override layer, which sits over
+your `style()` function on the same `--smv-*` channel. `pulse: true` breathes the
+emphasis off the shared ticker (never a CSS animation, so it records frame-perfectly;
+reduced motion holds it still). Every storyboard step takes an optional `dur` (ms) —
 per-step pacing for any op, and the number the scrubber, `g.cues()` and the coming
 frame renderer all agree on. Mount opts: `captions: false` hides the caption overlay
 (cues stay truthful); `motion: "full"` and `ticker: "manual"` are recording mode.
@@ -264,6 +271,18 @@ labelled chapter so it intercuts frame-for-frame with the full take, and `--font
 typeface so two machines lay the graph out identically. `docs/RECORDING.md` §3 has the full
 flag list.
 
+**Fitting a script to a voice-over.** Record the read against the cue sheet, then hand
+`smv-fit` the timestamps each beat actually landed on — it stretches and shrinks the
+`wait` steps between labels until every label lands on its mark, and touches nothing else:
+
+```
+npx smv-fit sb.json --vo marks.json -o fitted.sb.json   # {"intro":0,"focus":4200,…}
+```
+
+Pure JSON→JSON, priced off the same declared timeline everything else reads, idempotent,
+and it exits 1 naming the beat when the animation in a segment is simply longer than the
+gap the narration left it. `docs/RECORDING.md` §6.
+
 ## Size
 
 Enforced by a hard-fail CI budget (`npm run size`):
@@ -309,9 +328,10 @@ Status: M0 (walking skeleton), M1 (pipeline demo end to end), M2 (live mode, spl
 edge labels, expand/collapse-all, query sugar, ARIA + table fallback, SVG/PNG export,
 `smv-pack`) and M3 (in-house layered engine, dagre demoted to an optional adapter,
 viewport culling, IIFE under 50KB gzip) complete; M4a (director ops: camera, highlight,
-caption, the declared timeline), M4b (`smv-record`, the deterministic frame renderer) and
+caption, the declared timeline), M4b (`smv-record`, the deterministic frame renderer),
 M4c (ffmpeg piping, cue sheets, chapter re-renders, pinned fonts, `exportSVG({viewport:
-true})`) landed — voice-over fitting is M4d. Deliberate departures from the plan —
+true})`) and M4d (`smv-fit` voice-over fitting, per-step `props` overrides, the emphasis
+pulse) all landed. Deliberate departures from the plan —
 including what "parity with dagre" was gated on, and what M3 skipped — are recorded in
 `docs/DEVIATIONS.md`. Embedding: `docs/EMBED.md`.
 

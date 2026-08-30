@@ -70,6 +70,8 @@ All defined at `:where(.smv-root)` (light) / `.smv-root[data-smv-theme="dark"]` 
 | `--smv-condense` | condense/split phase glow, loop badge, delta badge | `#f0a000` | `#e0a53a` |
 | `--smv-radius` | node corner radius (read by `render.js`, not CSS) | `8px` | `8px` |
 | `--smv-traversed` | **written per commit**, not themeable — a 0..1 float driving traversed-edge width (`run-render.js`) | — | — |
+| `--smv-emph` | the emphasis stroke colour, indirected from `--smv-accent`/`--smv-condense`/`--smv-ok-stroke`/`--smv-muted` by `[data-emph]`'s variant (D14) | — | — |
+| `--smv-pulse` | **written per tick on `.smv-root`**, not themeable — a 0..1 bucketed float driving the emphasis pulse's stroke width (`director.js`, D17). Unset reads as 0, i.e. a still highlight | — | — |
 
 `--smv-fill`/`--smv-stroke` are also **overridden locally** by status/mode selectors
 (`[data-status]`, `[data-run]`, `[data-container]`, `[data-condense]`) — see the table
@@ -83,6 +85,14 @@ your rule to the state you actually want to change (e.g.
 time — highest specificity of all, and the only mechanism meant to vary per-node data
 (§5.6). It only ever writes properties, never classes or `data-*` — combine it with the
 CSS selectors below for anything state-shaped.
+
+`g.props(map)` is the *director's* escape hatch on the same channel (D16): a
+`{id: {"--smv-*": value}}` layer merged **over** `g.style(fn)` at commit time, for nodes
+**and** edges, so a storyboard step can recolour one element for one beat without the mount
+owning a style function that knows about the story. It is replace-not-accumulate (one call
+is the whole layer) and it is snapshotted state, so a backward scrub restores it. `g.props(null)`
+clears the layer and whatever `g.style(fn)` sets shows through again. Same rule as everywhere
+else: only `--smv-*` keys, anything else throws.
 
 ## `data-*` attribute reference
 
@@ -100,6 +110,9 @@ All written at commit time (`renderer.styleCommit`, `preset-pipeline.js`, `a11y.
 | `data-container` | `.smv-node` | present (any truthy value) when the node is a compound/container node |
 | `data-collapsed` | `.smv-node` | present when a container is collapsed (controls header-strip vs. stacked-card chrome) |
 | `data-count` | `.smv-node` | the ×N child-count badge on a collapsed container |
+| `data-emph` | `.smv-node`, `.smv-edge` | director emphasis (D14): `"focus"` \| `"warn"` \| `"ok"` \| `"mute"` — picks `--smv-emph`; pair with `--smv-pulse` for the beat |
+| `data-dim` | `.smv-node`, `.smv-edge` | the spotlight half of `highlight({dim:true})` — everything drawn and not emphasised drops to 28% opacity |
+| `data-smv-record` | `.smv-root` | record mode (D15): kills every CSS transition/animation beneath it |
 | `data-condense` | `.smv-node` | `"src"` during highlight, `"reveal"` after converge/diverge — shared by both condense and split choreography |
 | `data-reversed` | `.smv-edge` | present on back edges (FAS-pinned) — dashed stroke, reduced opacity |
 | `data-weight` | `.smv-edge` | meta-edge aggregation count (>1); doubles the edge width |

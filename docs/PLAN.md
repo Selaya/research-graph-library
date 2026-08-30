@@ -354,6 +354,33 @@ clock with `createTicker({manual:true})` so the renderer steps it frame by frame
 riding rAF; and the root gets `data-smv-record`, which disables every CSS transition and
 animation beneath it. Together these make two captures of the same frame byte-identical.
 
+### D16 — Per-step property overrides layer over the style function (M4d)
+
+`{"op":"props","args":[{"clean":{"--smv-fill":"#7c5cff"}}]}` is a script recolouring one
+element for one beat. It is the *same* mechanism as everything else (D7: only `--smv-*`
+custom properties, anything else throws), one layer above `g.style()`: the renderer merges
+it over the style function's output at commit time, so last writer wins and clearing the
+layer falls back to the styled picture rather than to nothing. Replace-not-accumulate like
+`highlight` — one call IS the override state — and state like it too: snapshotted (G2),
+restored on a backward seek, and re-applied to the fresh `<g>` a commit builds for a
+re-added id, which it gets for free by riding the style commit rather than a second write
+path. Deliberately not a new attribute channel and not a per-element write: the style
+commit already runs before the elements exist, which is exactly the reassertion problem
+`data-emph` needed a commit hook to solve.
+
+### D17 — The attention pulse rides the shared ticker, quantized (M4d)
+
+`highlight({pulse:true})` breathes the emphasis stroke. It is a modifier on `variant`, not
+one of them (a warning that pulses is still a warning), and it is **not** a CSS animation:
+the director registers one callback on the one shared clock (D1) and writes one root custom
+property, `--smv-pulse`, whose value is quantized into 12 buckets over a 1400ms cycle. So a
+frame's markup is a function of the tick count and nothing else — two captures of one frame
+are identical, and the `data-smv-record` kill-switch (D15) has nothing to kill. The CSS
+reads `var(--smv-pulse, 0)`, so a still highlight is byte-for-byte the rule it always was.
+The callback comes off the ticker on `clearHighlight()`, on a restore into a snapshot
+without one, and on `destroy()`, so the rAF loop can go idle again. G9: reduced motion holds
+the peak statically — the emphasis shrinks to a still frame, it is never skipped.
+
 ---
 
 ## 5. Data model & API
@@ -506,6 +533,9 @@ SparkleMotion.mount("#pipe", spec, {
     { "op": "clearHighlight" },
     { "op": "caption", "args": ["Some narration text", { "place": "bottom", "variant": "note" }] },
     { "op": "caption", "args": [null] },                                   // clear
+    { "op": "highlight", "args": [{ "nodes": ["a"], "variant": "warn", "pulse": true }] },  // M4d
+    { "op": "props", "args": [{ "clean": { "--smv-fill": "#7c5cff" } }] },                  // M4d
+    { "op": "props", "args": [null] },                                     // clear the layer
   ],
 });
 ```
@@ -520,12 +550,19 @@ SparkleMotion.mount("#pipe", spec, {
 - **highlight** is replace-not-accumulate (D14): one call IS the emphasis state.
   `variant ∈ focus | warn | ok | mute`; `dim:true` makes it a spotlight — everything drawn
   and not selected gets `data-dim`.
+  `pulse:true` (M4d/D17) adds a gentle attention beat to whatever is emphasised — a
+  *modifier* on `variant`, not one of them, driven per frame off the shared ticker rather
+  than by a CSS animation, and held statically under reduced motion (G9).
 - **caption** writes one `role="status"` overlay; `place ∈ bottom (default) | top`,
   `variant:"note"` mutes it. `captions:false` at mount suppresses the overlay only — the
   text stays snapshotted and stays in `g.cues()`.
+- **props** (M4d/D16) is the per-step `--smv-*` override layer, `{id: {prop: value}}`,
+  merged over the mount's style function at commit time; `args:[null]` clears it. Only
+  `--smv-*` keys (D7) — anything else throws. Replace-not-accumulate and snapshotted,
+  exactly like `highlight`. Zero-duration, like every other state flip.
 - **`dur` on any step** (not just these four) is ambient for the whole op, so a mutation
   step paces its relayout without a signature change. What a step is worth without one:
-  label 0 · `wait` its ms · camera 600 · highlight/clearHighlight/caption 0 ·
+  label 0 · `wait` its ms · camera 600 · highlight/clearHighlight/caption/props 0 ·
   `run.step`/`run.seek` 0 · condense/split 900 (the choreography's real cost) · batch the
   max of its own commit and its *parallel* members — `wait`/`camera`/`condense`/`split`,
   the children that keep their own clock; a mutation child folds into the one shared
@@ -628,7 +665,7 @@ to 3/5 — and scrubs backward/forward with no corruption.
 - Selective compositor offload for non-choreographed motion (profiled), viewport culling.
 - Gantt/temporal layout mode (x = time, sweeping-line scrubber) **if demanded**.
 
-### M4 — Director & deterministic recording (D12–D15, §5.7)
+### M4 — Director & deterministic recording (D12–D17, §5.7)
 - **M4a** (done) — core director ops: `camera`/`highlight`/`clearHighlight`/`caption`,
   per-step `dur`, the truthful timeline + `g.cues()`, and the record-mode mount plumbing.
 - **M4b** (done) — `bin/smv-record.mjs`: packs the record variant, steps the manual ticker
@@ -644,8 +681,12 @@ to 3/5 — and scrubs backward/forward with no corruption.
   and what is *measured* (canvas metrics decide node boxes), and
   `exportSVG({viewport:true})` for a still that matches the shot. `--png-dir` stays as the
   no-ffmpeg route; both outputs may be given at once.
-- **M4d** — `bin/smv-fit.mjs` (stretch `wait` steps onto voice-over marks), per-step
-  `props` custom-property overrides.
+- **M4d** (done) — closing the voice-over loop: `bin/smv-fit.mjs` stretches and shrinks the
+  `wait` steps between labelled beats until every label lands on a recorded narration
+  timestamp (pure JSON→JSON, priced off the same `durOf()` table the library uses, and a
+  no-op when re-run — zero bundle cost, it never runs in a browser); plus two core
+  additions that stay inside the existing channels: the `props` override layer (D16) and
+  the ticker-driven emphasis pulse (D17), together ~0.6KB gzip.
 
 Cut from v1 entirely (over-engineering, per critique): force-directed fallback,
 runtime `exportHTML()`, per-frame style reducers, selector-string stylesheets, plugin
