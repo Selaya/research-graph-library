@@ -59,6 +59,11 @@ ESM for bundler users: `import { mount } from "sparkle-motion-vizualizer"`.
   navigation in reading order, plus an optional linearized `<table>` fallback.
 - **Storyboards** — a serializable op array replays a full narrative; every step is
   snapshotted so scrubbing backward through structural changes just works.
+- **Director ops** — scripts also drive the camera (`{node}` / `{nodes}` / `{fit}` /
+  absolute / relative moves), highlights and spotlights (`data-emph`/`data-dim`, four
+  variants), a caption overlay, and per-step pacing via `dur` — the declared timeline
+  the scrubber and cue sheet both read. See `docs/RECORDING.md` for the full recipe,
+  including recording a story as video.
 - **Pipeline preset** — duration chips, sum/max rollups, manual/auto badges, the
   `2h → 8s` odometer + delta badge when automation lands, a total-duration bar.
 - **Sane viewport** — anchored (the focal node holds still; the graph reflows around
@@ -87,6 +92,7 @@ g.update(id, patch)         g.batch(fn)      g.style(fn)       g.theme(t)
 g.expand(id)   g.collapse(id)   g.expandAll()   g.collapseAll()
 g.condense([ids], newNode)   g.split(id, { nodes, edges })
 g.run(opts)    g.storyboard(steps)   g.timeline()
+g.camera(target)   g.highlight(sel)   g.clearHighlight()   g.caption(text, o)   g.cues()
 g.layout(opts) g.fitView()   g.bounds()  g.layoutResult()  g.spec()  g.destroy()
 g.on(type, fn) / g.off(type, fn)
 ```
@@ -119,6 +125,27 @@ g.children(id)   g.descendants(id)   g.roots()
 ```
 
 (`g.node(id)` / `g.edge(id)` singular are unchanged.)
+
+**Director ops / storytelling.** Storyboards (and the same methods called directly)
+drive the presentation, not just the graph:
+
+```js
+await g.camera({ node: "clean", k: 1.8, pad: 60, dur: 700 });   // also {nodes:[…]},
+g.camera({ fit: true });     g.camera({ zoom: 1.6 });           // {x,y,k}, {by:{dx,dy}}
+g.highlight({ nodes: ["a"], edges: ["e1"], variant: "focus", dim: true });  // spotlight
+g.clearHighlight();
+g.caption("Three manual steps become one.", { place: "bottom" });  g.caption(null);
+g.cues();   // every label + caption with its absolute ms offset — the voice-over sheet
+```
+
+Camera moves ride the shared clock and cancel-and-retarget like everything else; the
+first one in a script takes the viewport (auto-refit stops, the camera joins the scrub
+snapshots). A highlight *is* the emphasis state (replace, not accumulate) and survives
+relayouts and backward scrubs. Every storyboard step takes an optional `dur` (ms) —
+per-step pacing for any op, and the number the scrubber, `g.cues()` and the coming
+frame renderer all agree on. Mount opts: `captions: false` hides the caption overlay
+(cues stay truthful); `motion: "full"` and `ticker: "manual"` are recording mode.
+The full script-writing and video-recording guide is `docs/RECORDING.md`.
 
 **Live mode (Mode B).** Instead of simulating from declared durations, replay a real
 event log. Live time (`run.now()`) always flows; the view clock follows it until you
@@ -256,13 +283,15 @@ and it refuses to write a fixture whose crossing count regressed past the record
 dagre-era bar. `test/engine-parity.test.js` runs both solvers side by side (it needs the
 dev-installed `@dagrejs/dagre`).
 
-Design: `docs/PLAN.md` (decisions D1–D11, milestones), `docs/INTERNALS.md` (module
-contracts), `docs/research/` (landscape + critique the plan rests on).
+Design: `docs/PLAN.md` (decisions D1–D15, milestones), `docs/INTERNALS.md` (module
+contracts), `docs/RECORDING.md` (director scripts + video capture), `docs/research/`
+(landscape + critique the plan rests on).
 
 Status: M0 (walking skeleton), M1 (pipeline demo end to end), M2 (live mode, split,
 edge labels, expand/collapse-all, query sugar, ARIA + table fallback, SVG/PNG export,
 `smv-pack`) and M3 (in-house layered engine, dagre demoted to an optional adapter,
-viewport culling, IIFE under 50KB gzip) complete. Deliberate departures from the plan —
+viewport culling, IIFE under 50KB gzip) complete; M4a (director ops: camera, highlight,
+caption, the declared timeline) landed — the deterministic frame renderer is M4b. Deliberate departures from the plan —
 including what "parity with dagre" was gated on, and what M3 skipped — are recorded in
 `docs/DEVIATIONS.md`. Embedding: `docs/EMBED.md`.
 
