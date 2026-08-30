@@ -1,0 +1,770 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — SDLC release pipeline, manual → automated</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --good: #1f8f5f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --good: #46c48b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+  p.lede strong { color: var(--ink); font-weight: 600; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #pipe {
+    height: 520px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  /* Chapter rail — one pill per storyboard label; clicking one seeks the story there. */
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail button {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail button[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail button[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+  .tile[data-hot] span { color: var(--good); }
+
+  .legend { margin-top: 16px; color: var(--muted); font-size: 12.5px; max-width: 90ch; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  footer { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+  footer a { color: var(--accent); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>SDLC release pipeline — from manual to automated
+      <small>— one <code>&lt;script&gt;</code> tag, one storyboard</small></h1>
+  <p class="lede">
+    A mobile/TV release, end to end: <strong>plan → develop → build &amp; sign → QA →
+    release</strong>, as five compound phases across three device types (iOS, Android,
+    Smart TV). The story assembles the pipeline, runs one release <em>the way it works
+    today</em> — a code-review retry loop ticking in place, a signing fan-out, a regression
+    fan-out at three different speeds into an <code>all</code>-join, a deploy fan-out into GA —
+    then lands automation on three of those areas and re-runs it. Watch the duration chips
+    odometer (<strong>11h&nbsp;→&nbsp;45s</strong>, <strong>7d&nbsp;→&nbsp;12m</strong>,
+    <strong>7h&nbsp;→&nbsp;4m</strong>) and the total-duration bar under the graph shrink.
+    Play, pause and scrub with the transport bar, or jump straight to a chapter below.
+    Zoom is ctrl/⌘&nbsp;+&nbsp;wheel; plain scroll is never hijacked.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>chapter</i><span id="m-chapter">—</span></div>
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>live tokens</i><span id="m-tokens">0</span></div>
+  <div class="tile"><i>review loop</i><span id="m-loop">iter 0/4</span></div>
+  <div class="tile"><i>join · all</i><span id="m-join">—</span></div>
+  <div class="tile" id="t-total"><i>hands-on total</i><span id="m-total">—</span></div>
+</div>
+
+<p class="legend">
+  Legend — chip = duration (a phase's chip is a <code>durationAgg:'sum'</code> rollup of its
+  steps, so it stays honest through expand/collapse and through a condense), ✋ manual /
+  ⚡ automated, <code>×N</code> = tokens sitting on one node, pips under a node = join slots
+  (<code>join:"all"</code>), dashed arc = the review retry loop
+  (<code>loop:true, maxIterations:4</code>, this run capped at 3), thickened edge = a
+  redirected edge that condense merged and re-weighted, slim bar under the graph = total
+  hands-on duration of the whole pipeline.
+</p>
+
+<div id="report"></div>
+
+<footer>
+  ← back to the <a href="index.html">demo index</a> · built with
+  <code>sparkle-motion-vizualizer</code>
+</footer>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ===========================================================================
+  // 1. The graph
+  //
+  // Five compound phases. Every leaf carries a realistic MANUAL duration, so the
+  // preset's chips, the container rollups and the total-duration bar all mean the
+  // same thing: hands-on human time per release. Signing / regression / deploy each
+  // fan out once per device type (iOS, Android, Smart TV) and fan back in on an
+  // `all`-join — which is exactly the shape automation later collapses.
+  // ===========================================================================
+
+  var W = 176, H = 40;   // uniform leaf boxes: the label never crowds the duration chip
+
+  function phase(id, label) { return { id: id, label: label, durationAgg: "sum" }; }
+  function manual(id, parent, label, duration, extra) {
+    var n = { id: id, parent: parent, label: label, w: W, h: H,
+              data: { duration: duration, mode: "manual" } };
+    if (extra) for (var k in extra) n[k] = extra[k];
+    return n;
+  }
+  function automated(id, label, duration) {
+    return { id: id, label: label, w: W, h: H,
+             data: { duration: duration, mode: "automated" } };
+  }
+  function add(node) { return { op: "addNode", args: [node] }; }
+  function link(id, s, t, extra) {
+    var e = { id: id, source: s, target: t };
+    if (extra) for (var k in extra) e[k] = extra[k];
+    return { op: "addEdge", args: [e] };
+  }
+
+  var PHASES = ["plan", "dev", "build", "qa", "rel"];
+
+  // Mount holds only the (still empty) Planning phase; the storyboard grows the rest, so
+  // the pipeline is SEEN assembling, phase by phase (§6.1).
+  var SEED = { nodes: [phase("plan", "Planning")], edges: [] };
+
+  var WAVE_PLAN = [
+    add(manual("plan.ticket", "plan", "Jira ticket", "30m")),
+    add(manual("plan.triage", "plan", "Triage & size", "2h")),
+    add(manual("plan.commit", "plan", "Sprint commit", "1h")),
+    link("p1", "plan.ticket", "plan.triage"),
+    link("p2", "plan.triage", "plan.commit"),
+  ];
+
+  var WAVE_DEV = [
+    { op: "addNode", args: [phase("dev", "Development")] },
+    add(manual("dev.branch", "dev", "Cut branch", "10m")),
+    add(manual("dev.code", "dev", "Implement", "3d")),
+    add(manual("dev.pr", "dev", "Open PR", "15m")),
+    add(manual("dev.review", "dev", "Code review", "1d")),
+    add(manual("dev.rework", "dev", "Address feedback", "4h")),
+    add(manual("dev.merge", "dev", "Merge to main", "20m")),
+    link("p3", "plan.commit", "dev.branch"),
+    link("d1", "dev.branch", "dev.code"),
+    link("d2", "dev.code", "dev.pr"),
+    link("d3", "dev.pr", "dev.review"),
+    link("d4", "dev.review", "dev.rework"),
+    link("d5", "dev.rework", "dev.merge"),
+    // The retry loop: iteration 1 flies the arc, 2..n tick in place on the review node.
+    link("rework", "dev.rework", "dev.review", { loop: true, maxIterations: 4 }),
+  ];
+
+  var WAVE_BUILD = [
+    { op: "addNode", args: [phase("build", "Build & sign")] },
+    add(manual("build.compile", "build", "Build artifacts", "45m")),
+    add(manual("build.ios", "build", "Sign · iOS", "4h")),
+    add(manual("build.android", "build", "Sign · Android", "3h")),
+    add(manual("build.tv", "build", "Sign · Smart TV", "4h")),
+    link("d6", "dev.merge", "build.compile"),
+    // Three out-edges from one node IS the fan-out — there is no gateway syntax (D4).
+    link("b1", "build.compile", "build.ios"),
+    link("b2", "build.compile", "build.android"),
+    link("b3", "build.compile", "build.tv"),
+  ];
+
+  var WAVE_QA = [
+    { op: "addNode", args: [phase("qa", "QA & regression")] },
+    add(manual("qa.smoke", "qa", "QA smoke pass", "2h", { join: "all" })),
+    add(manual("qa.ios", "qa", "Regress · iOS", "2d")),
+    add(manual("qa.android", "qa", "Regress · Android", "2d")),
+    add(manual("qa.tv", "qa", "Regress · Smart TV", "3d")),
+    link("b4", "build.ios", "qa.smoke"),
+    link("b5", "build.android", "qa.smoke"),
+    link("b6", "build.tv", "qa.smoke"),
+    link("q1", "qa.smoke", "qa.ios"),
+    link("q2", "qa.smoke", "qa.android"),
+    link("q3", "qa.smoke", "qa.tv"),
+  ];
+
+  var WAVE_REL = [
+    { op: "addNode", args: [phase("rel", "Release")] },
+    add(manual("rel.gate", "rel", "Release sign-off", "3h", { join: "all" })),
+    add(manual("rel.ios", "rel", "Deploy · iOS", "2h")),
+    add(manual("rel.android", "rel", "Deploy · Android", "2h")),
+    add(manual("rel.tv", "rel", "Deploy · Smart TV", "3h")),
+    add(manual("rel.ga", "rel", "GA complete", "30m", { join: "all" })),
+    link("q4", "qa.ios", "rel.gate"),
+    link("q5", "qa.android", "rel.gate"),
+    link("q6", "qa.tv", "rel.gate"),
+    link("r1", "rel.gate", "rel.ios"),
+    link("r2", "rel.gate", "rel.android"),
+    link("r3", "rel.gate", "rel.tv"),
+    link("r4", "rel.ios", "rel.ga"),
+    link("r5", "rel.android", "rel.ga"),
+    link("r6", "rel.tv", "rel.ga"),
+  ];
+
+  // The three automation moments. Each set is a sibling fan-out — convex by construction,
+  // so condense() redirects the boundary edges and dedupes them with a weight.
+  var SIGN_SET = ["build.ios", "build.android", "build.tv"];
+  var SIGN_AUTO = automated("build.signer", "CI signing service", "45s");
+  var REG_SET = ["qa.ios", "qa.android", "qa.tv"];
+  var REG_AUTO = automated("qa.suite", "Automated regression", "12m");
+  var SHIP_SET = ["rel.ios", "rel.android", "rel.tv"];
+  var SHIP_AUTO = automated("rel.progressive", "Progressive delivery", "4m");
+
+  var collapseAllPhases = PHASES.map(function (id) { return { op: "collapse", args: [id] }; });
+  var expandAllPhases = PHASES.map(function (id) { return { op: "expand", args: [id] }; });
+
+  // ===========================================================================
+  // 2. The storyboard — four acts, one serializable op array (D8 + the M4 director ops)
+  // ===========================================================================
+
+  function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
+  function cam(target) { return { op: "camera", args: [target] }; }
+  function hold(ms) { return { op: "wait", ms: ms }; }
+  function spot(ids, variant, dim) {
+    return { op: "highlight", args: [{ nodes: ids, variant: variant, dim: !!dim, pulse: true }] };
+  }
+
+  var STEPS = [
+    // ---- ACT 1 — the pipeline appears --------------------------------------
+    { label: "assemble" },
+    cap("One release, five phases. Watch the pipeline assemble."),
+    cam({ node: "plan", k: 1.1, pad: 48, dur: 700 }),
+    hold(900),
+
+    cap("Planning — a ticket is filed, sized, and committed to a sprint."),
+    { op: "batch", steps: WAVE_PLAN, dur: 900 },
+    cam({ node: "plan", k: 1.15, pad: 44, dur: 800 }),
+    hold(800),
+
+    cap("Development — branch, implement, open a PR, review, merge."),
+    { op: "batch", steps: WAVE_DEV, dur: 1000 },
+    cam({ node: "dev", k: 0.8, pad: 40, dur: 900 }),
+    hold(900),
+
+    cap("Build & sign — one build, then one signing step per device type."),
+    { op: "batch", steps: WAVE_BUILD, dur: 900 },
+    cam({ node: "build", k: 1.15, pad: 44, dur: 800 }),
+    hold(800),
+
+    cap("QA — a smoke pass gates a regression run on all three device types."),
+    { op: "batch", steps: WAVE_QA, dur: 900 },
+    cam({ node: "qa", k: 1.1, pad: 44, dur: 800 }),
+    hold(800),
+
+    cap("Release — sign-off, a deploy per device type, then GA."),
+    { op: "batch", steps: WAVE_REL, dur: 900 },
+    cam({ node: "rel", k: 1.0, pad: 44, dur: 800 }),
+    hold(900),
+
+    { label: "overview" },
+    cap("Twenty-two steps. Fold the phases up and the chips roll up with them."),
+    // Pull all the way back FIRST: a collapse framed on one phase would fold the graph
+    // out from under a camera pinned where that phase used to be.
+    cam({ fit: true, pad: 44, dur: 800 }),
+    { op: "batch", steps: collapseAllPhases, dur: 900 },
+    cam({ fit: true, pad: 48, dur: 900 }),
+    hold(1600),
+    cap("Every step is done by a person: ≈12.4 days of hands-on work per release."),
+    hold(2000),
+
+    // ---- ACT 2 — one release, the manual way -------------------------------
+    { label: "run · manual" },
+    cap("Open them up and run one release the way it runs today."),
+    { op: "batch", steps: expandAllPhases, dur: 900 },
+    cam({ node: "plan", k: 1.1, pad: 44, dur: 800 }),
+    { op: "run.play", until: "plan.commit" },
+
+    cap("Development. Three days of writing code is the honest part of this pipeline."),
+    cam({ node: "dev", k: 0.8, pad: 40, dur: 800 }),
+    { op: "run.play", until: "dev.pr" },
+
+    spot(["dev.review", "dev.rework"], "warn"),
+    cap("Review round-trips on the dashed loop edge — capped at 3 of a possible 4."),
+    { op: "run.play", until: "dev.merge" },
+    { op: "clearHighlight" },
+
+    cap("Signing is manual, once per device type: 4h + 3h + 4h, then an all-join."),
+    cam({ node: "build", k: 1.15, pad: 44, dur: 800 }),
+    { op: "run.play", until: "qa.smoke" },
+
+    cap("Regression: three manual passes at three different speeds. The join waits."),
+    cam({ node: "qa", k: 1.1, pad: 44, dur: 800 }),
+    { op: "run.play", until: "rel.gate" },
+
+    cap("Sign-off, three hand-driven deploys, GA."),
+    cam({ node: "rel", k: 1.0, pad: 44, dur: 800 }),
+    { op: "run.play", until: "rel.ga" },
+    cap("Shipped — ≈12.4 days of hands-on work, and only three of them writing code."),
+    hold(2200),
+
+    // ---- ACT 3 — automation lands ------------------------------------------
+    { label: "automate" },
+    cap("Automation lands. Signing first."),
+    cam({ nodes: SIGN_SET, k: 1.25, pad: 64, dur: 800 }),
+    spot(SIGN_SET, "warn", true),
+    hold(1500),
+    { op: "condense", args: [SIGN_SET, SIGN_AUTO] },
+    { op: "highlight", args: [{ nodes: [SIGN_AUTO.id], variant: "ok" }] },
+    cap("Three manual signings — 11h of certificate wrangling — become one CI service: 45s."),
+    hold(2200),
+
+    cap("Now the part that actually hurts: seven device-days of manual regression."),
+    cam({ nodes: REG_SET, k: 1.2, pad: 64, dur: 800 }),
+    spot(REG_SET, "warn", true),
+    hold(1500),
+    { op: "condense", args: [REG_SET, REG_AUTO] },
+    { op: "highlight", args: [{ nodes: [REG_AUTO.id], variant: "ok" }] },
+    cap("One suite, run on every device type in parallel: 7d → 12m."),
+    hold(2200),
+
+    cap("And the three hand-driven deploys."),
+    cam({ nodes: SHIP_SET, k: 1.2, pad: 64, dur: 800 }),
+    spot(SHIP_SET, "warn", true),
+    hold(1400),
+    { op: "condense", args: [SHIP_SET, SHIP_AUTO] },
+    { op: "highlight", args: [{ nodes: [SHIP_AUTO.id], variant: "ok" }] },
+    cap("Progressive delivery rolls all three out behind one automated gate: 7h → 4m."),
+    hold(2000),
+    { op: "clearHighlight" },
+
+    // ---- ACT 4 — the same release, automated -------------------------------
+    { label: "re-run" },
+    cap("Same pipeline, same release. Run it again."),
+    cam({ node: "plan", k: 1.05, pad: 44, dur: 800 }),
+    { op: "run.seek", ms: 0 },
+    hold(900),
+    { op: "run.play", until: "dev.merge" },
+
+    // The shared prefix is deliberately just as slow: writing the code still takes three
+    // days. It is everything AFTER the merge that stopped costing human time.
+    cap("Signing, regression and delivery were 7.7 days of hand-work. Now: about 17 minutes."),
+    cam({ nodes: ["build", "qa", "rel"], pad: 40, dur: 900 }),
+    { op: "run.play", until: "rel.ga" },
+
+    { label: "wrap-up" },
+    cam({ node: "rel.ga", k: 1.5, pad: 80, dur: 800 }),
+    { op: "highlight", args: [{ nodes: ["rel.ga"], variant: "ok", pulse: true }] },
+    cap("GA — signing, regression and delivery took seconds instead of days."),
+    hold(2400),
+    { op: "clearHighlight" },
+    cam({ fit: true, pad: 44, dur: 800 }),
+    { op: "batch", steps: collapseAllPhases, dur: 900 },
+    cam({ fit: true, pad: 48, dur: 900 }),
+    cap("≈12.4d → ≈4.6d of hands-on work. What is left is mostly writing the code."),
+    hold(2600),
+  ];
+
+  // Where the interesting assertions live, resolved by label so edits above cannot rot them.
+  var indexOfLabel = function (name) {
+    for (var i = 0; i < STEPS.length; i++) if (STEPS[i].label === name) return i;
+    return -1;
+  };
+
+  // ===========================================================================
+  // 3. Run pacing (D4 opts — never engine internals)
+  //
+  // `dwell` prices a step's screen time off its DECLARED duration, on a compressive
+  // curve so 10m and 3d read as visibly different beats rather than 4320× apart —
+  // except automated steps, which are deliberately a flat blink. That is the whole
+  // point of act 4: the manual steps still cost what they cost, and the automated
+  // ones simply stop taking time.
+  // ===========================================================================
+
+  var RUN_OPTS = {
+    iterations: { rework: 3 },      // 3 of the edge's max 4
+    hopMs: 150,
+    rates: [
+      { t: 0, scope: "qa.android", factor: 1.7 },   // one regression branch sprints,
+      { t: 0, scope: "qa.ios", factor: 1.25 },      // one is middling, Smart TV crawls
+    ],
+    dwell: function (sec, ctx) {
+      var n = ctx.node || {};
+      var mode = n.data && n.data.mode;
+      if (mode === "automated" || mode === "auto") return 130;
+      if (sec == null) return 320;
+      var f = Math.pow(sec / Math.max(ctx.maxSec, 1), 0.4);
+      return 260 + 1100 * f;
+    },
+  };
+
+  // ===========================================================================
+  // 4. Mount
+  // ===========================================================================
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mChapter = $("#m-chapter"), mTime = $("#m-time"), mTokens = $("#m-tokens");
+  var mLoop = $("#m-loop"), mJoin = $("#m-join"), mTotal = $("#m-total"), tTotal = $("#t-total");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 24, ranksep: 44 },
+      animation: { duration: 480, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvSDLC = { done: true, errors: errors, checks: {} };
+    return;
+  }
+
+  var sb = g.storyboard();
+  window.__sdlc = { g: g, sb: sb, steps: STEPS };   // handle for the headless check
+
+  // ---- chapter rail ---------------------------------------------------------
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    b.addEventListener("click", function () { jumpTo(l.label); });
+    railEl.appendChild(b);
+  });
+
+  function transportClick(act) {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="' + act + '"]');
+    if (btn) { btn.click(); return true; }
+    return false;
+  }
+
+  /** Chapter jump. The transport owns the play/pause flag, so pause THROUGH it (its own
+   *  button) and then move the story head — otherwise the bar would still read "playing". */
+  function jumpTo(label) {
+    var tl = g.timeline();
+    if (tl && tl.playing) transportClick("play");   // the play button is a toggle
+    Promise.resolve(sb.seek(label)).then(paintRail, function (err) {
+      errors.push("seek: " + String((err && err.message) || err));
+    });
+  }
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+    mChapter.textContent = (pos.label || "—") + " ";
+    var em = document.createElement("em");
+    em.textContent = pos.index + "/" + pos.total;
+    mChapter.appendChild(em);
+  }
+
+  // ---- readouts, sampled on the SHARED ticker (D1) --------------------------
+
+  var JOIN_ORDER = [
+    { id: "qa.smoke", name: "sign" },
+    { id: "rel.gate", name: "regress" },
+    { id: "rel.ga", name: "deploy" },
+  ];
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  var obs = {
+    fanOutTokens: 0, branchSpread: 0, branchProgress: null,
+    joinNeeded: 0, joinArrivedAtFire: null, loopIteration: 0, loopMax: 0, loopBadge: "",
+    totalSeen: [],
+  };
+  var FAN = { "qa.ios": 1, "qa.android": 1, "qa.tv": 1, q1: 1, q2: 1, q3: 1 };
+
+  var totalLabel = function () {
+    var el = document.querySelector("#pipe .smv-totalbar-label");
+    return el ? el.textContent : "";
+  };
+  var loopBadgeText = function () {
+    var el = document.querySelector("#pipe .smv-loop-badge");
+    return el ? el.textContent : "";
+  };
+  var chipOf = function (id) {
+    var el = document.querySelector('#pipe .smv-node[data-id="' + id + '"] text.smv-chip');
+    return el ? el.textContent : null;
+  };
+  var nodeEls = function () { return document.querySelectorAll("#pipe .smv-node"); };
+  var nodeIds = function () {
+    var out = [], list = nodeEls();
+    for (var i = 0; i < list.length; i++) out.push(list[i].getAttribute("data-id"));
+    return out;
+  };
+  var presentCount = function (ids) {
+    var have = nodeIds();
+    return ids.filter(function (s) { return have.indexOf(s) !== -1; }).length;
+  };
+  /** Spec-level presence — the end of the story leaves every phase collapsed, so the DOM
+   *  legitimately holds five boxes and nothing else. The store is the truth about what the
+   *  condenses did; the DOM is the truth about what is drawn. */
+  var inSpec = function (ids) {
+    return ids.filter(function (id) { return !!g.node(id); }).length;
+  };
+
+  /** Any NaN/Infinity that reached an attribute or a text node under the mount root. */
+  function scanNaN() {
+    var bad = [], all = document.querySelectorAll("#pipe *");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      for (var a = 0; a < el.attributes.length; a++) {
+        var at = el.attributes[a];
+        if (/NaN|Infinity/.test(at.value)) bad.push((el.getAttribute("class") || el.nodeName) + "@" + at.name + "=" + at.value);
+      }
+      if (el.children.length === 0 && /NaN|Infinity/.test(el.textContent || "")) {
+        bad.push((el.getAttribute("class") || el.nodeName) + "#text=" + el.textContent);
+      }
+    }
+    return bad;
+  }
+
+  function sampleFrame() {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+
+    var inFan = 0;
+    for (var i = 0; i < st.tokens.length; i++) if (FAN[st.tokens[i].at.id]) inFan++;
+    if (inFan > obs.fanOutTokens) obs.fanOutTokens = inFan;
+
+    var A = st.nodes["qa.ios"], B = st.nodes["qa.android"], C = st.nodes["qa.tv"];
+    if (A && B && C && C.progress > 0 && C.progress < 1) {
+      var p = [A.progress, B.progress, C.progress];
+      var spread = Math.max(p[0], p[1], p[2]) - Math.min(p[0], p[1], p[2]);
+      if (spread > obs.branchSpread) {
+        obs.branchSpread = spread;
+        obs.branchProgress = { ios: p[0], android: p[1], tv: p[2], t: run.time() };
+      }
+    }
+
+    var lp = st.loops.rework;
+    if (lp) {
+      if (lp.max > obs.loopMax) obs.loopMax = lp.max;
+      if (lp.iteration > obs.loopIteration) {
+        obs.loopIteration = lp.iteration;
+        obs.loopBadge = loopBadgeText() || obs.loopBadge;
+      }
+    }
+
+    var shown = null;
+    for (var k = 0; k < JOIN_ORDER.length; k++) {
+      var j = st.joins[JOIN_ORDER[k].id];
+      if (!j) continue;
+      shown = { name: JOIN_ORDER[k].name, j: j };
+      if (j.needed > 1) { obs.joinNeeded = j.needed; if (j.fired && obs.joinArrivedAtFire == null) obs.joinArrivedAtFire = j.arrived; }
+      if (!j.fired) break;
+    }
+
+    mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
+    mTokens.textContent = String(st.tokens.length);
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/4";
+    mJoin.textContent = shown
+      ? shown.name + " " + shown.j.arrived + "/" + shown.j.needed + (shown.j.fired ? " ✓" : "")
+      : "—";
+    var t = totalLabel();
+    if (t && mTotal.textContent !== t) {
+      mTotal.textContent = t;
+      if (obs.totalSeen[obs.totalSeen.length - 1] !== t) obs.totalSeen.push(t);
+    }
+  }
+  g.ticker.add(sampleFrame);
+
+  // ---- story wiring ---------------------------------------------------------
+
+  var AT_SIGN = indexOfLabel("automate");
+  var checks = {};
+  var storyDone = false;
+
+  sb.on("step", function (ev) {
+    paintRail();
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+    // Snapshot the payoff the moment each condense commits.
+    var step = STEPS[ev.index];
+    if (step && step.op === "condense") {
+      var merged = step.args[1].id;
+      checks[merged] = {
+        chip: chipOf(merged),
+        sourcesLeft: presentCount(step.args[0]),
+        nodes: nodeEls().length,
+        total: totalLabel(),
+      };
+    }
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () {
+    storyDone = true;
+    paintRail();
+    phaseEl.textContent = "story complete";
+    tTotal.setAttribute("data-hot", "");
+  });
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 60000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 40);
+      })();
+    });
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    if (!transportClick("play")) sb.play();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "regression fan-out tokens   " + checks.fanOutTokens + "\n" +
+      "branch progress spread      " + JSON.stringify(checks.branchProgress) + "\n" +
+      "all-join fired at           " + checks.joinArrivedAtFire + "/" + checks.joinNeeded + "\n" +
+      "review loop                 " + checks.loopIteration + " of max " + checks.loopMax + "  (" + checks.loopBadge + ")\n" +
+      "condense · signing          " + JSON.stringify(checks["build.signer"]) + "\n" +
+      "condense · regression       " + JSON.stringify(checks["qa.suite"]) + "\n" +
+      "condense · delivery         " + JSON.stringify(checks["rel.progressive"]) + "\n" +
+      "total-duration bar          " + JSON.stringify(checks.totalSeen) + "\n" +
+      "scrub back to “automate”    " + JSON.stringify(checks.scrubBack) + "\n" +
+      "scrub forward to the end    " + JSON.stringify(checks.scrubForward) + "\n" +
+      "NaN in DOM                  " + (checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
+      "errors                      " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  /** The headless verification path: play the whole story, scrub back before the first
+   *  condense, then forward to the end again — every structural change replays from
+   *  snapshots (G2). */
+  async function auto() {
+    await sleep(300);              // mount's initial fit gets one beat
+    start();
+    await waitFor(function () { return storyDone; }, 180000);
+    await sleep(600);
+
+    Object.assign(checks, {
+      fanOutTokens: obs.fanOutTokens,
+      branchProgress: obs.branchProgress,
+      branchSpread: obs.branchSpread,
+      joinNeeded: obs.joinNeeded,
+      joinArrivedAtFire: obs.joinArrivedAtFire,
+      loopIteration: obs.loopIteration,
+      loopMax: obs.loopMax,
+      loopBadge: obs.loopBadge || loopBadgeText(),
+      totalSeen: obs.totalSeen,
+    });
+
+    phaseEl.textContent = "scrubbing back to “automate”…";
+    await sb.seek("automate");
+    await sleep(1100);
+    var MERGED = [SIGN_AUTO.id, REG_AUTO.id, SHIP_AUTO.id];
+    var MANUAL = SIGN_SET.concat(REG_SET, SHIP_SET);
+    checks.scrubBack = {
+      label: sb.position().label,
+      index: sb.position().index,
+      manualStepsBack: inSpec(MANUAL),        // all 9 device-typed manual steps are back
+      mergedGone: inSpec(MERGED),             // and none of the automated ones exist yet
+      drawn: nodeEls().length,
+      chips: [chipOf("build.ios"), chipOf("qa.tv"), chipOf("rel.tv")],
+      total: totalLabel(),
+    };
+
+    phaseEl.textContent = "scrubbing forward to the end…";
+    await sb.seek(STEPS.length);
+    await sleep(1200);
+    checks.scrubForward = {
+      index: sb.position().index,
+      done: sb.position().done,
+      manualStepsGone: inSpec(MANUAL),
+      mergedPresent: inSpec(MERGED),
+      collapsedPhases: g.viewstate.collapsed.size,
+      drawn: nodeEls().length,             // five collapsed phase boxes
+      total: totalLabel(),
+    };
+
+    checks.nan = scanNaN();
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvSDLC = { done: true, errors: errors, checks: checks, atSign: AT_SIGN };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      checks.nan = checks.nan || scanNaN();
+      writeReport();
+      window.__smvSDLC = { done: true, errors: errors, checks: checks };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>
