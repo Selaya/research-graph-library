@@ -890,7 +890,8 @@ vp.target                                 // getter: where a live tween is headi
 - `g.cues() → [{kind:"label"|"caption", at, label?, text?, index}]` — absolute ms offsets
   off the same `durOf()` table the scrubber reads (D12); truthful under `captions:false`.
 - **`durOf(step)`** replaces NOMINAL_STEP_MS: `step.dur` wins; else label 0, wait its ms,
-  camera `args[0].dur ?? 600`, highlight/clearHighlight/caption 0, `run.step`/`run.seek` 0
+  camera `args[0].dur ?? 600`, highlight/clearHighlight/caption 0 (`props` joined the
+  zero list in M4d), `run.step`/`run.seek` 0
   (instantaneous: nothing to await), condense/split `CHOREO_MS` (the CONDENSE_PHASES sum,
   900), batch max of members (one commit, parallel), default `baseDuration`.
   `run.play` slices still come from the run's own clock.
@@ -1115,3 +1116,107 @@ rendered, M4c publishes: `--out story.mp4` (the ffmpeg pipe), `--cues` (three fo
   not just `ffmpeg -version`: the pipe hardcodes `-c:v libx264`, and a build without it
   (Fedora/RHEL `ffmpeg-free`) answers `-version` perfectly well and then fails the encode —
   which is an environment the recorder cannot fix, so it must skip, with the reason named.
+
+## M4d (voice-over fitting · property overrides · the pulse) — landed
+
+The half of the loop M4c left open. `--cues` tells a narrator *when* each beat is; M4d
+takes the timestamps the read actually landed on and moves the story to them. Plus the two
+small core additions the milestone reserved: a per-step `--smv-*` override layer (D16) and
+an emphasis pulse (D17). Both stay inside channels that already exist, and together they
+cost ~0.6KB gzip of the core budget.
+
+### `bin/smv-fit.mjs` — VO-first hold fitting
+
+```
+smv-fit script.sb.json --vo marks.json [-o fitted.sb.json] [--base 350]
+```
+
+Pure JSON→JSON, no browser, no `src/` import, zero bundle cost. `marks.json` is either
+`{"intro":0,"focus":4200}` (key order is the file's, which `JSON.parse` preserves) or
+`[{"label":…,"ms":…}]`. Exports `durOf`, `labelOffsets`, `parseMarks`, `fit`, `parseArgs`
+so the whole transform is testable without a CLI.
+
+- **The pricing is a copy, and the copy is gated.** `durOf()` here is `src/index.js`'s
+  table verbatim — a fit computed off a different clock than the scrubber, the cue sheet
+  and the frame renderer read would be worse than no fit. It cannot be *imported*: the
+  library's `durOf` is a closure over `baseDuration` and the run transport inside `mount()`.
+  So `test/fit-cli.test.js` mounts `test/fixtures/record-demo.{spec,sb}.json` through the
+  DOM shim and asserts `labelOffsets(steps)` equals the `kind:"label"` half of a real
+  `g.cues()`, plus totals against `g.timeline().total`. That test is the seam's contract.
+- **Anchors.** The story start is an implicit anchor at 0ms, so the run-up to the first
+  marked label is fitted like any other segment (and a mark on a label that is *not* step 0
+  works without special-casing). Marks are resolved to label indices and re-ordered by
+  where they sit in the SCRIPT, not by the marks file, then checked monotonic against that
+  order — a VO tool's key order is the narrator's.
+- **Per segment:** `floor` = what the segment's non-`wait` steps cost, the shortest it can
+  possibly be; `budget` = the requested gap minus that floor, handed to the segment's waits
+  in proportion to what they already hold (integer shares, remainder on the last, so the
+  sum is exactly `budget`). A segment with no wait gets one inserted immediately before the
+  label. That is also what makes the transform **idempotent**: a re-fit finds a wait holding
+  exactly `budget`, asks for `budget` again, and writes it back unchanged (proportional
+  shares of `T` out of a total that is already `T` are the same integers).
+- **The walk is backwards**, so an inserted wait never shifts an anchor index not yet used.
+  Steps are mutated in place on a fresh `JSON.parse`, so key order and step identity
+  survive; the only key ever added to an existing step is `ms` on a wait that declared
+  neither `ms` nor `args[0]`. A wait carrying `dur` is repriced on `dur` too, because that
+  is the field `durOf()` reads first.
+- **Refusals, all exit 1 before anything is written:** a mark naming a label the storyboard
+  does not have (with the known labels listed), marks that run backwards against script
+  order, a negative or non-numeric ms, a duplicate mark, and a gap smaller than the
+  segment's floor — named with the label, the floor and the gap asked for. Also `run.play`:
+  its length is measured off the compiled run transport inside the browser, so a segment
+  containing one cannot be priced statically and the CLI says so rather than guessing.
+- Unmarked labels ride along on whatever the fit did around them; everything after the last
+  marked label is untouched. The script goes to `-o` or to stdout (report on stderr, so the
+  transform pipes).
+
+### `{"op":"props"}` — the override layer (D16)
+
+`g.props({id: {"--smv-*": value}})`, `g.props(null)` to clear; `"props"` joins OPS/NAMED and
+`durOf()`'s zero list. State lives in the director (`props` Map + a `wroteP` shadow), which
+is why it snapshots and restores with emphasis for free.
+
+- **It rides the style commit, not a second write path.** `director.propsLayer()` is read at
+  the two `renderer.styleCommit()` call sites (`relayout` and the new `styleNow()` behind
+  `g.style()`/`g.props()`) and nowhere else — it rolls its own shadow forward, so exactly one
+  read per commit is the contract. `render.js` merges it over `styleFn(n)` per node, and
+  applies it to edges too (the user style function is node-scoped, §5.6). Because
+  `styleCommit` runs *before* the elements exist, a re-added id's fresh `<g>` gets the
+  override out of `nodeStyle` at `ensureNode()` — no commit hook needed, unlike `data-emph`.
+- **A dropped key has to arrive as an explicit `null`.** `setProps()` only removes what it
+  is handed, so an inline property would outlive the override that wrote it; `propsLayer()`
+  therefore starts every id with nulls for the keys the LAST layer set. In `mergeProps` a
+  null removes the property only when the style function is not setting the same key — that
+  is what makes `g.props(null)` a return to the styled picture rather than a stripped one.
+  (`false` is the caller's own "remove this" and does clobber the style function.)
+- Validation is D7's: only `--smv-*` keys, and the whole map is validated before anything is
+  written, so a rejected map leaves the previous layer standing.
+- **`host.restore()` now restores the director BEFORE `relayout()`**, where it used to run
+  after. The property layer is read by the style commit *inside* relayout, so restoring it
+  afterwards would leave the outgoing step's overrides on screen for a whole commit.
+  Emphasis is re-asserted off the `"commit"` event either way, so moving the whole call up
+  costs nothing. The camera stays after relayout, for the reason it always was.
+
+### `highlight({pulse: true})` — the attention pulse (D17)
+
+Spelled as a modifier, not a fifth `variant`: the four variants are colours, and a warning
+that breathes is still a warning, so `pulse` is orthogonal to `variant` exactly like `dim`.
+
+- The director registers ONE callback on the shared ticker (D1) and writes ONE root custom
+  property, `--smv-pulse` — `round(((1 - cos(2π·phase)) / 2) · 12) / 12` over a 1400ms
+  cycle. Bucketed on purpose: a raw float would make a frame's markup depend on the exact
+  tick arithmetic, and 12 stops quantize with the frame loop. The CSS is one changed rule,
+  `stroke-width: calc(2.5px + var(--smv-pulse, 0) * 2px)` on the existing `[data-emph]`
+  selectors, so an unset property is byte-for-byte the picture M4a shipped.
+- **Not a CSS animation, deliberately.** `data-smv-record` (D15) exists to kill wall-clock
+  transitions; a pulse that needed it would be a pulse that could not be *tested* under the
+  manual ticker either. Under manual ticks the same tick sequence produces identical DOM —
+  `test/director.test.js` asserts that against a second director, and `test/e2e-m4.mjs`
+  proves it end to end: the record fixture's highlight now carries `pulse:true`, so the 33
+  byte-identical frames of the determinism gate include it, and frames 12/13 (1.2s/1.3s — a
+  `wait` where nothing else is moving) must *differ*, which is the pulse doing per-frame
+  work inside a gate that would have caught any nondeterminism in it.
+- It comes off the ticker on `clearHighlight()`, on a restore into a snapshot without one,
+  and on `destroy()` (before the `destroyed` flag, or the guard would block its own
+  teardown), so the rAF loop can idle. G9: under reduced motion it never registers at all
+  and holds the peak statically — the motion shrinks, the emphasis is not skipped.

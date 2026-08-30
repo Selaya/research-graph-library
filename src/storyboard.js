@@ -13,6 +13,8 @@ const OPS = new Set([
   // M4 director ops — method-shaped like the mutations, so applyStep's default branch
   // dispatches them straight to g.camera/g.highlight/g.clearHighlight/g.caption.
   "camera", "highlight", "clearHighlight", "caption",
+  // M4d — the per-step --smv-* override layer (D16); method-shaped like the rest.
+  "props",
 ]);
 
 function validate(steps) {
@@ -179,6 +181,7 @@ const NAMED = {
   update: "update", expand: "expand", collapse: "collapse", condense: "condense", batch: "batch",
   run: "run.play", runStep: "run.step", runSeek: "run.seek",
   camera: "camera", highlight: "highlight", clearHighlight: "clearHighlight", caption: "caption",
+  props: "props",
 };
 
 export function timeline(_g) {

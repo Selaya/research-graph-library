@@ -121,6 +121,12 @@ test("camera target: an unknown node id resolves to 'stay put', never the origin
 function makeEl(tag) {
   return {
     tag, children: [], parent: null, attrs: {}, textContent: "",
+    style: {
+      _p: {},
+      setProperty(k, v) { this._p[k] = v; },
+      removeProperty(k) { delete this._p[k]; },
+      getPropertyValue(k) { return this._p[k] ?? ""; },
+    },
     setAttribute(k, v) { this.attrs[k] = String(v); },
     getAttribute(k) { return this.attrs[k] ?? null; },
     removeAttribute(k) { delete this.attrs[k]; },
@@ -132,20 +138,37 @@ function makeEl(tag) {
   };
 }
 
+/** The manual half of src/anim.js's ticker: enough clock for the pulse, and observable —
+ *  `cbs.size` IS the "can the rAF loop go idle again?" question (D1/D17). */
+function makeTicker() {
+  const cbs = new Set();
+  let t = 0;
+  return {
+    cbs,
+    now: () => t,
+    add: (fn) => cbs.add(fn),
+    remove: (fn) => cbs.delete(fn),
+    tick(ms) { t += ms; for (const fn of [...cbs]) fn(t); },
+  };
+}
+
 function makeHost(extra = {}) {
   const doc = { createElement(t) { const e = makeEl(t); e.ownerDocument = doc; return e; } };
   const root = makeEl("div");
   root.ownerDocument = doc;
   const calls = [];
+  const ticker = makeTicker();
   const dir = createDirector({
     root,
+    ticker,
     lastLayout: () => ({ nodes: { a: {}, b: {} }, edges: { e1: {} } }),
     emphasize: (id, v) => calls.push(["emph", id, v]),
     dim: (id, v) => calls.push(["dim", id, v]),
     ...extra,
   });
   const capEl = () => root.children.find((c) => c.attrs.class === "smv-caption") || null;
-  return { root, dir, calls, capEl };
+  const pulse = () => root.style.getPropertyValue("--smv-pulse");
+  return { root, dir, calls, capEl, ticker, pulse };
 }
 
 test("highlight writes the variant onto the selection and dim:true dims everything else drawn", () => {
@@ -263,6 +286,145 @@ test("caption is inert without a document (no ownerDocument on the root)", () =>
   assert.doesNotThrow(() => dir.caption("nobody sees this"));
   assert.equal(root.children.length, 0);
   assert.equal(dir.captionText(), "nobody sees this");
+});
+
+// ---------------------------------------------------------------------------
+// M4d — the property override layer (D16) and the ticker-driven pulse (D17).
+// ---------------------------------------------------------------------------
+
+test("props(): the layer the renderer merges, with dropped keys nulled out (D16)", () => {
+  const { dir } = makeHost();
+  dir.props({ a: { "--smv-fill": "#7c5cff" }, e1: { "--smv-stroke": "#f5a" } });
+  assert.deepEqual(
+    [...dir.propsLayer()],
+    [["a", { "--smv-fill": "#7c5cff" }], ["e1", { "--smv-stroke": "#f5a" }]],
+  );
+  // Nothing changed since the last commit: the same values go out again, harmlessly.
+  dir.props({ a: { "--smv-fill": "#7c5cff" }, e1: { "--smv-stroke": "#f5a" } });
+  assert.deepEqual([...dir.propsLayer()].map(([id]) => id), ["a", "e1"]);
+
+  // Replace, not accumulate: e1 drops out entirely and a swaps which key it sets, so both
+  // of the old properties have to arrive as null or they would outlive their override.
+  dir.props({ a: { "--smv-stroke": "#0f0" } });
+  assert.deepEqual([...dir.propsLayer()], [
+    ["a", { "--smv-fill": null, "--smv-stroke": "#0f0" }],
+    ["e1", { "--smv-stroke": null }],
+  ]);
+
+  dir.props(null);
+  assert.deepEqual([...dir.propsLayer()], [["a", { "--smv-stroke": null }]]);
+  assert.equal(dir.propsLayer(), null, "…and once nothing is written, there is no layer");
+});
+
+test("props(): only --smv-* keys, and a rejected map leaves the previous layer standing (D7)", () => {
+  const { dir } = makeHost();
+  dir.props({ a: { "--smv-fill": "red" } });
+  dir.propsLayer();
+  assert.throws(
+    () => dir.props({ a: { "--smv-fill": "blue" }, b: { fill: "blue" } }),
+    /props only sets --smv-\* properties \(D7\): "fill" on "b" is not one/,
+  );
+  assert.deepEqual(
+    [...dir.propsLayer()],
+    [["a", { "--smv-fill": "red" }]],
+    "the layer is exactly what it was: the good half of a rejected map was not written either",
+  );
+  assert.deepEqual(dir.snapshot().props, [["a", { "--smv-fill": "red" }]], "the old layer survives");
+});
+
+test("props() round-trips through snapshot/restore like emphasis (G2)", () => {
+  const { dir } = makeHost();
+  dir.props({ a: { "--smv-fill": "red" } });
+  dir.propsLayer();
+  const snap = dir.snapshot();
+  dir.props({ b: { "--smv-fill": "blue" } });
+  dir.propsLayer();
+  dir.restore(snap);
+  assert.deepEqual([...dir.propsLayer()], [["b", { "--smv-fill": null }], ["a", { "--smv-fill": "red" }]]);
+});
+
+test("pulse: rides the shared ticker in quantized buckets, and the same ticks give the same DOM (D1/D17)", () => {
+  const { dir, ticker, pulse } = makeHost();
+  assert.equal(pulse(), "", "nothing on the root until something pulses");
+
+  dir.highlight({ nodes: ["a"], pulse: true });
+  assert.equal(ticker.cbs.size, 1, "the pulse registered with the one shared clock");
+  assert.equal(pulse(), "0", "t=0 is the trough");
+
+  const seen = [];
+  for (let i = 0; i < 12; i++) { ticker.tick(100); seen.push(pulse()); }
+  // 1400ms cycle, 12 buckets: every value is k/12, and it climbs to the peak and back.
+  for (const v of seen) assert.ok(Number.isInteger(Number(v) * 12), `bucketed: ${v}`);
+  assert.equal(Math.max(...seen.map(Number)), 1, "reaches the peak");
+  assert.ok(seen.some((v) => Number(v) > 0 && Number(v) < 1), "…through intermediate stops");
+
+  // Determinism: a second director fed the identical tick sequence writes the identical
+  // strings. That is what makes a frame capture reproducible without a CSS kill-switch.
+  const other = makeHost();
+  other.dir.highlight({ nodes: ["a"], pulse: true });
+  const again = [];
+  for (let i = 0; i < 12; i++) { other.ticker.tick(100); again.push(other.pulse()); }
+  assert.deepEqual(again, seen);
+});
+
+test("pulse: unregisters on clearHighlight, on a restore that has none, and on destroy", () => {
+  const { dir, ticker, pulse } = makeHost();
+  dir.highlight({ nodes: ["a"], pulse: true });
+  const snap = dir.snapshot();
+  assert.equal(snap.emphasis.pulse, true, "it is snapshotted state like everything else here");
+
+  dir.clearHighlight();
+  assert.equal(ticker.cbs.size, 0, "the rAF loop can go idle again");
+  assert.equal(pulse(), "", "and the property is off the root");
+
+  dir.restore(snap);
+  assert.equal(ticker.cbs.size, 1, "a restore brings it back");
+  dir.restore({ emphasis: { emph: [["a", "focus"]], dim: [] }, caption: null, props: [] });
+  assert.equal(ticker.cbs.size, 0, "…and a snapshot without one takes it away");
+
+  dir.highlight({ nodes: ["a"], pulse: true });
+  dir.destroy();
+  assert.equal(ticker.cbs.size, 0, "destroy() never leaves a callback on the clock");
+  assert.equal(pulse(), "");
+});
+
+test("pulse: replaced by a non-pulsing highlight, it comes off the clock with the old emphasis", () => {
+  const { dir, ticker, pulse } = makeHost();
+  dir.highlight({ nodes: ["a"], pulse: true });
+  assert.equal(ticker.cbs.size, 1);
+  dir.highlight({ nodes: ["b"] }); // replace-not-accumulate applies to the modifier too
+  assert.equal(ticker.cbs.size, 0, "the new highlight does not pulse, so nothing stays registered");
+  assert.equal(pulse(), "", "and the property came off the root");
+});
+
+test("pulse: re-rendering the same instant writes the same value (record-mode double render)", () => {
+  // The frame renderer evaluates a tick, drains microtasks, then may pump extra zero-length
+  // turns before the screenshot — the intensity must be a function of the clock, not of how
+  // many times the callback ran.
+  const { dir, ticker, pulse } = makeHost();
+  dir.highlight({ nodes: ["a"], pulse: true });
+  ticker.tick(250);
+  const v = pulse();
+  ticker.tick(0);
+  ticker.tick(0);
+  assert.equal(pulse(), v, "a zero-length tick never moves the pulse");
+});
+
+test("pulse: a plain highlight never registers, and an empty selection has nothing to pulse", () => {
+  const { dir, ticker } = makeHost();
+  dir.highlight({ nodes: ["a"] });
+  assert.equal(ticker.cbs.size, 0);
+  dir.highlight({ nodes: [], pulse: true });
+  assert.equal(ticker.cbs.size, 0);
+});
+
+test("G9: reduced motion holds the pulse at its peak instead of dropping the emphasis", () => {
+  const { dir, ticker, pulse } = makeHost({ reduced: true });
+  dir.highlight({ nodes: ["a"], pulse: true });
+  assert.equal(ticker.cbs.size, 0, "no per-frame work at all");
+  assert.equal(pulse(), "1", "…but the state is still there, statically");
+  dir.clearHighlight();
+  assert.equal(pulse(), "");
 });
 
 test("destroy() removes the overlay and stops any further rendering", () => {

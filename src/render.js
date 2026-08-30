@@ -199,6 +199,23 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     }
   }
 
+  /** M4d/D16 — the director's per-step override layer sits ON TOP of the user style
+   *  function: same --smv-* channel (D7), last writer wins.
+   *
+   *  `null` in the layer means "there is no override on this key any more" — the director
+   *  emits one for every key its PREVIOUS layer set, because setProps() only removes what
+   *  it is handed and an inline property would otherwise outlive the override that wrote
+   *  it. So a null removes the property only when the style function is not setting the
+   *  same key; when it is, that value shows through again, which is what makes
+   *  `g.props(null)` a return to the styled picture rather than a stripped one. (`false`
+   *  is the user's own "remove this", and does clobber the style function.) */
+  function mergeProps(base, over) {
+    if (!over) return base || null;
+    const out = { ...base };
+    for (const k in over) if (over[k] != null || !(base && k in base)) out[k] = over[k];
+    return out;
+  }
+
   function setData(el, key, value) {
     if (value == null || value === false || value === "") el.removeAttribute(key);
     else el.setAttribute(key, value === true ? "" : String(value));
@@ -253,6 +270,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     const reversed = (like && (like.reversed || like.reversedEdgeIds)) || new Set();
     const styleFn = like && typeof like.style === "function" ? like.style : null;
     const sizes = (like && like.sizes) || {};
+    const over = (like && like.props) || null;
 
     for (const [id, n] of nodes) {
       const w = (sizes[id] && sizes[id].w) || NODE_MAX_W;
@@ -263,7 +281,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
         count: n.count > 0 ? n.count : null,
         depth: n.depth || 0,
         text: truncate(String(n.label ?? id), Math.max(8, w - 2 * NODE_PAD_X)),
-        props: styleFn ? styleFn(n) : null,
+        props: mergeProps(styleFn ? styleFn(n) : null, over && over.get(id)),
       });
       const e = nodeEls.get(id);
       if (e) applyNodeStyle(id, e);
@@ -279,7 +297,8 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
         weight,
         mode: ed.data && ed.data.mode,
         label,
-        props: null, // the user style function is node-scoped (§5.6)
+        // The user style function is node-scoped (§5.6); the director's layer is not.
+        props: (over && over.get(id)) || null,
       });
       const e = edgeEls.get(id);
       if (e) applyEdgeStyle(id, e);

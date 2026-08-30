@@ -4,14 +4,15 @@ How to write a director script — a storyboard that drives the camera, highligh
 captions as well as the graph — how to play it, and how to render it to an mp4 (or a frame
 sequence, a cue sheet, a chapter list) with `smv-record`, the deterministic frame-by-frame
 renderer (§3). Screen-recording a live tab (§4) is still the fastest way to a rough take;
-it is just not reproducible. §5 is the matching still image.
+it is just not reproducible. §5 is the matching still image, and §6 fits the script's holds
+to a voice-over you have already recorded.
 
-Design background: PLAN.md D12–D15 and §5.7; module contracts in INTERNALS.md (M4).
+Design background: PLAN.md D12–D17 and §5.7; module contracts in INTERNALS.md (M4).
 
 ## 1. Writing a director script
 
 A director script is an ordinary storyboard (PLAN §5.5): a serializable JSON op array.
-M4 adds four ops and one field. Nothing here needs authored JS — the array is the whole
+M4 adds five ops and one field. Nothing here needs authored JS — the array is the whole
 artifact, and `smv-pack --storyboard` ships it.
 
 ### The op reference
@@ -51,6 +52,28 @@ you never clear the previous one first.
 it into a spotlight: everything else drops to 28% opacity. Highlights survive relayouts,
 expands and backward scrubs — they are state, not a flash.
 
+`pulse: true` adds a gentle attention beat to whatever is emphasised — a 1.4s breath on
+the stroke. It is a *modifier*, not a fifth variant, so it stacks with the colour you
+picked (`{"variant": "warn", "pulse": true}` is a warning that breathes). It rides the same
+shared clock every other moving thing does, in quantized steps, so it records
+frame-perfectly like the rest — no CSS animation, nothing for `smv-record` to switch off.
+Under `prefers-reduced-motion` it holds still at full strength instead of disappearing.
+
+**`props`** — override `--smv-*` custom properties on specific elements for a beat.
+
+```json
+{ "op": "props", "args": [{ "clean": { "--smv-fill": "#7c5cff" }, "e1": { "--smv-stroke": "#f5a" } }] }
+{ "op": "props", "args": [null] }
+```
+
+Keyed by node **or edge** id, and layered *over* the mount's `style()` function, so a
+script can recolour one element for one shot without the mount owning a style function
+that knows about the story. Replace-not-accumulate like `highlight` (one call is the whole
+layer), and state like it too: snapshotted, restored by a backward scrub, and re-applied to
+a node that leaves and comes back. `args:[null]` clears the layer and the styled picture
+returns — clearing an override does not strip what `style()` was already setting. Only
+`--smv-*` keys are accepted (D7); anything else throws.
+
 **`caption`** — one narration overlay (`role="status"`, bottom-centred).
 
 ```json
@@ -66,8 +89,8 @@ so you can burn subtitles in from `g.cues()` instead.
 
 Every step may declare `dur` (ms). The declared timeline is the contract (D12): the
 scrubber, `g.cues()` and the frame renderer all read the same numbers, so a step is
-*worth* exactly what it declares. Without `dur`: labels/highlights/captions 0, `wait` its
-ms, camera 600, condense/split 900, other mutations the mount's `animation.duration`
+*worth* exactly what it declares. Without `dur`: labels/highlights/captions/props 0, `wait`
+its ms, camera 600, condense/split 900, other mutations the mount's `animation.duration`
 (350), a batch the longest of its own commit and its `wait`/`camera`/`condense`/`split`
 children (a mutation child folds into the one shared relayout, so its own `dur` is ignored
 — put the `dur` on the batch).
@@ -231,8 +254,8 @@ frame exists — the sheet is a function of the declared timeline (D12), so you 
 while a long take is still rendering. Mux the finished track under the video
 (`ffmpeg -i story.mp4 -i vo.wav -c:v copy -c:a aac -shortest story-vo.mp4`), and where the
 read will not fit a beat, give the storyboard air with `wait` steps and re-render — the
-cue sheet moves with it. (Stretching `wait`s to a recorded VO's timestamps automatically is
-M4d's `smv-fit`.)
+cue sheet moves with it. Or work the other way round: record the read first, then hand
+`smv-fit` (§6) the timestamps it actually landed on and let it move the holds for you.
 
 ### 3.3 Re-rendering one chapter: `--from` / `--to`
 
@@ -383,8 +406,76 @@ sizes the `viewBox` to the pane — a deliberate inversion of both defaults (`pa
 the transform is the framing, and the culled elements are by definition outside it). Pair it
 with a `camera` op to publish a thumbnail of a beat in the story without re-recording it.
 
-## 6. What M4d adds
+## 6. Fitting the script to a recorded voice-over: `smv-fit`
 
-`bin/smv-fit.mjs` — a pure JSON→JSON transform that stretches the `wait` steps between
-labels so each label lands on a voice-over timestamp — and per-step `props` custom-property
-overrides.
+§3.2 gets you a cue sheet to read against. `smv-fit` closes the other half of the loop:
+when the read comes back and line three actually landed at 4.2s rather than the 3.7s the
+script assumed, it moves the story to the narration instead of you re-timing `wait` steps
+by hand and re-rendering to see where they went.
+
+```
+npx smv-fit sb.json --vo marks.json -o fitted.sb.json
+npx smv-record spec.json --storyboard fitted.sb.json --out story.mp4 --cues story.srt
+```
+
+`marks.json` says where the narration wants each **label**, in absolute ms on the story
+clock — either shape:
+
+```json
+{ "intro": 0, "focus": 1200, "automate": 2000 }
+[ { "label": "intro", "ms": 0 }, { "label": "focus", "ms": 1200 } ]
+```
+
+It is a pure JSON→JSON transform. Nothing but the holds moves: same steps, same order,
+same keys, same identity — only `wait` steps are rewritten, and one is inserted before a
+label if the segment has nothing to stretch. Everything after the last marked label rides
+along untouched, and so do labels you did not mark (they move with their share of the
+stretch around them). The offsets are computed with **exactly** the pricing the library
+uses (D12) — the same numbers `g.cues()` and `smv-record` read, asserted against a real
+`g.cues()` in `test/fit-cli.test.js`.
+
+**Worked example**, on the e2e fixture (`test/fixtures/record-demo.sb.json` — `intro` at
+0ms, `focus` at 700ms, `automate` at 1400ms):
+
+```
+$ smv-fit record-demo.sb.json --vo marks.json -o fitted.sb.json
+smv-fit: intro 0ms -> 0ms
+smv-fit: focus 700ms -> 1200ms
+smv-fit: automate 1400ms -> 2000ms
+smv-fit: 14 steps, 3500ms total -> fitted.sb.json
+```
+
+The `intro → focus` segment is a 300ms camera move, a 0ms caption and one `wait 400`: the
+camera is the 300ms floor, so the 1200ms gap leaves 900ms of hold and that wait becomes
+`900`. `focus → automate` is a 400ms camera plus `wait 300`; an 800ms gap leaves 400ms, so
+that wait becomes `400`. Nothing else in the file changes. Where a segment has several
+waits, the budget is split between them in proportion to what they already held (integers,
+the rounding remainder on the last), so the shape of the pacing you wrote survives.
+
+**It is idempotent.** Re-running it on `fitted.sb.json` with the same marks writes the same
+file back — so it is safe in a build step, and safe to re-run after hand-editing something
+else in the script.
+
+**It refuses rather than guessing** (exit 1, nothing written): a mark naming a label the
+storyboard does not have (it lists the ones it does), marks that run backwards against the
+order the labels appear in the script, a negative or non-numeric ms, a label marked twice,
+and — the one worth knowing about — a gap that is shorter than the segment's unstretchable
+floor:
+
+```
+smv-fit: "focus" cannot land at 200ms: the 300ms of unstretchable steps after "intro"
+already exceed the 200ms gap asked for. Give the read more room, or shorten those steps' `dur`.
+```
+
+That is the transform telling you the *animation* is too long for the narration, not the
+holds — shorten the camera move's `dur`, or give the beat more room in the read. A
+storyboard containing `run.play` is also refused: that step's length comes from the compiled
+token run inside the browser, not from the declared timeline, so a segment containing one
+cannot be priced on paper.
+
+| flag | default | what it does |
+|---|---|---|
+| `<script.sb.json>` | required | the director script to fit |
+| `--vo marks.json` | required | where the narration wants each label, in absolute story ms |
+| `-o fitted.sb.json` | stdout | where to write; the report always goes to stderr, so it pipes |
+| `--base ms` | 350 | the mount's `animation.duration` — what an unpriced mutation costs |

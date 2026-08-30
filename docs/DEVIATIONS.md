@@ -442,3 +442,44 @@ pinning Liberation Serif moves the record fixture's node widths from 41/47/49/45
 **Scope:** the patch lives in the generated harness page, not in `src/` — the library
 keeps its one font stack, the size budget pays nothing, and no page but the recorder's own
 is touched.
+
+## 18. The pulse is a `pulse:true` modifier, not a fifth `variant` (M4d)
+
+**Plan (M4d):** "Optional ticker-driven emphasis pulse variant."
+
+**Problem:** spelled as `{"variant": "pulse"}` it would occupy the slot that says *what
+colour the emphasis is*. `variant ∈ focus | warn | ok | mute` maps onto `--smv-emph`, and
+those four are the whole colour vocabulary — so "pulse" as a fifth member would mean you
+can have a warning, or a pulse, but never a warning that pulses, which is exactly the
+combination an attention beat is for. It is orthogonal to the colour, the same way `dim`
+is.
+
+**Implementation:** `highlight({nodes, variant, dim, pulse})` — a boolean modifier that
+stacks with any variant, documented as such in `docs/RECORDING.md` §1 and PLAN §5.7. No
+new op, no new attribute channel: the director writes one root custom property per tick
+and the existing `[data-emph]` rule reads `var(--smv-pulse, 0)`, so a still highlight is
+byte-for-byte the CSS M4a shipped.
+
+## 19. `smv-fit` refuses a `run.play` storyboard instead of pricing it (M4d)
+
+**Plan (M4d):** "`bin/smv-fit.mjs`: pure JSON→JSON transform — stretch/shrink `wait` steps
+between labels so each label lands on a VO timestamp list."
+
+**Problem:** *pure* and *`run.play`* are incompatible. Every other op's length is a
+function of the step object (D12), which is what makes a JSON→JSON fit possible at all —
+but a `run.play` step is priced off the compiled token run's own clock (`stepSlices()` →
+`runCtl.timeOf()`), which only exists inside a browser with the engine loaded. `smv-record`
+hits the same wall and solves it by materializing the run in the page before measuring;
+a file transform has no page. Falling through to the mutation default (350ms) would have
+silently mispriced a whole simulated run and moved every label after it — a wrong fit that
+looks like a right one, which is worse than no fit.
+
+**Implementation:** `findRunPlay()` (batches recursed, the same shape-reading as
+`smv-record`'s `findLiveRun`) refuses at exit 1, naming the step and the one way forward:
+fit a script without one — `run.seek`/`run.step` steps paced by `wait` holds drive the same
+run on a timeline the transform can read. An explicit `dur` on the `run.play` is *not* an
+escape hatch: `stepSlices()` prices that step off `runCtl` and never reads `s.dur`, so
+honouring one in the fit would put the script on a different clock than the scrubber, the
+cue sheet and the frame renderer — the exact failure the refusal exists to prevent. The
+guard runs inside the exported `fit()` as well as in the CLI, so a library caller cannot
+price a `run.play` at `base` by calling past it.

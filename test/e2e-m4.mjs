@@ -119,6 +119,15 @@ const diffs = a.filter((f, i) => {
 });
 check(diffs.length === 0, `all ${a.length} frames byte-identical across two takes`, diffs.slice(0, 5).join(", "));
 
+// 3b — the M4d pulse (D17) is inside that gate: the fixture's highlight carries
+// `pulse:true`, so the stretch after the camera settles (1.1s) and before the condense
+// begins (1.4s) is a `wait` with NOTHING moving but the pulse. Two frames of it that differ
+// are the pulse doing per-frame work; that the takes above still matched frame for frame is
+// the point — it rides the shared ticker (D1), so it quantizes with everything else and the
+// `data-smv-record` CSS kill-switch has nothing to kill.
+check(!bytes[12].equals(bytes[13]),
+  "the pulse moves pixels during a hold where nothing else does (frames 12/13 = 1.2s/1.3s)");
+
 // 4 — the summary line reports the story the fixture declares (step count + cue sheet).
 check(/14 steps, 2900ms \+ 200ms tail/.test(logA), "summary reports 14 steps and the declared 2900ms", logA.split("\n")[0]);
 check(/5 cues/.test(logA), "cue sheet has 5 entries (3 labels + 2 captions)", logA.split("\n")[0]);
