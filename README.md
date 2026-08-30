@@ -233,7 +233,8 @@ self-loop arcs, container padding and bounds either way.
 
 ```js
 import { exportSVG, exportPNG } from "sparkle-motion-vizualizer/export";
-const svg  = exportSVG(g, { pad: 24, theme: "dark" });   // standalone SVG string
+const svg  = exportSVG(g, { pad: 24, theme: "dark" });   // standalone SVG string (whole graph)
+const shot = exportSVG(g, { viewport: true });           // current pan/zoom framing, culling kept
 const blob = await exportPNG(g, { scale: 2 });           // browser only
 ```
 
@@ -247,17 +248,21 @@ npx smv-pack spec.json -o out.html --storyboard sb.json --preset pipeline --titl
 
 See `docs/EMBED.md` for the full recipe.
 
-**Deterministic video frames.** `smv-record` drives a record-mode pack (manual ticker,
-motion forced full, every CSS transition off) frame by frame in headless chromium and
-writes a PNG sequence — two runs of one script are byte-identical:
+**Deterministic video.** `smv-record` drives a record-mode pack (manual ticker, motion
+forced full, every CSS transition off) frame by frame in headless chromium and pipes the
+frames straight into ffmpeg — two runs of one script are byte-identical:
 
 ```
-npx smv-record spec.json --storyboard sb.json --png-dir frames/ --fps 60 --scale 2
-ffmpeg -framerate 60 -i frames/frame-%05d.png -c:v libx264 -pix_fmt yuv420p -crf 18 story.mp4
+npx smv-record spec.json --storyboard sb.json --out story.mp4 --fps 60 --scale 2 \
+    --cues cues.srt --font Inter.woff2
 ```
 
-The frame count is the declared timeline (D12), nothing wall-clock. `docs/RECORDING.md` §3
-has the full flag list; the built-in ffmpeg pipe behind `--out` is M4c.
+The frame count is the declared timeline (D12), nothing wall-clock. `--png-dir frames/`
+writes a PNG sequence instead (the route on a machine with no ffmpeg), `--cues` writes the
+cue sheet as JSON, subtitles or a YouTube chapter list, `--from/--to` re-renders one
+labelled chapter so it intercuts frame-for-frame with the full take, and `--font` pins the
+typeface so two machines lay the graph out identically. `docs/RECORDING.md` §3 has the full
+flag list.
 
 ## Size
 
@@ -304,8 +309,9 @@ Status: M0 (walking skeleton), M1 (pipeline demo end to end), M2 (live mode, spl
 edge labels, expand/collapse-all, query sugar, ARIA + table fallback, SVG/PNG export,
 `smv-pack`) and M3 (in-house layered engine, dagre demoted to an optional adapter,
 viewport culling, IIFE under 50KB gzip) complete; M4a (director ops: camera, highlight,
-caption, the declared timeline) and M4b (`smv-record`, the deterministic frame renderer)
-landed — ffmpeg piping, cue-sheet export and range re-renders are M4c. Deliberate departures from the plan —
+caption, the declared timeline), M4b (`smv-record`, the deterministic frame renderer) and
+M4c (ffmpeg piping, cue sheets, chapter re-renders, pinned fonts, `exportSVG({viewport:
+true})`) landed — voice-over fitting is M4d. Deliberate departures from the plan —
 including what "parity with dagre" was gated on, and what M3 skipped — are recorded in
 `docs/DEVIATIONS.md`. Embedding: `docs/EMBED.md`.
 

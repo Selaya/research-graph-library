@@ -637,8 +637,13 @@ to 3/5 — and scrubs backward/forward with no corruption.
   chromium/static-server plumbing the four e2e scripts each had a copy of. No core file
   changed — the whole milestone lives in `bin/`, `scripts/` and `test/`, at zero bundle
   cost. Mode B (`run({mode:"live"})`) storyboards are refused: wall-clock, unreproducible.
-- **M4c** — ffmpeg piping behind `--out`, `--cues` (srt/json/chapters), `--from/--to`
-  range re-render, `--font` for cross-machine layout stability, `exportSVG({viewport:true})`.
+- **M4c** (done) — publishing: the ffmpeg pipe behind `--out story.mp4` (backpressured,
+  with the encoder's own stderr on failure), `--cues` in three formats off `g.cues()`
+  (`bin/cues.mjs`, zero bundle cost), `--from/--to` chapter re-renders that are
+  byte-identical to the matching frames of a full take, `--font` pinning both what is drawn
+  and what is *measured* (canvas metrics decide node boxes), and
+  `exportSVG({viewport:true})` for a still that matches the shot. `--png-dir` stays as the
+  no-ffmpeg route; both outputs may be given at once.
 - **M4d** — `bin/smv-fit.mjs` (stretch `wait` steps onto voice-over marks), per-step
   `props` custom-property overrides.
 

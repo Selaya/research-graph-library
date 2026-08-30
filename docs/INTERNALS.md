@@ -976,11 +976,9 @@ Without it a heterogeneous batch put every later step — and every cue offset a
   event log against real time. The check is scoped to a `run.play` step's own options
   (`{op,args:[{mode}]}` or `{op,mode}`, batches recursed): node/edge `data` is an arbitrary
   user payload the store preserves verbatim and `data:{mode:"live"}` is this project's own
-  pipeline idiom, so a deep walk refused perfectly recordable Mode A stories. `--out x.mp4`
-  *without* `--png-dir` reports the missing encoder and prints the `ffmpeg -framerate …`
-  line to run; with `--png-dir` it records and prints that line afterwards, naming the real
-  frame directory — refusing there would have told the user to pass the flag they passed.
-  The pipe itself is M4c.
+  pipeline idiom, so a deep walk refused perfectly recordable Mode A stories. (M4b also
+  owed the user a message for `--out` with no encoder behind it; M4c wired the pipe, and
+  that message is now only the genuinely-no-ffmpeg case — see below.)
 - **Direct-invocation guard.** Both bins compare `import.meta.url` against
   `pathToFileURL(realpathSync(process.argv[1]))`, not against `` `file://${process.argv[1]}` ``:
   npm installs `bin.smv-record` as a symlink (argv[1] is the link, `import.meta.url` the
@@ -996,5 +994,124 @@ Without it a heterogeneous batch put every later step — and every cue offset a
   is byte-identical across the two takes, that the frame count is at least the declared
   timeline's (2900ms + 200ms tail) and within one frame per step boundary of it, that the
   last two frames are identical (the tail holds a *settled* picture), that a `run.play`
-  story is measured at the compiled run's duration rather than 350ms, that `--out`
-  alongside `--png-dir` records and warns, and both refusals.
+  story is measured at the compiled run's duration rather than 350ms, and the refusals.
+
+## M4c (publishing: mp4, cue sheets, ranges, pinned fonts) — landed
+
+Still all `bin/` except one ESM-only export path, so still zero bundle cost. What M4b
+rendered, M4c publishes: `--out story.mp4` (the ffmpeg pipe), `--cues` (three formats),
+`--from/--to` (one chapter), `--font` (cross-machine layout), and
+`exportSVG(g, {viewport:true})` (the matching still).
+
+- **`--out` / the ffmpeg pipe.** One long-lived
+  `ffmpeg -y -f image2pipe -framerate <fps> -i - -c:v libx264 -pix_fmt yuv420p -crf 18 <out>`
+  reading screenshots off stdin, so no intermediate sequence is written and `--png-dir` is
+  no longer on the critical path. `page.screenshot()` now returns the buffer instead of
+  taking a `path`, and the two outputs are *sinks*: `--out`, `--png-dir`, or both. Three
+  things the pipe has to get right, all of them load-bearing: **backpressure** — a 4K frame
+  is megabytes and the encoder is slower than the capture loop, so a `write()` that returns
+  false is awaited to `drain` or the whole take buffers in RSS; **a dead encoder** — every
+  wait races the child's `close`, or a drain that will never come hangs the CLI; and
+  **why** — ffmpeg's own stderr is the only thing that knows, so the last 12 lines are kept
+  and surfaced on a nonzero exit. Failure aborts with SIGKILL, not SIGTERM (a terminated
+  ffmpeg finalizes what it has, and half a story that looks whole is worse than no file)
+  and unlinks the partial output; the sinks join the existing single `finally`.
+  `$SMV_FFMPEG` overrides the binary, which is also how the tests exercise the
+  no-encoder path on a machine that has one.
+- **Ctrl+C is a path the `finally` does not cover**, and it is the way a long take normally
+  ends early. A terminal delivers the signal to the whole process *group*, so ffmpeg used to
+  get it first-hand, finalize what it had, and leave a valid, playable 0.4s clip of a 3.4s
+  story — the finalized half-story the abort path exists to prevent — while node exited
+  through playwright's own handler without unwinding anything (the mkdtemp serve dir leaked
+  too). Three pieces: ffmpeg is spawned `detached` (its own group, so only the recorder ever
+  decides that file's fate; deliberately not `unref`'d, or `closed` would stop resolving),
+  chromium is launched with `handleSIGINT/SIGTERM/SIGHUP: false` (playwright's handlers
+  `process.exit()` out from under both the finally and ours), and `record()` registers one
+  handler per signal that does what the finally does — but **synchronously**, since a
+  handler that awaits races process exit and can lose. Hence `sink.abortSync()` beside
+  `abort()`: `child.kill("SIGKILL")` + `rmSync(out)` with no await in between. Exit 130 for
+  SIGINT, 143 for SIGTERM, one stderr line naming what was removed and what survived
+  (`--png-dir` frames are individually complete — that is the salvageable take). The
+  handlers come off in the finally so an importing test is not left holding them.
+- **`--cues` (`bin/cues.mjs`).** Formatting lives in `bin/` — a subtitle serializer is a
+  publishing concern the 50KB budget should not pay for — and imports nothing from `src/`.
+  The extension picks the format so a filename cannot lie: `.json` is `g.cues()` verbatim
+  plus render metadata (`fps/width/height/scale/total/range`), `.srt` turns captions into
+  spans (each runs to the next caption, a `caption(null)` clear, or the story end) timed
+  `HH:MM:SS,mmm`, `.txt` is a YouTube chapter list off the labels. The two text formats
+  annotate the *media file*, so a `--from/--to` take clips and rebases them onto the range
+  (and pins the first chapter to `00:00`, or YouTube drops the list); `.json` stays on the
+  story's clock and carries `range` to rebase with. Written *before* the frame loop: it is
+  a function of the declared timeline alone, so an interrupted take still leaves one.
+  The media is longer than the story, which the `.srt` has to know: the recorder passes
+  `mediaEnd = total + tailFrames·frameMs` (equal to `total` under `--to`, which spends no
+  tail) and that, not `total`, closes the last open caption span. Otherwise a caption issued
+  as the story's **last** step — captions are zero-duration ops, so it sits at exactly
+  `total` — becomes the span `[total, total)`, which `clip()`'s `!(end > start)` guard drops
+  as a same-frame replacement, while the pixels show it for every frame of the tail. The
+  guard is right; the span's end was wrong.
+- **`--from/--to`.** Labels → absolute ms through the same cue sheet (D12) → frame indices
+  (`ceil(ms/frameMs - 1e-9)`; the epsilon is float hygiene — `600/16.666…` lands a hair
+  under 36 and would otherwise cost a whole frame). Capture starts at `--from`'s frame and
+  ends on the first frame at or past `--to`, inclusive; a `--to` take spends no tail (the
+  story is not finished there). The story is **not** seeked: the take plays from step 0
+  with the identical tick cadence and only the capture window moves. A seek would replay
+  director ops instantly and skip the tweens they were meant to leave behind — the first
+  frame would show a state the story never held. Label *existence* is checked against the
+  storyboard file before a browser launches; the offsets come from the page, because a
+  `run.play` step's length depends on a compiled run only the browser can build.
+- **Skipped frames still get a compositor frame.** Measured, not assumed: fast-forwarding
+  by ticking without capturing made the first captures after the gap differ from the same
+  frames of a full render — ~92dB PSNR, a few antialiased pixels, only on frames inside a
+  camera tween. The JS state is identical (the ticks are); the raster is not, because a
+  screenshot forces a paint and shooting every frame leaves Skia somewhere else than
+  shooting one in eight. One `requestAnimationFrame` round-trip per skipped frame restores
+  the cadence at a fraction of a screenshot's cost and makes a slice byte-identical to the
+  full render's matching frames — which is the only reason to render a range separately.
+- **`--font`.** The face is copied next to the served page (relative URL, same origin —
+  not a data: URI in a file that already carries the spec and the 128KB IIFE) and
+  `buildHTML` grows a record-only layer: `@font-face` + a `font-family` override, and the
+  mount is deferred behind `document.fonts.load(...)` because node boxes are measured
+  *during* mount. It pins both pipelines. CSS alone pins only what is drawn: `system-ui`
+  is a generic family keyword `@font-face` may not redefine, and `src/measure.js` sizes
+  every node box with canvas `measureText` against `500 13px system-ui, …`. So the record
+  page also patches the 2D-context `font` setter to swap the family list for the injected
+  face — scoped to this generated harness page, and the difference is visible: pinning
+  Liberation Serif moved the fixture's node widths from 41/47/49/45px to 36/41/43/41px.
+  Without it `--font` would restyle the glyphs while the *layout* stayed machine-dependent,
+  which is the one thing the flag exists to fix. **The pin is verified**, because failing to
+  apply it is silent: `document.fonts.ready` resolves for a face that errored, smv-pack
+  mounts on `.then(go, go)` by design, and chromium reports a decode failure as a console
+  *warning*, which the pageErrors collector does not keep — so a bad face used to render a
+  whole take at exit 0 in the machine's default font. Two checks: the file's first four
+  bytes must agree with its extension (`wOF2`/`wOFF`/`OTTO`/`\x00\x01\x00\x00`/`true`/`ttcf`
+  — the two sfnt flavours are one bucket, since CFF outlines in a `.ttf` decode fine, while a
+  WOFF2 named `.ttf` makes the injected `format("truetype")` hint skip the src), which
+  catches the everyday git-lfs-pointer and renamed-file accidents before a browser launches;
+  and after the mount, the page is asked whether a face of that family reached it and
+  decoded (`status === "error"` tells "failed to decode" apart from "never asked for"),
+  which catches a truncated but correctly-signed file. The second check is inside the take's
+  try, so the sinks abort and no truncated mp4 survives the refusal.
+- **`exportSVG(g, {viewport:true})`** (`src/export.js`, ESM-only entry, not in the IIFE).
+  Keeps the live `.smv-viewport` transform AND the live culling state, with the pane as the
+  `viewBox` (`g.viewport.size()`, falling back to the element box, then 800×600) and `pad`
+  ignored. Both are deliberate inversions of the default path, and the code says so: the
+  defaults exist because a whole-graph document showing only what was on screen is a bug
+  (a near-empty file whenever the user was zoomed in), while shot mode asks for the
+  opposite document, where the transform *is* the framing and culled elements are by
+  definition outside it. Un-culling there would add nothing visible and pour every
+  off-screen node into a document that clips them anyway. Change one, change the other.
+- **e2e-m4 (M4c half)** probes a real mp4 (h264 stream, `nb_frames` equal to the frames the
+  take shot, duration = frames/fps), reads back `cues.json`, renders `--from focus --to
+  automate` and asserts all 8 frames are byte-identical to frames 7–14 of the full take
+  with the chapter file rebased onto the slice, and renders `--font` twice (identical to
+  each other, different from the unpinned take — the only proof from outside the page that
+  the face reached both the drawing and the measurement), asserts a story whose last step is
+  a caption keeps that caption in the `.srt` (held for the tail), and interrupts a take
+  mid-flight with a real process-group SIGINT to prove the mp4 is gone, the exit is nonzero,
+  the `--png-dir` frames survive and no serve dir is left behind. ffmpeg and a pinned font
+  file are environment, not contract: those sections **skip with a printed notice** rather
+  than fail when the machine has neither. The ffmpeg gate probes `-encoders` for `libx264`,
+  not just `ffmpeg -version`: the pipe hardcodes `-c:v libx264`, and a build without it
+  (Fedora/RHEL `ffmpeg-free`) answers `-version` perfectly well and then fails the encode —
+  which is an environment the recorder cannot fix, so it must skip, with the reason named.

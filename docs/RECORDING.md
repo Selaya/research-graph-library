@@ -1,9 +1,10 @@
 # Recording a narrated story
 
 How to write a director script — a storyboard that drives the camera, highlights, and
-captions as well as the graph — how to play it, and how to render it to frames with
-`smv-record`, the deterministic frame-by-frame renderer (§3). Screen-recording a live tab
-(§4) is still the fastest way to a rough take; it is just not reproducible.
+captions as well as the graph — how to play it, and how to render it to an mp4 (or a frame
+sequence, a cue sheet, a chapter list) with `smv-record`, the deterministic frame-by-frame
+renderer (§3). Screen-recording a live tab (§4) is still the fastest way to a rough take;
+it is just not reproducible. §5 is the matching still image.
 
 Design background: PLAN.md D12–D15 and §5.7; module contracts in INTERNALS.md (M4).
 
@@ -98,8 +99,8 @@ absolute ms offset — which is exactly a chapter list. A typical scene:
 ```
 
 `g.cues()` returns every label and caption as `{kind, at, label?/text?, index}` with `at`
-in absolute story ms — feed it to a voice-over session or an `.srt` generator; M4c adds
-`--cues` formatting to the CLI.
+in absolute story ms — feed it to a voice-over session, or let `smv-record --cues` write it
+out as JSON, subtitles or a chapter list (§3.2).
 
 (The fluent builder in `src/storyboard.js` — `timeline(g).camera({...}).wait(1200)
 .caption("…").build()` — emits exactly this array, but the JSON is the primitive and the
@@ -126,24 +127,28 @@ For a self-contained file:
 npx smv-pack spec.json -o story.html --storyboard sb.json --preset pipeline --title "Pipeline"
 ```
 
-## 3. Rendering frames with `smv-record`
+## 3. Rendering with `smv-record`
 
 ```
 npm run build                       # dist/smv.iife.min.js is what gets packed
-npx smv-record spec.json --storyboard sb.json --png-dir frames/ \
+npx smv-record spec.json --storyboard sb.json --out story.mp4 \
     --fps 60 --width 1920 --height 1080 --scale 2 --theme dark --tail 1200
 ```
 
-Out comes `frames/frame-00000.png …`, one per frame, at `width×height × scale` pixels.
-Encode them however you like:
+Out comes an h.264 mp4: every frame is piped straight into
+`ffmpeg -f image2pipe -framerate <fps> -i - -c:v libx264 -pix_fmt yuv420p -crf 18`, so no
+intermediate PNG sequence is ever written. `--png-dir frames/` writes that sequence instead
+(`frames/frame-00000.png …`, at `width×height × scale` pixels), and is what to use on a
+machine with no ffmpeg:
 
 ```
+npx smv-record spec.json --storyboard sb.json --png-dir frames/
 ffmpeg -framerate 60 -i frames/frame-%05d.png -c:v libx264 -pix_fmt yuv420p -crf 18 story.mp4
 ```
 
-(`--out story.mp4` is reserved for M4c's built-in pipe. On its own it exits with that
-ffmpeg line; passed *alongside* `--png-dir` it records the frames and prints the line
-afterwards, filled in with your directory.)
+Both flags together record once and write both. Without ffmpeg (`$SMV_FFMPEG` overrides
+which binary is used), `--out` exits 1 up front with that command line rather than
+rendering a take it cannot encode.
 
 ### Flags
 
@@ -151,17 +156,130 @@ afterwards, filled in with your directory.)
 |---|---|---|
 | `<spec.json>` | required | the graph spec (same file `smv-pack` takes) |
 | `--storyboard sb.json` | required | the director script — no story, nothing to record |
-| `--png-dir frames/` | required | output directory; existing `frame-*.png` are cleared first so a shorter take never leaves a longer one's tail behind |
+| `--out story.mp4` | — | pipe the frames into ffmpeg; one of `--out`/`--png-dir` is required |
+| `--png-dir frames/` | — | PNG sequence; existing `frame-*.png` are cleared first so a shorter take never leaves a longer one's tail behind |
 | `--fps N` | 60 | frames per second — one `tick(1000/fps)` each |
 | `--width` / `--height` | 1920 / 1080 | browser viewport in CSS px; the mount root fills it |
 | `--scale N` | 2 | `deviceScaleFactor` — PNG pixels are `width×scale` |
 | `--theme dark\|light` | page default | passed into the pack (don't let the OS decide) |
 | `--preset pipeline` | none | mount the preset |
 | `--tail ms` | 1200 | held frames on the finished picture, after the story has settled |
-| `--out story.mp4` | — | M4c; without `--png-dir` it exits with the ffmpeg line to run yourself, with it the frames are recorded and the line is printed after |
+| `--cues f.json\|f.srt\|f.txt` | — | write the cue sheet beside the video; the extension picks the format (§3.2) |
+| `--from label` / `--to label` | — | render only that chapter range (§3.3) |
+| `--font pinned.woff2` | — | pin the typeface so the layout is the same on every machine (§3.4) |
 
 Needs `dist/smv.iife.min.js` (`npm run build`) and the dev-installed `playwright-core`;
-any bad input exits 1 with `smv-record: <reason>` before a browser is launched.
+any bad input — a missing encoder, an unknown `--cues` extension, a `--font` that is not
+there or is not a font, a `--from` label the storyboard does not have — exits 1 with
+`smv-record: <reason>` before a browser is launched.
+
+**Interrupting a take.** Ctrl+C at any point removes the partial `--out` file and exits
+130: a half story that opens and plays is worse than no file, so there is never a truncated
+mp4 to mistake for a finished one. A `--png-dir` sequence is left alone — every frame in it
+is a complete PNG — so that is the take you can salvage. The cue sheet is written before the
+frame loop, so an interrupted take still leaves a usable one.
+
+### 3.2 Cue sheets: `--cues`
+
+One flag, three formats, chosen by the extension so the filename cannot lie about the
+contents:
+
+| extension | what you get |
+|---|---|
+| `.json` | `g.cues()` **verbatim** (absolute story ms, `index` and all) plus the render metadata: `fps`, `width`, `height`, `scale`, `total`, and `range` when the take was sliced |
+| `.srt` | the captions as subtitles — each runs until the next caption, a `caption(null)` clear, or the end of **the media** (the story plus the held `--tail`, since the last caption is on screen for all of it), timed `HH:MM:SS,mmm` |
+| `.txt` | a YouTube chapter list off the labels — `00:00 intro`, one per line |
+
+The two text formats annotate **the media file that was just written**: under `--from/--to`
+they are clipped to the rendered range and rebased onto its start (and the first chapter is
+pinned to `00:00`, which YouTube requires or it drops the list). The `.json` stays on the
+story's own clock and hands you `range` to rebase with. The sheet is written before the
+frame loop, so interrupting a long take still leaves a usable one.
+
+**Worked example.** The e2e fixture story — labels `intro` at 0ms, `focus` at 700ms,
+`automate` at 1400ms; captions at 300ms and 2300ms; declared total 2900ms — rendered with
+`--tail 200 --cues story.srt` gives one span per caption, each running to whatever replaces
+it and the last one to the end of the file:
+
+```
+1
+00:00:00,300 --> 00:00:02,300
+Two manual steps sit between ingest and publish.
+
+2
+00:00:02,300 --> 00:00:03,100
+…now one automated step.
+```
+
+(That last span is the story's 2900ms plus the 200ms of tail — an end-card caption written
+as the *last* storyboard step sits at exactly `total`, and on the story's clock alone its
+span would be zero-length and vanish from a file that shows it for the whole tail.)
+
+and with `--cues chapters.txt` one line per label (seconds floor — a chapter mark is a
+seek target, so `0.7s` must not round up past the moment it names):
+
+```
+00:00 intro
+00:00 focus
+00:01 automate
+```
+
+**The voice-over workflow.** Render once with `--cues`, then record the narration *against
+the sheet*, not against the video: each `.srt` span is a line to read and its timestamps
+say when it must land; each chapter is a beat. The timing is trustworthy before a single
+frame exists — the sheet is a function of the declared timeline (D12), so you can cut VO
+while a long take is still rendering. Mux the finished track under the video
+(`ffmpeg -i story.mp4 -i vo.wav -c:v copy -c:a aac -shortest story-vo.mp4`), and where the
+read will not fit a beat, give the storyboard air with `wait` steps and re-render — the
+cue sheet moves with it. (Stretching `wait`s to a recorded VO's timestamps automatically is
+M4d's `smv-fit`.)
+
+### 3.3 Re-rendering one chapter: `--from` / `--to`
+
+```
+npx smv-record spec.json --storyboard sb.json --out automate.mp4 --from automate --to outro
+```
+
+Labels are resolved to absolute ms through the same cue sheet everything else reads (D12),
+then to frame indices: capture starts on the first frame at or past `--from` and ends on
+the first frame at or past `--to` (that boundary frame is included — it is the frame that
+shows the labelled moment). `--from` alone runs to the end of the story and still spends
+the tail; with a `--to` there is no tail, because the story is not finished there.
+
+The story itself is *not* seeked or restarted — the take plays from step 0 exactly as a
+full render does, ticks at exactly the same cadence, and simply does not keep the frames
+before the range. That is what makes a slice **byte-identical** to the matching frames of
+the full render, so a re-rendered chapter intercuts with the original. (A forward seek
+would not: it replays camera/highlight/caption ops instantly and skips the tweens they were
+supposed to leave behind, so the first frame would be a state the story never held.) It
+costs the same *story* time as a full render to the end of the range; what it saves is the
+frames, the encode and the re-cut.
+
+### 3.4 Pinning the font: `--font`
+
+```
+npx smv-record spec.json --storyboard sb.json --out story.mp4 --font Inter.woff2
+```
+
+Two machines render the same script differently for exactly one reason: fonts. Node boxes
+are sized from text metrics (`src/measure.js` measures against
+`500 13px system-ui, …`), and `system-ui` is whatever the recording machine calls its UI
+font — so the *layout*, not just the glyphs, moves. `--font` copies a `.woff2`/`.woff`/
+`.ttf`/`.otf` next to the served page, injects an `@font-face` plus a `font-family`
+override, and waits for the face before the mount measures anything.
+
+The pin is *verified*, twice: the file's first four bytes have to agree with its extension
+(an unfetched git-lfs pointer and a WOFF2 renamed `.ttf` are the two everyday accidents, and
+both are refused before a browser launches), and once the page is up the face itself has to
+have decoded. A face that fails silently is worse than no `--font` at all — the take would
+finish at exit 0 with the layout measured in the machine's default font, which is exactly
+the machine dependence the flag exists to remove.
+
+It pins **both** pipelines. CSS can only pin what is drawn: a generic family keyword like
+`system-ui` cannot be redefined by `@font-face`, so the record page also swaps the family
+on canvas font assignments, which is what `measureText` — and therefore every node box —
+answers to. On this machine, pinning Liberation Serif moved the fixture's node widths from
+41/47/49/45px to 36/41/43/41px: that difference is the whole point.
 
 **Picking fps and scale.** The output timing is exact at any fps — the declared timeline
 is divided, not sampled (a take runs a frame or so long per async step boundary; see
@@ -190,10 +308,16 @@ piece of wall-clock animation the library otherwise leaves to the browser. Then:
   the finished picture — so `--tail 0` still ends on the settled final state;
 - each frame is exactly one `ticker.tick(1000/fps)`, then a settle (step boundaries land
   on promise chains, so a macrotask turn drains them; the loop polls until the page stops
-  changing), then one screenshot clipped to the mount root.
+  changing), then one screenshot clipped to the mount root;
+- a frame *outside* a `--from/--to` range is still ticked, settled and given a compositor
+  frame (one `requestAnimationFrame` round-trip) — it just is not shot. The rAF is not
+  ceremony: a screenshot forces a paint, so skipping seven of them left the rasterizer in
+  a different place and the next capture came back a hair different (~92dB PSNR, a few
+  antialiased pixels on a camera-tween frame) from the same frame of a full render.
 
 Two runs on one machine are byte-identical — that is what `node test/e2e-m4.mjs` asserts,
-frame for frame. Across machines, fonts are the variable: pin one (M4c adds `--font`).
+frame for frame, for a full take, a sliced one and a `--font` one. Across machines, fonts
+are the variable: pin one with `--font` (§3.4).
 
 **Refused by design:** a storyboard driving `g.run({ mode: "live" })`. A live run replays a
 real event log against real time — wall-clock, unreproducible — so Mode B is not
@@ -242,9 +366,25 @@ page. The result is real-time, not frame-perfect.
 If your OS has reduced motion enabled, mount with `motion: "full"` (D15) — a recording's
 audience is the video's viewers, not the recording machine's accessibility settings.
 
-## 5. What M4c adds
+## 5. A still that matches the shot
 
-The ffmpeg pipe behind `--out story.mp4` (so no PNG directory is needed), `--cues
-cues.srt|cues.json|chapters.txt` off `g.cues()`, `--from/--to` label-range re-renders, a
-`--font` flag that serves a WOFF2 and injects an `@font-face` for cross-machine layout
-stability, and `exportSVG(g, {viewport:true})` for a still that matches the live shot.
+`exportSVG` normally produces the *whole graph*: it drops the pan/zoom transform, re-frames
+to a bounds-sized `viewBox` and un-hides everything viewport culling had hidden. That is
+the right document for "export this diagram", and the wrong one for "grab the frame I am
+looking at".
+
+```js
+import { exportSVG } from "sparkle-motion-vizualizer/export";
+const still = exportSVG(g, { viewport: true });   // the shot: same framing as the video
+```
+
+`viewport: true` keeps the live `.smv-viewport` transform *and* the live culling state, and
+sizes the `viewBox` to the pane — a deliberate inversion of both defaults (`pad` is ignored;
+the transform is the framing, and the culled elements are by definition outside it). Pair it
+with a `camera` op to publish a thumbnail of a beat in the story without re-recording it.
+
+## 6. What M4d adds
+
+`bin/smv-fit.mjs` — a pure JSON→JSON transform that stretches the `wait` steps between
+labels so each label lands on a voice-over timestamp — and per-step `props` custom-property
+overrides.
