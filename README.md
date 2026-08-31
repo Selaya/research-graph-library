@@ -9,7 +9,7 @@ One `<script>` tag, no build step, no framework:
 
 ```html
 <div id="pipe" style="height:480px"></div>
-<script src="dist/smv.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-vizualizer@0.1.0"></script>
 <script>
   const g = SparkleMotion.mount("#pipe", {
     nodes: [
@@ -35,6 +35,42 @@ One `<script>` tag, no build step, no framework:
 ```
 
 ESM for bundler users: `import { mount } from "sparkle-motion-vizualizer"`.
+
+## Install
+
+From npm, for projects with a bundler or Node-based toolchain:
+
+```bash
+npm install sparkle-motion-vizualizer
+```
+
+```js
+import { mount } from "sparkle-motion-vizualizer";
+```
+
+From a CDN, for plain HTML pages — the package's `unpkg`/`jsdelivr` entry points
+resolve to the prebuilt IIFE bundle (global `SparkleMotion`), so a single script tag
+works with no build step:
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-vizualizer@0.1.0"></script>
+<!-- or: https://unpkg.com/sparkle-motion-vizualizer@0.1.0 -->
+```
+
+The ESM bundle is also on the CDN for `<script type="module">` pages without a bundler:
+
+```js
+import { mount } from "https://cdn.jsdelivr.net/npm/sparkle-motion-vizualizer@0.1.0/dist/smv.esm.js";
+```
+
+Straight from git (no registry involved):
+
+```bash
+npm install github:Selaya/research-graph-library
+```
+
+The optional dagre layout adapter needs the peer dependency: `npm install @dagrejs/dagre`,
+then `import { dagreSolver } from "sparkle-motion-vizualizer/adapters/dagre"`.
 
 ## What it does
 

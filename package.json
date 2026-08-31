@@ -2,10 +2,31 @@
   "name": "sparkle-motion-vizualizer",
   "version": "0.1.0",
   "description": "Small embeddable animated graph visualization library — pipelines, tokens, expand/collapse, condense.",
+  "keywords": [
+    "graph",
+    "visualization",
+    "animation",
+    "pipeline",
+    "dag",
+    "diagram",
+    "svg",
+    "storyboard"
+  ],
+  "author": "Esteban Selaya <engineering@estebanselaya.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Selaya/research-graph-library.git"
+  },
+  "homepage": "https://github.com/Selaya/research-graph-library#readme",
+  "bugs": {
+    "url": "https://github.com/Selaya/research-graph-library/issues"
+  },
   "type": "module",
   "main": "./src/index.js",
   "module": "./src/index.js",
   "types": "./types/index.d.ts",
+  "unpkg": "./dist/smv.iife.min.js",
+  "jsdelivr": "./dist/smv.iife.min.js",
   "exports": {
     ".": {
       "types": "./types/index.d.ts",
@@ -42,7 +63,9 @@
     "test": "node --test \"test/*.test.js\"",
     "size": "node scripts/size-budget.js",
     "types": "tsc -p types",
-    "check": "npm run test && npm run build && npm run size"
+    "check": "npm run test && npm run build && npm run size",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run check && npm run types"
   },
   "license": "MIT",
   "peerDependencies": {
