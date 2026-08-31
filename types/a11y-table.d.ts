@@ -1,4 +1,4 @@
-// Types for `sparkle-motion-vizualizer/a11y-table` (src/a11y-table.js, M2). ESM-only entry —
+// Types for `sparkle-motion-visualizer/a11y-table` (src/a11y-table.js, M2). ESM-only entry —
 // the linearized `<table>` fallback, not bundled into the IIFE.
 
 /** The minimal shape attachA11yTable/computeRows need — a full `Graph` satisfies this

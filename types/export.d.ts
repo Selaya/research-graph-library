@@ -1,4 +1,4 @@
-// Types for `sparkle-motion-vizualizer/export` (src/export.js, D11). ESM-only entry — not
+// Types for `sparkle-motion-visualizer/export` (src/export.js, D11). ESM-only entry — not
 // bundled into the IIFE. Kept minimal: only what exportSVG/exportPNG actually read off `g`.
 
 import type { ThemeName } from "./index.js";

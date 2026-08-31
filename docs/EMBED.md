@@ -1,4 +1,4 @@
-# Embedding sparkle-motion-vizualizer
+# Embedding sparkle-motion-visualizer
 
 Two ways to get a graph onto a page with **zero build step** (R1/D11): a copy-paste
 `<script>` snippet, or a one-shot CLI that packs everything — library, spec, optional
@@ -15,7 +15,7 @@ copied next to your page), give it a sized container, and mount:
 <body>
   <div id="pipe" style="height:480px"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/sparkle-motion-vizualizer@1/dist/smv.iife.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@1/dist/smv.iife.min.js"></script>
   <script>
     const spec = {
       nodes: [
@@ -50,7 +50,7 @@ script or a bundler:
 
 ```html
 <script type="module">
-  import { exportSVG, exportPNG } from "https://cdn.jsdelivr.net/npm/sparkle-motion-vizualizer@1/src/export.js";
+  import { exportSVG, exportPNG } from "https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@1/src/export.js";
   // exportSVG(g) -> string   (works anywhere, incl. Node, for the string-building half)
   // exportPNG(g) -> Promise<Blob>  (browser only — canvas rasterization)
 </script>
@@ -59,8 +59,8 @@ script or a bundler:
 or, from an npm install:
 
 ```js
-import { exportSVG, exportPNG } from "sparkle-motion-vizualizer/export";
-import { attachA11yTable } from "sparkle-motion-vizualizer/a11y-table";
+import { exportSVG, exportPNG } from "sparkle-motion-visualizer/export";
+import { attachA11yTable } from "sparkle-motion-visualizer/a11y-table";
 ```
 
 ## 2. `smv-pack` CLI — one self-contained HTML file

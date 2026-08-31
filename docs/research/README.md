@@ -1,4 +1,4 @@
-# Research corpus for sparkle-motion-vizualizer
+# Research corpus for sparkle-motion-visualizer
 
 Seven parallel research passes + one adversarial critique produced the design in
 [docs/PLAN.md](../PLAN.md). Bundle sizes were measured first-hand from npm tarballs

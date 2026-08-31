@@ -1,5 +1,5 @@
 {
-  "name": "sparkle-motion-vizualizer",
+  "name": "sparkle-motion-visualizer",
   "version": "0.1.0",
   "description": "Small embeddable animated graph visualization library — pipelines, tokens, expand/collapse, condense.",
   "keywords": [

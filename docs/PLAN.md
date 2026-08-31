@@ -1,9 +1,9 @@
-# sparkle-motion-vizualizer — an embeddable, animated graph visualization library
+# sparkle-motion-visualizer — an embeddable, animated graph visualization library
 
 **Design plan · 2026-08-29**
 
-*(Name: **`sparkle-motion-vizualizer`** — verified free on npm (2026-08-29), as is the
-alternate spelling `sparkle-motion-visualizer`. Browser global: `SparkleMotion`;
+*(Name: **`sparkle-motion-visualizer`** — verified free on npm (2026-08-29), as is the
+alternate spelling `sparkle-motion-vizualizer`. Browser global: `SparkleMotion`;
 short prefix for files/CSS: `smv`.)*
 
 ---
@@ -430,7 +430,7 @@ sequential sum or the parallel max of its children (default `sum`) — so the fl
 
 ```html
 <div id="pipe" style="height:480px"></div>
-<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-vizualizer@1/dist/smv.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@1/dist/smv.iife.min.js"></script>
 <script>
   const g = SparkleMotion.mount("#pipe", spec, {
     theme: "auto",                       // "light" | "dark" | "auto" | token object
@@ -758,4 +758,4 @@ pipeline UX/motion design, cyclic-graph layout, token/execution semantics. Key
 verifications performed directly in-session: npm tarball size measurements
 (`gzip -9` on shipped `dist` files), dagre 3.1.1 source reading (acyclic.ts,
 greedy-fas.ts, layout.ts, changelog), `dist/dagre.min.js` self-containment (graphlib
-inlined), npm name availability (`sparkle-motion-vizualizer` free, 2026-08-29).
+inlined), npm name availability (`sparkle-motion-visualizer` free, 2026-08-29).

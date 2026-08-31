@@ -1,4 +1,4 @@
-// `sparkle-motion-vizualizer/adapters/dagre` — the optional M0–M2 layout engine, kept
+// `sparkle-motion-visualizer/adapters/dagre` — the optional M0–M2 layout engine, kept
 // alive behind the M3 solver seam. Requires the optional peer `@dagrejs/dagre`.
 
 import type {

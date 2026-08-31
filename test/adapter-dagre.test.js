@@ -1,4 +1,4 @@
-// The public dagre escape hatch (`sparkle-motion-vizualizer/adapters/dagre`), gated.
+// The public dagre escape hatch (`sparkle-motion-visualizer/adapters/dagre`), gated.
 //
 // DEVIATIONS.md item 9 records that `dagreLayout` reproduces the pre-M3 goldens
 // byte-for-byte. Nothing checked it: test/engine-parity.test.js hand-rolls its own copy of

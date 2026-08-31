@@ -32,8 +32,8 @@ The package is wired so publishing is just versioning + `npm publish`:
    git push && git push --tags
    ```
 
-5. Sanity-check the result: `npm view sparkle-motion-vizualizer version`, and load
-   `https://cdn.jsdelivr.net/npm/sparkle-motion-vizualizer` in a scratch HTML page —
+5. Sanity-check the result: `npm view sparkle-motion-visualizer version`, and load
+   `https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer` in a scratch HTML page —
    the `unpkg`/`jsdelivr` fields point that URL at `dist/smv.iife.min.js`.
 
 ## Version discipline

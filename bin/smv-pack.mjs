@@ -120,7 +120,7 @@ export function buildHTML({ spec, storyboard, title, preset, iife, theme = null,
   }
   const specJSON = escapeForScript(JSON.stringify(spec));
   const optsJSON = escapeForScript(JSON.stringify(mountOpts));
-  const docTitle = htmlEscape(title || "sparkle-motion-vizualizer");
+  const docTitle = htmlEscape(title || "sparkle-motion-visualizer");
   const pinned = fontLayer(record ? font : null);
   const mountCall = `${record ? "window.__smv = " : ""}SparkleMotion.mount(document.getElementById("smv-pack-root"), spec, opts);`;
   // With a pinned font the mount has to WAIT for it: node boxes are measured during mount,
@@ -142,7 +142,7 @@ export function buildHTML({ spec, storyboard, title, preset, iife, theme = null,
 <body>
 <div id="smv-pack-root"></div>
 <script>
-/* smv-pack: inlined dist/smv.iife.min.js — https://github.com/ (sparkle-motion-vizualizer) */
+/* smv-pack: inlined dist/smv.iife.min.js — https://github.com/ (sparkle-motion-visualizer) */
 ${iife}
 </script>
 <script>
