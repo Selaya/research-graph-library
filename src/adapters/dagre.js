@@ -1,6 +1,6 @@
 // Optional ESM adapter: the M0–M2 layout engine, kept alive behind the M3 solver seam.
 //
-//   import { dagreLayout } from "sparkle-motion-vizualizer/adapters/dagre";
+//   import { dagreLayout } from "sparkle-motion-visualizer/adapters/dagre";
 //   const result = dagreLayout(view, { dir: "LR" });
 //   // or, through mount():  mount(el, spec, { layout: { solver: dagreSolver } })
 //

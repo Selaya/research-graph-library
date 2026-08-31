@@ -5,7 +5,7 @@ modules developed in parallel compose. **Do not change a contract here without u
 every consumer.** Plain-JS ESM, no TypeScript, no framework. Browser-only APIs must be
 guarded so every module *imports* cleanly in Node (tests run under `node --test`).
 
-Naming: npm `sparkle-motion-vizualizer` · global `SparkleMotion` · prefix `smv`
+Naming: npm `sparkle-motion-visualizer` · global `SparkleMotion` · prefix `smv`
 (`.smv-*` classes, `--smv-*` custom properties, `dist/smv.esm.js`, `dist/smv.iife.min.js`).
 
 ## Data flow (one way)
@@ -552,7 +552,7 @@ attachA11y(g, { root, svg }) → { destroy() }
 (caption, one row per visible node: label, status, duration, depth, outgoing targets)
 after the svg inside the mount root; `visible: false` applies a visually-hidden clip
 class (its own injected style). Updates on `commit`/`update` events. Package export
-`sparkle-motion-vizualizer/a11y-table`.
+`sparkle-motion-visualizer/a11y-table`.
 - The table and a11y.js's tree are two renderings of the same content, so exactly one is in
   the accessibility tree at a time: while the interactive tree is attached (the default)
   the table sets `aria-hidden="true"` and is a visual/structural fallback only; with
@@ -567,7 +567,7 @@ class (its own injected style). Updates on `commit`/`update` events. Package exp
   Pure string-building where possible so Node tests can cover it with a fake clone.
 - `exportPNG(g, { scale = 2, background }?) → Promise<Blob>` — browser-only: SVG string
   → `Image` → canvas → `toBlob`. Rejects cleanly under Node.
-- Package export `sparkle-motion-vizualizer/export`. NOT in the IIFE (D11).
+- Package export `sparkle-motion-visualizer/export`. NOT in the IIFE (D11).
 
 ## `bin/smv-pack.mjs` — single-file HTML CLI (export agent)
 

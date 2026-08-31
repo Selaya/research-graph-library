@@ -1,4 +1,4 @@
-# sparkle-motion-vizualizer
+# sparkle-motion-visualizer
 
 A small, embeddable, **animated** graph visualization library — built for narrating
 pipelines of work: steps appearing over time, tokens flowing through fan-outs and joins,
@@ -9,7 +9,7 @@ One `<script>` tag, no build step, no framework:
 
 ```html
 <div id="pipe" style="height:480px"></div>
-<script src="dist/smv.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@0.1.0"></script>
 <script>
   const g = SparkleMotion.mount("#pipe", {
     nodes: [
@@ -34,7 +34,43 @@ One `<script>` tag, no build step, no framework:
 </script>
 ```
 
-ESM for bundler users: `import { mount } from "sparkle-motion-vizualizer"`.
+ESM for bundler users: `import { mount } from "sparkle-motion-visualizer"`.
+
+## Install
+
+From npm, for projects with a bundler or Node-based toolchain:
+
+```bash
+npm install sparkle-motion-visualizer
+```
+
+```js
+import { mount } from "sparkle-motion-visualizer";
+```
+
+From a CDN, for plain HTML pages — the package's `unpkg`/`jsdelivr` entry points
+resolve to the prebuilt IIFE bundle (global `SparkleMotion`), so a single script tag
+works with no build step:
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@0.1.0"></script>
+<!-- or: https://unpkg.com/sparkle-motion-visualizer@0.1.0 -->
+```
+
+The ESM bundle is also on the CDN for `<script type="module">` pages without a bundler:
+
+```js
+import { mount } from "https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@0.1.0/dist/smv.esm.js";
+```
+
+Straight from git (no registry involved):
+
+```bash
+npm install github:Selaya/research-graph-library
+```
+
+The optional dagre layout adapter needs the peer dependency: `npm install @dagrejs/dagre`,
+then `import { dagreSolver } from "sparkle-motion-visualizer/adapters/dagre"`.
 
 ## What it does
 
@@ -186,7 +222,7 @@ pulses, occupancy/loop badges, edge labels, container chrome — is `aria-hidden
 For a fully linearized fallback:
 
 ```js
-import { attachA11yTable } from "sparkle-motion-vizualizer/a11y-table";
+import { attachA11yTable } from "sparkle-motion-visualizer/a11y-table";
 const t = attachA11yTable(g, { visible: false });   // visually-hidden by default
 ```
 
@@ -223,8 +259,8 @@ install the optional peer and pass a solver:
 npm install @dagrejs/dagre
 ```
 ```js
-import { mount } from "sparkle-motion-vizualizer";
-import { dagreSolver, dagreLayout } from "sparkle-motion-vizualizer/adapters/dagre";
+import { mount } from "sparkle-motion-visualizer";
+import { dagreSolver, dagreLayout } from "sparkle-motion-visualizer/adapters/dagre";
 
 mount("#pipe", spec, { layout: { dir: "LR", solver: dagreSolver } });
 const result = dagreLayout(view, { dir: "LR" });   // or drive layout() directly
@@ -239,7 +275,7 @@ self-loop arcs, container padding and bounds either way.
 **Exports.** ESM-only entries (not in the IIFE, D11):
 
 ```js
-import { exportSVG, exportPNG } from "sparkle-motion-vizualizer/export";
+import { exportSVG, exportPNG } from "sparkle-motion-visualizer/export";
 const svg  = exportSVG(g, { pad: 24, theme: "dark" });   // standalone SVG string (whole graph)
 const shot = exportSVG(g, { viewport: true });           // current pan/zoom framing, culling kept
 const blob = await exportPNG(g, { scale: 2 });           // browser only

@@ -1,4 +1,4 @@
-// Hand-written types for sparkle-motion-vizualizer's main entry (src/index.js), M2.
+// Hand-written types for sparkle-motion-visualizer's main entry (src/index.js), M2.
 // Source stays plain JS — this file is the only place the public surface is typed.
 // Kept in sync by hand; when index.js's surface changes, this file changes with it.
 
@@ -111,7 +111,7 @@ export interface LayoutResult {
 
 // ---------------------------------------------------------------------------
 // The layout solver seam (M3): layout() is a shell around a pluggable solver.
-// Default is the in-house engine; `sparkle-motion-vizualizer/adapters/dagre`
+// Default is the in-house engine; `sparkle-motion-visualizer/adapters/dagre`
 // supplies the same contract on top of the optional @dagrejs/dagre peer.
 // ---------------------------------------------------------------------------
 

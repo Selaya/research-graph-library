@@ -397,7 +397,7 @@ the right document for "export this diagram", and the wrong one for "grab the fr
 looking at".
 
 ```js
-import { exportSVG } from "sparkle-motion-vizualizer/export";
+import { exportSVG } from "sparkle-motion-visualizer/export";
 const still = exportSVG(g, { viewport: true });   // the shot: same framing as the video
 ```
 

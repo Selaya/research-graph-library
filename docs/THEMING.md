@@ -1,6 +1,6 @@
 # Theming
 
-`sparkle-motion-vizualizer` has **one styling mechanism** (D7): everything visual is driven
+`sparkle-motion-visualizer` has **one styling mechanism** (D7): everything visual is driven
 by `--smv-*` CSS custom properties and `[data-*]` attributes, written at *commit* time
 (never per animation frame — geometry is the only thing that moves 60x/sec). That means
 theming is ordinary CSS: override a custom property, or write a selector against a

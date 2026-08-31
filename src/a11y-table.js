@@ -1,5 +1,5 @@
 // M2 — linearized table fallback (PLAN.md M2 "non-negotiable before 1.0"). ESM-only entry
-// `sparkle-motion-vizualizer/a11y-table` (package.json export owned by the integration
+// `sparkle-motion-visualizer/a11y-table` (package.json export owned by the integration
 // agent) — not part of the IIFE.
 //
 // One row per VISIBLE node: label, status, duration, depth, outgoing targets. Appended

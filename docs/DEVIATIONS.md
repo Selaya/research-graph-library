@@ -186,7 +186,7 @@ pretending it did not happen.
 around a pluggable `opts.solver` (default `engineSolve`); `dagreSolver`/`dagreLayout` are
 the M2-era invocation, verbatim, behind that seam. `@dagrejs/dagre` moved from
 `dependencies` to `devDependencies` + an **optional** `peerDependency`, exported as
-`sparkle-motion-vizualizer/adapters/dagre`. `scripts/build.js` hard-fails if the string
+`sparkle-motion-visualizer/adapters/dagre`. `scripts/build.js` hard-fails if the string
 `@dagrejs`/`graphlib` appears in any bundle, or if `dagre` appears in either minified one.
 
 Recorded because it changes the install contract: nothing on the default path imports
