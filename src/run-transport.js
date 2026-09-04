@@ -52,6 +52,17 @@ export function createRunTransport(internals, opts = {}) {
   return opts.mode === "live" ? createLiveTransport(internals, opts) : createSimTransport(internals, opts);
 }
 
+/** A split's history/progress belongs on the ENTRY part (the one no sibling feeds), so it
+ *  re-fans forward through the new internal wiring exactly as the source would have. Shared
+ *  by both transports' `split` handlers. */
+function entryOf(targets, spec) {
+  if (!targets || !targets.length) return null;
+  const set = new Set(targets);
+  const fed = new Set();
+  for (const e of spec.edges || []) if (set.has(e.source) && set.has(e.target)) fed.add(e.target);
+  return targets.find((id) => !fed.has(id)) ?? targets[0];
+}
+
 // =====================================================================================
 // Mode A — simulate (unchanged behavior; only the outer function name/wrapper moved)
 // =====================================================================================
@@ -248,9 +259,30 @@ function createSimTransport(internals, opts = {}) {
     bus.emit("remap", { sources, target, progress, ghosts, time: t });
   }
 
+  /** The split mirror of onCondense: the store is already split when `split` fires
+   *  (split-anim phase 2), so sample the OLD schedule first, then recompile. The source's
+   *  progress lands on the entry part — the same rule Mode B's remapLog uses — and tokens
+   *  sitting on the removed source hand over to the renderer's ghost-fade. Without this the
+   *  sim kept serving the pre-split schedule: state() reported the removed node forever and
+   *  play({until: <newNodeId>}) resolved instantly as "unknown node can never fire". */
+  function onSplit({ source, targets }) {
+    if (destroyed || source == null || !Array.isArray(targets)) return;
+    const before = current().stateAt(t);
+    const n = before.nodes[source];
+    const progress = n ? n.progress : 0;
+    const ghosts = [];
+    for (const tk of before.tokens) {
+      if (tk.at.kind === "node" && tk.at.id === source) ghosts.push({ id: tk.id, nodeId: tk.at.id });
+    }
+    dirty = true;
+    recompile();
+    bus.emit("remap", { sources: [source], target: entryOf(targets, store.spec()), progress, ghosts, time: t });
+  }
+
   const offs = [];
   if (hostBus) {
     offs.push(hostBus.on("condense", onCondense));
+    offs.push(hostBus.on("split", onSplit));
     for (const type of ["add", "remove", "update", "expand", "collapse"]) {
       offs.push(hostBus.on(type, () => { dirty = true; }));
     }
@@ -579,22 +611,12 @@ function createLiveTransport(internals, opts = {}) {
     bus.emit("remap", { sources, target, progress: after ? after.progress : 0, ghosts: [], time: t });
   }
 
-  /** A split's history belongs on the ENTRY part (the one no sibling feeds), so it re-fans
-   *  forward through the new internal wiring exactly as the source would have. */
-  function entryOf(targets) {
-    if (!targets || !targets.length) return null;
-    const set = new Set(targets);
-    const fed = new Set();
-    for (const e of store.spec().edges || []) if (set.has(e.source) && set.has(e.target)) fed.add(e.target);
-    return targets.find((id) => !fed.has(id)) ?? targets[0];
-  }
-
   // There is no compiled artifact to invalidate here, but the host bus still carries two
   // things this transport alone can act on: id-remapping morphs, and when an edge was born.
   const offs = [];
   if (hostBus) {
     offs.push(hostBus.on("condense", (ev) => { if (ev) remapLog(ev.sources, ev.target); }));
-    offs.push(hostBus.on("split", (ev) => { if (ev) remapLog([ev.source], entryOf(ev.targets)); }));
+    offs.push(hostBus.on("split", (ev) => { if (ev) remapLog([ev.source], entryOf(ev.targets, store.spec())); }));
     // `bornAt` is a replay input like the log itself, so changing it invalidates the memo.
     offs.push(hostBus.on("add", (ev) => {
       if (ev && ev.kind === "edge" && ev.id != null) { edgeBornAt.set(ev.id, frontier); touchLog(); }
