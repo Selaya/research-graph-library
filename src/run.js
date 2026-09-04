@@ -21,14 +21,17 @@ const MAX_STEPS = 100000;
 const UNIT_SEC = { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400 };
 const DURATION_RE = /^([+-]?(?:\d+\.?\d*|\.\d+))\s*(ms|s|m|h|d)?$/;
 
-/** "2h" | "45m" | "8s" | "300ms" | 12 (already seconds) -> seconds; null when absent/bad. */
+/** "2h" | "45m" | "8s" | "300ms" | 12 (already seconds) -> seconds; null when absent/bad.
+ *  Negative values are rejected (null), not clamped: a leading '-' is almost always a typo
+ *  or a unit mixup, and a negative dwell would give a segment t1 < t0, corrupting the
+ *  time-sorted event order. The caller turns that null into a warning (see compileRun). */
 export function parseDuration(v) {
-  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "number") return Number.isFinite(v) && v >= 0 ? v : null;
   if (typeof v !== "string") return null;
   const m = DURATION_RE.exec(v.trim().toLowerCase());
   if (!m) return null;
   const n = parseFloat(m[1]);
-  if (!Number.isFinite(n)) return null;
+  if (!Number.isFinite(n) || n < 0) return null;
   return n * (m[2] ? UNIT_SEC[m[2]] : 1);
 }
 
@@ -141,12 +144,27 @@ export function compileRun(spec = {}, opts = {}) {
     if (!e.loop) inNonLoop.get(e.target).push(e);
   }
 
+  // ---- events (declared early: bad-duration warnings below are emitted at compile time,
+  // before the discrete-event queue that produces the rest of the schedule even exists) ----
+  const events = [];
+  const emit = (ev) => { events.push(ev); };
+
   // ---- pacing ----
   const hopMs = Number.isFinite(opts.hopMs) && opts.hopMs >= 0 ? opts.hopMs : DEFAULT_HOP_MS;
   const secOf = new Map();
   let maxSec = 0;
   for (const n of nodes.values()) {
-    const s = parseDuration(n.data && n.data.duration);
+    const raw = n.data && n.data.duration;
+    const s = parseDuration(raw);
+    // A duration was given but didn't parse (bad string, negative, wrong type): that's
+    // silent data loss otherwise — it falls back to the same DWELL_NO_DURATION as a node
+    // with no duration at all. Say so once per node per compile, both to the console and
+    // as a 'warn' event a caller listening on the run bus can act on (run-transport.js
+    // forwards every sim event by its `type`, so this needs no extra plumbing there).
+    if (s == null && raw != null) {
+      console.warn(`compileRun: node "${n.id}" has an unparseable duration (${JSON.stringify(raw)}); falling back to the ${DWELL_NO_DURATION}ms default`);
+      emit({ t: 0, type: "warn", nodeId: n.id, message: "unparseable duration", value: raw });
+    }
     secOf.set(n.id, s);
     if (s != null && s > maxSec) maxSec = s;
   }
@@ -195,7 +213,6 @@ export function compileRun(spec = {}, opts = {}) {
   }
 
   // ---- discrete-event machinery ----
-  const events = [];
   const tokens = [];
   const loopTimeline = new Map(); // edgeId -> [{iteration, t}]
   const loopMax = new Map();
@@ -214,8 +231,6 @@ export function compileRun(spec = {}, opts = {}) {
     }
     queue.splice(lo, 0, item);
   }
-
-  const emit = (ev) => { events.push(ev); };
 
   function newToken(rate, applied, loopsUsed, parentId) {
     const tk = { id: `t${tokenSeq++}`, rate, applied, loopsUsed, parentId, segments: [], endT: Infinity };

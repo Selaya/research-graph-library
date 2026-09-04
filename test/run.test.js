@@ -97,12 +97,14 @@ test("parseDuration: unit table, numbers, and rejects", () => {
   const table = [
     ["2h", 7200], ["45m", 2700], ["8s", 8], ["300ms", 0.3], ["3m", 180],
     ["1.5h", 5400], ["0.5s", 0.5], [".25s", 0.25], ["1d", 86400],
-    ["12", 12], [" 40s ", 40], ["8S", 8], ["2H", 7200], ["-5s", -5],
+    ["12", 12], [" 40s ", 40], ["8S", 8], ["2H", 7200],
     [12, 12], [0, 0], [0.5, 0.5],
   ];
   for (const [input, expected] of table) near(parseDuration(input), expected);
 
-  for (const bad of [null, undefined, "", "  ", "abc", "8x", "s", "1 2s", {}, [], true, false, NaN, Infinity, "NaN"]) {
+  // Negative durations are rejected, not negated or clamped: a leading '-' would otherwise
+  // parse to a dwell with t1 < t0, corrupting the time-sorted event order downstream.
+  for (const bad of [null, undefined, "", "  ", "abc", "8x", "s", "1 2s", {}, [], true, false, NaN, Infinity, "NaN", "-5s", "-1", -5, -0.5]) {
     assert.equal(parseDuration(bad), null, `expected null for ${JSON.stringify(bad)}`);
   }
 });
@@ -492,6 +494,61 @@ test("no durations anywhere: every node dwells the 600ms default", () => {
   assert.equal(sim.stateAt(3300).done, true);
   assert.equal(Object.keys(sim.stateAt(0).joins).length, 0, "no fan-in, no join state");
   assert.deepEqual(sim.stateAt(0).loops, {});
+});
+
+test("unparseable duration: warns once per node (console + 'warn' event) and falls back to the 600ms default", () => {
+  const calls = [];
+  const orig = console.warn;
+  console.warn = (...args) => calls.push(args);
+  try {
+    const sim = compileRun({
+      nodes: [{ id: "a", data: { duration: "45mins" } }, { id: "b" }],
+      edges: [{ id: "ab", source: "a", target: "b" }],
+    });
+    near(firstEv(sim, "start", (e) => e.nodeId === "a").dwellMs, 600);
+    assert.equal(calls.length, 1, "warns exactly once per node per compile, not per frame");
+    assert.ok(String(calls[0][0]).includes("a"), "names the offending node in the console warning");
+    assert.ok(String(calls[0][0]).includes("45mins"), "names the bad value in the console warning");
+
+    const warn = firstEv(sim, "warn", (e) => e.nodeId === "a");
+    assert.ok(warn, "also emits a 'warn' event on the sim so a caller on the run bus can subscribe");
+    assert.equal(warn.value, "45mins");
+
+    // A node with no duration at all stays silent: no warning either way.
+    assert.equal(sim.events.filter((e) => e.type === "warn" && e.nodeId === "b").length, 0);
+  } finally {
+    console.warn = orig;
+  }
+});
+
+test("negative duration: rejected like an unparseable one — default dwell, a warning, and monotonic event ordering", () => {
+  const calls = [];
+  const orig = console.warn;
+  console.warn = (...args) => calls.push(args);
+  try {
+    // Mixing a positive-duration branch in is what exposed the original bug: maxSec > 0
+    // made the negative duration's sec/maxSec ratio swing the pacing curve deeply negative,
+    // producing a dwell segment with t1 < t0 (the node's 'done' could land before 'enter').
+    const sim = compileRun({
+      nodes: [{ id: "a" }, { id: "pos", data: { duration: "1s" } }, { id: "neg", data: { duration: "-50s" } }],
+      edges: [{ id: "a-pos", source: "a", target: "pos" }, { id: "a-neg", source: "a", target: "neg" }],
+    });
+    assert.equal(calls.length, 1, "warns exactly once, only for the negative-duration node");
+    assert.ok(String(calls[0][0]).includes("neg"));
+    assert.ok(firstEv(sim, "warn", (e) => e.nodeId === "neg"));
+    near(firstEv(sim, "start", (e) => e.nodeId === "neg").dwellMs, 600);
+
+    // Full schedule stays time-sorted...
+    let prevT = -Infinity;
+    for (const ev of sim.events) { assert.ok(ev.t >= prevT, "events array must be time-sorted"); prevT = ev.t; }
+    // ...and, specifically, 'neg' reports enter before finish (not the reverse).
+    const enterNeg = firstEv(sim, "enter", (e) => e.nodeId === "neg");
+    const finishNeg = firstEv(sim, "finish", (e) => e.nodeId === "neg");
+    assert.ok(enterNeg.t <= finishNeg.t, "'neg' must enter no later than it finishes");
+    assert.equal(sim.stateAt(enterNeg.t).nodes.neg.status, "active");
+  } finally {
+    console.warn = orig;
+  }
 });
 
 test("degenerate specs compile to an inert sim rather than throwing", () => {
