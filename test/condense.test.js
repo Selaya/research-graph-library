@@ -110,7 +110,10 @@ test("phases run in order: highlight -> converge -> reveal, on the shared ticker
   ]);
   await advance(h.ticker, CONDENSE_PHASES.reveal + 1);
   assert.deepEqual(h.marks.at(-1), { ids: ["auto"], value: null });
-  assert.deepEqual(await run.promise, { canceled: false });
+  assert.deepEqual(await run.promise, {
+    canceled: false, applied: true,
+    ids: { created: ["auto"], removed: ["m1", "m2", "m3"] },
+  });
 });
 
 test("the condense event payload carries sources, target and both spec sides (C12)", async () => {
@@ -139,7 +142,10 @@ test("store state after: N nodes become 1, edges redirect, the graph still lays 
   await advance(h.ticker, CONDENSE_PHASES.highlight + 1);
   await advance(h.ticker, CONDENSE_PHASES.converge + 1);
   await advance(h.ticker, CONDENSE_PHASES.reveal + 1);
-  assert.deepEqual(await run.promise, { canceled: false });
+  assert.deepEqual(await run.promise, {
+    canceled: false, applied: true,
+    ids: { created: ["auto"], removed: ["m1", "m2", "m3"] },
+  });
 
   assert.deepEqual([...h.store.nodes.keys()], ["A", "Z", "auto"]);
   const edges = [...h.store.edges.values()].map((e) => `${e.source}->${e.target}`).sort();
@@ -162,7 +168,10 @@ test("reduced motion keeps every phase and its ordering, just ~1ms each (G9)", a
   assert.deepEqual(seen, ["condense"]);
   await advance(h.ticker, 1);
   await advance(h.ticker, 1);
-  assert.deepEqual(await run.promise, { canceled: false });
+  assert.deepEqual(await run.promise, {
+    canceled: false, applied: true,
+    ids: { created: ["auto2"], removed: ["m1", "m2"] },
+  });
   assert.deepEqual(h.marks.map((m) => m.value), ["src", null, "reveal", null], "the full sequence still ran");
   assert.equal(h.store.hasNode("auto2"), true);
 });
@@ -178,7 +187,10 @@ test("a mutation mid-converge cancels the run cleanly (D9), leaving the merge in
   h.relayout({ duration: 100 });
   await flush();
 
-  assert.deepEqual(await run.promise, { canceled: true });
+  assert.deepEqual(await run.promise, {
+    canceled: true, applied: true,
+    ids: { created: ["auto"], removed: ["m1", "m2", "m3"] },
+  }, "the structural merge landed (applied:true) even though this run reports canceled:true");
   assert.deepEqual(h.marks.map((m) => m.value), ["src", null], "no reveal after a cancel");
   assert.equal(h.store.hasNode("auto"), true, "the structural merge already happened and stands");
 
@@ -197,11 +209,18 @@ test("an overlapping condense is canceled at phase 2, never thrown into the void
   const second = runCondense(h.g, h.internals, ["m1", "m2"], { id: "auto" });
 
   await advance(h.ticker, CONDENSE_PHASES.highlight + 1);
-  assert.deepEqual(await within(second.promise), { canceled: true }, "the loser is canceled, not rejected");
+  assert.deepEqual(
+    await within(second.promise), { canceled: true, applied: false },
+    "the loser is canceled, not rejected, and never touched the store",
+  );
 
   await advance(h.ticker, CONDENSE_PHASES.converge + 1);
   await advance(h.ticker, CONDENSE_PHASES.reveal + 1);
-  assert.deepEqual(await within(first.promise), { canceled: false }, "the winner still finishes");
+  assert.deepEqual(
+    await within(first.promise),
+    { canceled: false, applied: true, ids: { created: ["auto"], removed: ["m1", "m2"] } },
+    "the winner still finishes",
+  );
   assert.equal(h.store.hasNode("auto"), true);
   assert.deepEqual([...h.store.nodes.keys()].sort(), ["A", "Z", "auto", "m3"], "merged exactly once");
 });
@@ -211,7 +230,7 @@ test("tearing the clock down mid-phase settles the run instead of stranding it",
   const run = runCondense(h.g, h.internals, ["m1", "m2"], { id: "auto5" });
   await advance(h.ticker, 32); // inside the highlight phase
   h.ticker.destroy();          // what g.destroy() does under a live condense
-  assert.deepEqual(await within(run.promise), { canceled: true });
+  assert.deepEqual(await within(run.promise), { canceled: true, applied: false });
 });
 
 test("cancel() mid-converge lands the merged state instead of freezing it half-entered", async () => {
@@ -226,7 +245,10 @@ test("cancel() mid-converge lands the merged state instead of freezing it half-e
 
   // An explicit cancel (§5.3's handle) — unlike a D9 retarget there is NO follow-up commit.
   run.cancel();
-  assert.deepEqual(await run.promise, { canceled: true });
+  assert.deepEqual(await run.promise, {
+    canceled: true, applied: true,
+    ids: { created: ["auto"], removed: ["m1", "m2", "m3"] },
+  }, "the merge landed before this explicit cancel, so applied stays true");
   await advance(h.ticker, 200);
 
   assert.deepEqual(
@@ -243,7 +265,7 @@ test("cancel() before converge stops the run and clears the highlight", async ()
   const h = host();
   const run = runCondense(h.g, h.internals, ["m1", "m2"], { id: "auto3" });
   run.cancel();
-  assert.deepEqual(await run.promise, { canceled: true });
+  assert.deepEqual(await run.promise, { canceled: true, applied: false });
   assert.deepEqual(h.marks.map((m) => m.value), ["src", null]);
   assert.equal(h.store.hasNode("auto3"), false, "canceling during highlight never touches the store");
   assert.equal(h.commits.length, 0);
