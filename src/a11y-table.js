@@ -36,12 +36,36 @@ function injectTableStyles(doc) {
   return el;
 }
 
+/** Same live-status preference as a11y.js's `ariaLabelFor`: run-render.js writes the
+ *  live run state to `data-run` on each `.smv-node` per status transition and
+ *  deliberately never back into the spec (a run is not a spec mutation), so the static
+ *  `data.status` alone goes stale the moment a run starts. Reads the DOM rather than
+ *  keeping our own cache of `runstatus` payloads, so a `commit` that recreates the
+ *  elements (collapse/expand) resets us for free exactly when run-render's own
+ *  `runStatusAt` cache resets — no separate invalidation to keep in sync with it. */
+function liveRunStatus(g) {
+  const root = g && g.el;
+  const svg = root && typeof root.querySelector === "function" ? root.querySelector("svg") : null;
+  const live = new Map();
+  if (!svg || typeof svg.querySelectorAll !== "function") return live;
+  for (const el of svg.querySelectorAll(".smv-node")) {
+    const id = typeof el.getAttribute === "function" ? el.getAttribute("data-id") : null;
+    const run = typeof el.getAttribute === "function" ? el.getAttribute("data-run") : null;
+    if (id != null && run) live.set(id, run);
+  }
+  return live;
+}
+
 /** Pure row-model derivation: `g` -> `[{id,label,status,duration,depth,targets:[id,...]}]`.
  *  Visible-node source of truth is `g.layoutResult().nodes` (exactly what's on screen —
  *  meta-edge remaps and collapsed containers already folded in); falls back to walking
  *  the spec through `viewstate.isVisible` if no layout has landed yet. Targets are the
  *  *other spec edges'* visible ancestors (mirrors viewstate's own boundary-edge remap,
- *  via the public `visibleAncestor`), deduped, self-loops on the row's own id dropped. */
+ *  via the public `visibleAncestor`), deduped, self-loops on the row's own id dropped.
+ *  `status` prefers the live `data-run` value over the design-time `data.status` (see
+ *  `liveRunStatus`) — this table is THE accessible surface when a page mounts with
+ *  `a11y:false`, and a run driving the graph with no live signal here left it silently
+ *  wrong the whole time a run was in progress. */
 export function computeRows(g) {
   if (!g) return [];
   const spec = typeof g.spec === "function" ? g.spec() : null;
@@ -50,6 +74,7 @@ export function computeRows(g) {
 
   const vs = g.viewstate;
   const lr = typeof g.layoutResult === "function" ? g.layoutResult() : null;
+  const runStatus = liveRunStatus(g);
 
   let ids;
   if (lr && lr.nodes) ids = Object.keys(lr.nodes);
@@ -85,10 +110,11 @@ export function computeRows(g) {
   return ids.map((id) => {
     const n = byId.get(id) || { id };
     const d = n.data || {};
+    const live = runStatus.get(id);
     return {
       id,
       label: n.label != null ? String(n.label) : String(id),
-      status: d.status != null ? String(d.status) : "",
+      status: live || (d.status != null ? String(d.status) : ""),
       duration: d.duration != null ? String(d.duration) : "",
       depth: depthOf(id),
       targets: targetsOf(id),
@@ -165,6 +191,10 @@ export function attachA11yTable(g, { visible = false } = {}) {
   if (typeof g.on === "function") {
     offs.push(g.on("commit", render));
     offs.push(g.on("update", render));
+    // run-render.js writes `data-run` and emits this outside the commit/update cycle
+    // (a run is not a spec mutation), so the table needs its own subscription or the
+    // Status column simply never moves while a run is in progress.
+    offs.push(g.on("runstatus", render));
   }
 
   return {
