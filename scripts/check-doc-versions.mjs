@@ -30,7 +30,10 @@ export function findVersionPinMismatches(text, wantVersion) {
 function main() {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const wantVersion = pkg.version;
-  const targets = ["README.md", ...readdirSync(join(root, "docs")).filter((f) => f.endsWith(".md")).map((f) => `docs/${f}`)];
+  // USABILITY-EVAL.md is an evaluation record that quotes historical bad pins verbatim as
+// evidence — exempt it rather than rewrite the record.
+const EXEMPT = new Set(["docs/USABILITY-EVAL.md"]);
+const targets = ["README.md", ...readdirSync(join(root, "docs")).filter((f) => f.endsWith(".md")).map((f) => `docs/${f}`)].filter((f) => !EXEMPT.has(f));
 
   let failed = false;
   for (const relPath of targets) {
