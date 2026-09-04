@@ -473,6 +473,7 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "expand"; args: [string] }
   | { op: "collapse"; args: [string] }
   | { op: "condense"; args: [string[], NodeSpec] }
+  | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }] }
   | { op: "batch"; steps: StoryboardStep[] }
   | { op: "run.play"; until?: string; args?: [{ until?: string }?] }
   | { op: "run.step"; token?: string; args?: [{ token?: string }?] }
