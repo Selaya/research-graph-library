@@ -7,6 +7,9 @@ import { readFile, stat } from "node:fs/promises";
 import { existsSync, statSync, readdirSync } from "node:fs";
 import { join, extname, normalize, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
 
 /** The repo root — the default document root, and where the e2e demos live. */
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -20,12 +23,27 @@ const MIME = {
   ".map": "application/json; charset=utf-8",
 };
 
-/** playwright-core ships no browsers; this image pre-installs them under /opt. */
+/** The final, nothing-worked error — named so the message text is unit-testable without
+ *  having to fake a whole missing-chromium filesystem. */
+export function chromiumNotFoundMessage(tried) {
+  return (
+    `no chromium binary found (tried ${tried.join(", ")}, and playwright-core's own browser ` +
+    "cache) — run `npx playwright install chromium`"
+  );
+}
+
+/** playwright-core ships no browsers; this image pre-installs them under /opt. Outside that
+ *  image (a real `npm install` of this package) there is no /opt/pw-browsers, so the last
+ *  resort is playwright-core's own resolution — the standard cache location (or
+ *  `PLAYWRIGHT_BROWSERS_PATH`, already tried above) that `npx playwright install chromium`
+ *  writes to. */
 export function findChromium() {
   const direct = "/opt/pw-browsers/chromium";
   if (existsSync(direct) && statSync(direct).isFile()) return direct;
   const bases = ["/opt/pw-browsers", process.env.PLAYWRIGHT_BROWSERS_PATH].filter(Boolean);
+  const tried = [direct];
   for (const base of bases) {
+    tried.push(base);
     if (!existsSync(base)) continue;
     for (const entry of readdirSync(base)) {
       for (const rel of ["chrome-linux/chrome", "chrome-linux/headless_shell"]) {
@@ -34,7 +52,13 @@ export function findChromium() {
       }
     }
   }
-  throw new Error("no chromium binary found under /opt/pw-browsers");
+  try {
+    const p = require("playwright-core").chromium.executablePath();
+    if (p && existsSync(p) && statSync(p).isFile()) return p;
+  } catch {
+    /* playwright-core not installed, or it could not resolve a path at all — fall through */
+  }
+  throw new Error(chromiumNotFoundMessage(tried));
 }
 
 /** Serve `root` (the repo by default) over http — file:// breaks module/script loading

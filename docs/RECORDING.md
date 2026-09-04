@@ -152,6 +152,19 @@ npx smv-pack spec.json -o story.html --storyboard sb.json --preset pipeline --ti
 
 ## 3. Rendering with `smv-record`
 
+`smv-record` drives a real headless Chromium, so it needs one on disk — `playwright-core`
+(a devDependency of this package; `npm install -D playwright-core` for an npm consumer)
+plus the browser binary itself, which is a separate download:
+
+```
+npx playwright install chromium
+```
+
+`findChromium()` (`scripts/harness.mjs`) looks for it in the usual places — this repo's
+image, `$PLAYWRIGHT_BROWSERS_PATH`, then playwright-core's own standard cache location — and
+only fails once none of them has it, naming every path it tried and pointing at the command
+above.
+
 ```
 npm run build                       # dist/smv.iife.min.js is what gets packed
 npx smv-record spec.json --storyboard sb.json --out story.mp4 \
@@ -191,9 +204,10 @@ rendering a take it cannot encode.
 | `--from label` / `--to label` | — | render only that chapter range (§3.3) |
 | `--font pinned.woff2` | — | pin the typeface so the layout is the same on every machine (§3.4) |
 
-Needs `dist/smv.iife.min.js` (`npm run build`) and the dev-installed `playwright-core`;
-any bad input — a missing encoder, an unknown `--cues` extension, a `--font` that is not
-there or is not a font, a `--from` label the storyboard does not have — exits 1 with
+Needs `dist/smv.iife.min.js` (`npm run build`), the dev-installed `playwright-core`, and a
+chromium binary for it to drive (`npx playwright install chromium` — see the prerequisite
+above); any bad input — a missing encoder, an unknown `--cues` extension, a `--font` that is
+not there or is not a font, a `--from` label the storyboard does not have — exits 1 with
 `smv-record: <reason>` before a browser is launched.
 
 **Interrupting a take.** Ctrl+C at any point removes the partial `--out` file and exits

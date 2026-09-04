@@ -15,7 +15,7 @@ copied next to your page), give it a sized container, and mount:
 <body>
   <div id="pipe" style="height:480px"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@1/dist/smv.iife.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@0.1.0/dist/smv.iife.min.js"></script>
   <script>
     const spec = {
       nodes: [
@@ -50,7 +50,7 @@ script or a bundler:
 
 ```html
 <script type="module">
-  import { exportSVG, exportPNG } from "https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@1/src/export.js";
+  import { exportSVG, exportPNG } from "https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@0.1.0/src/export.js";
   // exportSVG(g) -> string   (works anywhere, incl. Node, for the string-building half)
   // exportPNG(g) -> Promise<Blob>  (browser only — canvas rasterization)
 </script>
@@ -82,6 +82,7 @@ node bin/smv-pack.mjs demo/spec.json -o pipeline.html
 
 ```
 smv-pack <spec.json> [-o out.html] [--storyboard sb.json] [--title T] [--preset pipeline]
+                   [--theme dark|light] [--record]
 ```
 
 | Flag | Meaning |
@@ -91,6 +92,8 @@ smv-pack <spec.json> [-o out.html] [--storyboard sb.json] [--title T] [--preset 
 | `--storyboard <sb.json>` | Path to a JSON storyboard op array (§5.5). When given, the packed page mounts with `autoplay: true` and replays it. |
 | `--title <T>` | `<title>` of the emitted HTML document. |
 | `--preset <pipeline>` | Enables a preset (currently only `"pipeline"`) via `opts.preset`. |
+| `--theme <dark\|light>` | Mounts with a fixed `opts.theme` instead of leaving it to `"auto"`. |
+| `--record` | Emits the frame-renderer variant (D15) instead of the interactive one: manual ticker, forced full motion, no transport chrome, the story not autoplayed, and the instance on `window.__smv`. This is the page `smv-record` drives — on its own it just sits at step 0. |
 
 The emitted page always mounts with `controls: true` (the transport bar), so a stray
 storyboard or a manually-run graph can still be scrubbed by hand.
