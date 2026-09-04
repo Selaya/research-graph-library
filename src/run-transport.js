@@ -294,8 +294,9 @@ function createSimTransport(internals, opts = {}) {
  *     (× speed()) and re-attaches on arrival; `follow()` snaps back immediately. `t` can
  *     never exceed `frontier` — there is nothing to show past "now".
  * `start`/`finish`/`spawn` append to an event log; `state()` replays it fresh every call
- * (src/run-live.js is O(events), cheap at this scale) — there is no compiled artifact to
- * invalidate, so graph mutations need no dirty-tracking here: store.spec() is read live.
+ * (src/run-live.js is O(n log n) in the log size, cheap at this scale) — there is no compiled
+ * artifact to invalidate, so graph mutations need no dirty-tracking here: store.spec() is
+ * read live.
  */
 function createLiveTransport(internals, opts = {}) {
   const { ticker, store } = internals;
@@ -451,8 +452,20 @@ function createLiveTransport(internals, opts = {}) {
     return Math.max(0, Math.min(frontier, at));
   }
 
+  /** start/finish/spawn intentionally never THROW on an unknown id — replayLive's
+   *  `nodes.has(e.id)` filter just drops the entry, and a node added later self-heals onto
+   *  it (D4 M2) — but a silent drop with no signal at all is its own footgun, so warn. */
+  function warnUnknownNode(fn, id) {
+    console.warn(`run-transport: ${fn}("${id}") — no node "${id}" in the current graph; ` +
+      `the event is logged but filtered out of every state() unless "${id}" is added later (self-heals).`);
+  }
+  function warnBadN(fn, id, n) {
+    console.warn(`run-transport: ${fn}("${id}") — non-numeric n (${JSON.stringify(n)}); ignored.`);
+  }
+
   function start(id, o) {
     if (destroyed) return t;
+    if (!store.hasNode(id)) warnUnknownNode("start", id);
     const at = stampAt(o);
     log.push({ t: at, type: "start", id });
     touchLog();
@@ -463,6 +476,14 @@ function createLiveTransport(internals, opts = {}) {
   function finishNode(id, o) {
     if (destroyed) return t;
     const at = stampAt(o);
+    if (!store.hasNode(id)) warnUnknownNode("finish", id);
+    else {
+      const n = stateAt(at).nodes[id];
+      if (n && n.occupancy === 0) {
+        console.warn(`run-transport: finish("${id}") — "${id}" has zero current occupancy; this finish() is a no-op.`);
+      }
+    }
+    if (o && o.n !== undefined && !Number.isFinite(o.n)) warnBadN("finish", id, o.n);
     const ev = { t: at, type: "finish", id };
     if (o && Number.isFinite(o.n)) ev.n = o.n;
     log.push(ev);
@@ -473,6 +494,8 @@ function createLiveTransport(internals, opts = {}) {
 
   function spawn(id, n, o) {
     if (destroyed) return t;
+    if (!store.hasNode(id)) warnUnknownNode("spawn", id);
+    if (!Number.isFinite(n)) warnBadN("spawn", id, n);
     const at = stampAt(o);
     log.push({ t: at, type: "spawn", id, n });
     touchLog();
