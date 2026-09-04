@@ -19,6 +19,16 @@ const CSS = `
   outline:2px solid var(--smv-accent, #5b6ef5);
   outline-offset:2px;
 }
+.smv-a11y-live{
+  position:absolute !important;
+  width:1px !important; height:1px !important;
+  padding:0 !important; margin:-1px !important;
+  overflow:hidden !important;
+  clip:rect(0,0,0,0) !important;
+  clip-path:inset(50%) !important;
+  white-space:nowrap !important;
+  border:0 !important;
+}
 `;
 
 function injectA11yStyles(doc) {
@@ -34,14 +44,42 @@ function injectA11yStyles(doc) {
   return el;
 }
 
-/** Pure: visible node ids from a `g.layoutResult()`, sorted x then y (reading order). */
+/** Pure: visible node ids from a `g.layoutResult()`, in reading order.
+ *
+ *  Rank-major, not a fixed x-then-y sort: x-then-y is only correct reading order for a
+ *  left/right layout (`opts.layout.dir` "LR"/"RL") — for a top/bottom layout ("TB"/"BT")
+ *  it groups by SCREEN COLUMN instead of by rank, scattering one rank's siblings across
+ *  the tab order wherever their x happens to fall among neighbouring ranks.
+ *
+ *  This module has no read-only route to `dir` itself (it lives in index.js's own
+ *  `layoutOpts` closure, D2's frozen seam — not this file's to reach into), so direction
+ *  is inferred from layout data already on `layoutResult`: `order` (src/layout.js/
+ *  engine.js, D2 M3) is the solver's own per-rank grouping, rank 0 first. In
+ *  `engine.js`'s `emit()` every node in one rank shares the *exact* rank-axis screen
+ *  coordinate (x for LR/RL, y for TB/BT) — only the in-rank axis varies within a rank —
+ *  so the first rank with 2+ nodes tells us which axis is "rank" outright. Falls back to
+ *  the historical x-then-y sort when `order` is absent (older/foreign layout results) or
+ *  every rank is a singleton, where the axis choice can't be observed and doesn't matter
+ *  (a single-file chain sorts identically either way). */
 export function readingOrder(layoutResult) {
   if (!layoutResult || !layoutResult.nodes) return [];
   const nodes = layoutResult.nodes;
+  const order = Array.isArray(layoutResult.order) ? layoutResult.order : [];
+  let vertical = false; // rank axis is y (TB/BT) rather than the default x (LR/RL)
+  for (const row of order) {
+    const ids = (row || []).filter((id) => nodes[id]);
+    if (ids.length < 2) continue;
+    const first = nodes[ids[0]];
+    const sameX = ids.every((id) => nodes[id].x === first.x);
+    const sameY = ids.every((id) => nodes[id].y === first.y);
+    if (sameY && !sameX) vertical = true;
+    break; // one informative rank is enough to know the axis
+  }
   return Object.keys(nodes).sort((a, b) => {
     const na = nodes[a], nb = nodes[b];
-    if (na.x !== nb.x) return na.x - nb.x;
-    return na.y - nb.y;
+    const [pa, pb, sa, sb] = vertical ? [na.y, nb.y, na.x, nb.x] : [na.x, nb.x, na.y, nb.y];
+    if (pa !== pb) return pa - pb;
+    return sa - sb;
   });
 }
 
@@ -70,6 +108,46 @@ export function attachA11y(g, { root, svg } = {}) {
 
   const doc = svg.ownerDocument || (root && root.ownerDocument) || null;
   if (doc) injectA11yStyles(doc);
+
+  // A `role="status"` live region backing the "a screen reader hears nodes start and
+  // finish" promise: aria-label changes alone are only announced for the FOCUSED
+  // treeitem (real AT ignores an off-screen attribute mutation), so a run progressing
+  // anywhere but under the user's focus was otherwise silent. Lives beside the svg
+  // (appended to `root`, or `doc.body` if this module is attached with no root) rather
+  // than inside it — a live region has to be in the accessibility tree at all times, and
+  // `svg`'s own `role="application"` would otherwise swallow it as presentational.
+  let liveRegion = null;
+  if (doc && typeof doc.createElement === "function") {
+    const host = root && typeof root.appendChild === "function" ? root : (doc.body || doc.documentElement);
+    if (host && typeof host.appendChild === "function") {
+      liveRegion = doc.createElement("div");
+      liveRegion.setAttribute("role", "status");
+      liveRegion.setAttribute("aria-live", "polite");
+      liveRegion.setAttribute("class", "smv-a11y-live");
+      host.appendChild(liveRegion);
+    }
+  }
+  // Coalesced, not written straight through: a run can flip several nodes' status in the
+  // same tick (a fan-out step landing on N targets at once), and firing N back-to-back
+  // textContent writes spams a "polite" region with updates AT drops or reorders. Queue
+  // and flush on the next microtask so one JS-turn's worth of transitions lands as a
+  // single joined announcement instead.
+  let livePending = [];
+  let liveScheduled = false;
+  function flushLive() {
+    liveScheduled = false;
+    if (!liveRegion || !livePending.length) return;
+    liveRegion.textContent = livePending.join(". ");
+    livePending = [];
+  }
+  function announce(text) {
+    if (!liveRegion) return;
+    livePending.push(text);
+    if (liveScheduled) return;
+    liveScheduled = true;
+    if (typeof queueMicrotask === "function") queueMicrotask(flushLive);
+    else Promise.resolve().then(flushLive);
+  }
 
   const node = (id) => (typeof g.node === "function" ? g.node(id) : null);
   const layoutOf = () => (typeof g.layoutResult === "function" ? g.layoutResult() : null);
@@ -191,6 +269,11 @@ export function attachA11y(g, { root, svg } = {}) {
     if (id == null) return;
     const el = findEl(id);
     if (el) el.setAttribute("aria-label", ariaLabelFor(id, el));
+    const n = node(id);
+    const label = (n && n.label) || id;
+    if (ev.status === "active") announce(`${label} started`);
+    else if (ev.status === "done") announce(`${label} finished`);
+    else if (ev.status === "failed") announce(`${label} failed`);
   }
 
   /** Focus can arrive by routes this module does not drive — a click on the `<g>`, an
@@ -267,6 +350,12 @@ export function attachA11y(g, { root, svg } = {}) {
         el.removeAttribute("aria-label");
         el.removeAttribute("aria-expanded");
         el.removeAttribute("tabindex");
+      }
+      if (liveRegion) {
+        if (liveRegion.parentNode && typeof liveRegion.parentNode.removeChild === "function") {
+          liveRegion.parentNode.removeChild(liveRegion);
+        } else if (typeof liveRegion.remove === "function") liveRegion.remove();
+        liveRegion = null; // an already-queued flush becomes a no-op (see announce/flushLive)
       }
     },
   };

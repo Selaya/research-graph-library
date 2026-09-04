@@ -52,6 +52,17 @@ export function createRunTransport(internals, opts = {}) {
   return opts.mode === "live" ? createLiveTransport(internals, opts) : createSimTransport(internals, opts);
 }
 
+/** A split's history/progress belongs on the ENTRY part (the one no sibling feeds), so it
+ *  re-fans forward through the new internal wiring exactly as the source would have. Shared
+ *  by both transports' `split` handlers. */
+function entryOf(targets, spec) {
+  if (!targets || !targets.length) return null;
+  const set = new Set(targets);
+  const fed = new Set();
+  for (const e of spec.edges || []) if (set.has(e.source) && set.has(e.target)) fed.add(e.target);
+  return targets.find((id) => !fed.has(id)) ?? targets[0];
+}
+
 // =====================================================================================
 // Mode A — simulate (unchanged behavior; only the outer function name/wrapper moved)
 // =====================================================================================
@@ -118,7 +129,9 @@ function createSimTransport(internals, opts = {}) {
     if (t >= s.duration) return true;
     if (until == null) return false;
     const n = s.stateAt(t).nodes[until];
-    return !n || n.status === "done"; // an unknown node can never fire — never hang on it
+    // An unknown node can never fire — never hang on it. Nor on a failed one: 'failed' is
+    // as terminal as 'done', and "play until X" must not outlive X.
+    return !n || n.status === "done" || n.status === "failed";
   }
 
   function endPlay(canceled = false) {
@@ -214,10 +227,13 @@ function createSimTransport(internals, opts = {}) {
   }
 
   /** First moment `nodeId` is finished — what a `play({until})` step is worth on a
-   *  storyboard's cumulative timeline. Falls back to the whole run. */
+   *  storyboard's cumulative timeline. A `fail` counts: it is the instant that node stops
+   *  being something to wait for (see satisfied()). Falls back to the whole run. */
   function timeOf(nodeId) {
     const s = current();
-    for (const ev of s.events) if (ev.type === "finish" && ev.nodeId === nodeId) return ev.t;
+    for (const ev of s.events) {
+      if ((ev.type === "finish" || ev.type === "fail") && ev.nodeId === nodeId) return ev.t;
+    }
     return s.duration;
   }
 
@@ -243,9 +259,30 @@ function createSimTransport(internals, opts = {}) {
     bus.emit("remap", { sources, target, progress, ghosts, time: t });
   }
 
+  /** The split mirror of onCondense: the store is already split when `split` fires
+   *  (split-anim phase 2), so sample the OLD schedule first, then recompile. The source's
+   *  progress lands on the entry part — the same rule Mode B's remapLog uses — and tokens
+   *  sitting on the removed source hand over to the renderer's ghost-fade. Without this the
+   *  sim kept serving the pre-split schedule: state() reported the removed node forever and
+   *  play({until: <newNodeId>}) resolved instantly as "unknown node can never fire". */
+  function onSplit({ source, targets }) {
+    if (destroyed || source == null || !Array.isArray(targets)) return;
+    const before = current().stateAt(t);
+    const n = before.nodes[source];
+    const progress = n ? n.progress : 0;
+    const ghosts = [];
+    for (const tk of before.tokens) {
+      if (tk.at.kind === "node" && tk.at.id === source) ghosts.push({ id: tk.id, nodeId: tk.at.id });
+    }
+    dirty = true;
+    recompile();
+    bus.emit("remap", { sources: [source], target: entryOf(targets, store.spec()), progress, ghosts, time: t });
+  }
+
   const offs = [];
   if (hostBus) {
     offs.push(hostBus.on("condense", onCondense));
+    offs.push(hostBus.on("split", onSplit));
     for (const type of ["add", "remove", "update", "expand", "collapse"]) {
       offs.push(hostBus.on(type, () => { dirty = true; }));
     }
@@ -294,8 +331,9 @@ function createSimTransport(internals, opts = {}) {
  *     (× speed()) and re-attaches on arrival; `follow()` snaps back immediately. `t` can
  *     never exceed `frontier` — there is nothing to show past "now".
  * `start`/`finish`/`spawn` append to an event log; `state()` replays it fresh every call
- * (src/run-live.js is O(events), cheap at this scale) — there is no compiled artifact to
- * invalidate, so graph mutations need no dirty-tracking here: store.spec() is read live.
+ * (src/run-live.js is O(n log n) in the log size, cheap at this scale) — there is no compiled
+ * artifact to invalidate, so graph mutations need no dirty-tracking here: store.spec() is
+ * read live.
  */
 function createLiveTransport(internals, opts = {}) {
   const { ticker, store } = internals;
@@ -364,7 +402,8 @@ function createLiveTransport(internals, opts = {}) {
   function satisfied() {
     if (until != null) {
       const n = stateAt(t).nodes[until];
-      return !n || n.status === "done"; // an unknown node can never fire — never hang on it
+      // Unknown or failed: neither will ever go 'done', so neither may hang the play().
+      return !n || n.status === "done" || n.status === "failed";
     }
     return t >= frontier;
   }
@@ -451,8 +490,20 @@ function createLiveTransport(internals, opts = {}) {
     return Math.max(0, Math.min(frontier, at));
   }
 
+  /** start/finish/spawn intentionally never THROW on an unknown id — replayLive's
+   *  `nodes.has(e.id)` filter just drops the entry, and a node added later self-heals onto
+   *  it (D4 M2) — but a silent drop with no signal at all is its own footgun, so warn. */
+  function warnUnknownNode(fn, id) {
+    console.warn(`run-transport: ${fn}("${id}") — no node "${id}" in the current graph; ` +
+      `the event is logged but filtered out of every state() unless "${id}" is added later (self-heals).`);
+  }
+  function warnBadN(fn, id, n) {
+    console.warn(`run-transport: ${fn}("${id}") — non-numeric n (${JSON.stringify(n)}); ignored.`);
+  }
+
   function start(id, o) {
     if (destroyed) return t;
+    if (!store.hasNode(id)) warnUnknownNode("start", id);
     const at = stampAt(o);
     log.push({ t: at, type: "start", id });
     touchLog();
@@ -463,6 +514,14 @@ function createLiveTransport(internals, opts = {}) {
   function finishNode(id, o) {
     if (destroyed) return t;
     const at = stampAt(o);
+    if (!store.hasNode(id)) warnUnknownNode("finish", id);
+    else {
+      const n = stateAt(at).nodes[id];
+      if (n && n.occupancy === 0) {
+        console.warn(`run-transport: finish("${id}") — "${id}" has zero current occupancy; this finish() is a no-op.`);
+      }
+    }
+    if (o && o.n !== undefined && !Number.isFinite(o.n)) warnBadN("finish", id, o.n);
     const ev = { t: at, type: "finish", id };
     if (o && Number.isFinite(o.n)) ev.n = o.n;
     log.push(ev);
@@ -471,8 +530,33 @@ function createLiveTransport(internals, opts = {}) {
     return at;
   }
 
+  /** The terminal sibling of finish(): logs a `fail`, which on replay consumes the node's
+   *  occupants WITHOUT fanning anything out (src/run-live.js's doFail) and parks it on
+   *  status 'failed'. Same log/self-heal/time-travel rules as every other entry — and the
+   *  same diagnostics, including finish()'s zero-occupancy warning, since a fail() on a
+   *  node nothing ever started is the same phantom-status mistake. */
+  function fail(id, o) {
+    if (destroyed) return t;
+    const at = stampAt(o);
+    if (!store.hasNode(id)) warnUnknownNode("fail", id);
+    else {
+      const n = stateAt(at).nodes[id];
+      if (n && n.occupancy === 0) {
+        console.warn(`run-transport: fail("${id}") — "${id}" has zero current occupancy; this fail() is a no-op.`);
+      }
+    }
+    const ev = { t: at, type: "fail", id };
+    if (o && typeof o.reason === "string" && o.reason) ev.reason = o.reason;
+    log.push(ev);
+    touchLog();
+    bus.emit("fail", { id, t: at, reason: ev.reason });
+    return at;
+  }
+
   function spawn(id, n, o) {
     if (destroyed) return t;
+    if (!store.hasNode(id)) warnUnknownNode("spawn", id);
+    if (!Number.isFinite(n)) warnBadN("spawn", id, n);
     const at = stampAt(o);
     log.push({ t: at, type: "spawn", id, n });
     touchLog();
@@ -481,7 +565,9 @@ function createLiveTransport(internals, opts = {}) {
   }
 
   function timeOf(nodeId) {
-    for (const ev of log) if (ev.type === "finish" && ev.id === nodeId) return ev.t;
+    for (const ev of log) {
+      if ((ev.type === "finish" || ev.type === "fail") && ev.id === nodeId) return ev.t;
+    }
     return frontier;
   }
 
@@ -525,22 +611,12 @@ function createLiveTransport(internals, opts = {}) {
     bus.emit("remap", { sources, target, progress: after ? after.progress : 0, ghosts: [], time: t });
   }
 
-  /** A split's history belongs on the ENTRY part (the one no sibling feeds), so it re-fans
-   *  forward through the new internal wiring exactly as the source would have. */
-  function entryOf(targets) {
-    if (!targets || !targets.length) return null;
-    const set = new Set(targets);
-    const fed = new Set();
-    for (const e of store.spec().edges || []) if (set.has(e.source) && set.has(e.target)) fed.add(e.target);
-    return targets.find((id) => !fed.has(id)) ?? targets[0];
-  }
-
   // There is no compiled artifact to invalidate here, but the host bus still carries two
   // things this transport alone can act on: id-remapping morphs, and when an edge was born.
   const offs = [];
   if (hostBus) {
     offs.push(hostBus.on("condense", (ev) => { if (ev) remapLog(ev.sources, ev.target); }));
-    offs.push(hostBus.on("split", (ev) => { if (ev) remapLog([ev.source], entryOf(ev.targets)); }));
+    offs.push(hostBus.on("split", (ev) => { if (ev) remapLog([ev.source], entryOf(ev.targets, store.spec())); }));
     // `bornAt` is a replay input like the log itself, so changing it invalidates the memo.
     offs.push(hostBus.on("add", (ev) => {
       if (ev && ev.kind === "edge" && ev.id != null) { edgeBornAt.set(ev.id, frontier); touchLog(); }
@@ -552,7 +628,7 @@ function createLiveTransport(internals, opts = {}) {
 
   return {
     play, pause, seek, speed, step, timeOf, reset,
-    start, finish: finishNode, spawn, follow,
+    start, finish: finishNode, fail, spawn, follow,
     get following() { return following; },
     reload() { return frontier; },
     get playing() { return playing; },

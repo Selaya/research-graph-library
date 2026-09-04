@@ -18,6 +18,9 @@ import { breakCycles } from "./cycles.js";
 
 const DEFAULT_HOP_MS = 300;
 const PROGRESS_CAP = 0.95;
+/** The log's whole vocabulary. `fail` is the terminal sibling of `finish`: same "consume
+ *  this node's occupants" shape, minus the fan-out — the branch dies here (D4). */
+const LOG_TYPES = new Set(["start", "finish", "spawn", "fail"]);
 /** Bounds the land()-cascade the same way compileRun bounds its queue (defensive, not
  *  reachable in practice: live mode never auto-cascades past one hop without a real event). */
 const MAX_STEPS = 100000;
@@ -31,17 +34,49 @@ const clamp01 = (x) => (x <= 0 ? 0 : x >= 1 ? 1 : x);
 const PRI_LAND = 0;
 const PRI_LOG = 1;
 
-function sortedInsert(queue, item) {
-  let lo = 0, hi = queue.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    const q = queue[mid];
-    const before = q.t < item.t
-      || (q.t === item.t && (q.pri < item.pri || (q.pri === item.pri && q.seq < item.seq)));
-    if (before) lo = mid + 1; else hi = mid;
+/** Total order matching the old sortedInsert's tie-break: earlier t first, PRI_LAND before
+ *  PRI_LOG at an identical t, then insertion order. */
+const queueLess = (a, b) => a.t < b.t
+  || (a.t === b.t && (a.pri < b.pri || (a.pri === b.pri && a.seq < b.seq)));
+
+/** Minimal array-based binary min-heap, `less(a,b)` supplying the order. Used both for the
+ *  log/derived-event queue and for each node's in-flight hop tracking below — replaces the
+ *  O(n) splice (sortedInsert) and O(n) indexOf scans that made a full replay superlinear in
+ *  the log size; push/pop here are O(log n). */
+function heapPush(heap, item, less) {
+  heap.push(item);
+  let i = heap.length - 1;
+  while (i > 0) {
+    const p = (i - 1) >> 1;
+    if (!less(heap[i], heap[p])) break;
+    const tmp = heap[i]; heap[i] = heap[p]; heap[p] = tmp;
+    i = p;
   }
-  queue.splice(lo, 0, item);
 }
+function heapPop(heap, less) {
+  const top = heap[0];
+  const last = heap.pop();
+  if (heap.length) {
+    heap[0] = last;
+    let i = 0;
+    const n = heap.length;
+    for (;;) {
+      const l = i * 2 + 1, r = l + 1;
+      let sm = i;
+      if (l < n && less(heap[l], heap[sm])) sm = l;
+      if (r < n && less(heap[r], heap[sm])) sm = r;
+      if (sm === i) break;
+      const tmp = heap[i]; heap[i] = heap[sm]; heap[sm] = tmp;
+      i = sm;
+    }
+  }
+  return top;
+}
+
+/** In-flight hops toward one node, ordered by landAt only. dropHop always removes the
+ *  currently-firing hop's node-heap entry, and takeInFlight always wants the earliest one —
+ *  both are exactly the heap root, so ties (equal landAt) never need identity to break. */
+const flightLess = (a, b) => a.landAt < b.landAt;
 
 /** Elapsed/estimate while dwelling, capped short of 1 so "active" never visually reads as
  *  "done" before the real finish() lands (mirrors compileRun's dwell fill intent) — 0 when
@@ -73,7 +108,7 @@ function findCurrent(tk, t) {
  * replayLive(spec, events, t, opts) -> state   (same shape as compileRun(...).stateAt(t))
  *   spec   = a store.spec() snapshot (flat: no container remap, see header note)
  *   events = append-only log, sorted defensively on entry:
- *            {t, type: 'start'|'finish'|'spawn', id, n?}
+ *            {t, type: 'start'|'finish'|'spawn'|'fail', id, n?}
  *   opts   = { hopMs = 300, bornAt }
  *            `bornAt` (optional Map edgeId -> live ms) is when an edge ENTERED the run.
  *            The log is history: a finish stamped before an edge existed must not be
@@ -135,7 +170,7 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
 
   // ---- normalize + time-sort the log (defensively — callers may hand it in any order) ----
   const clean = (events || [])
-    .filter((e) => e && e.id != null && (e.type === "start" || e.type === "finish" || e.type === "spawn")
+    .filter((e) => e && e.id != null && LOG_TYPES.has(e.type)
       && nodes.has(e.id) && Number.isFinite(+e.t) && +e.t <= T)
     .map((e, i) => ({ t: +e.t, type: e.type, id: e.id, n: e.n, seq: i, pri: PRI_LOG }))
     .sort((a, b) => a.t - b.t || a.seq - b.seq);
@@ -146,7 +181,7 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
 
   const tokens = new Map();      // id -> {id, segments:[{kind,id,t0,t1,wait?}]}
   const nodeQueue = new Map();   // nodeId -> [{tokenId, arrivedAt, state:'waiting'|'active', seg}] (arrival order)
-  const nodeStatus = new Map();  // nodeId -> 'pending'|'active'|'done'
+  const nodeStatus = new Map();  // nodeId -> 'pending'|'active'|'done'|'failed'
   const edgeSegs = new Map();    // edgeId -> segments (persistent traversal fill)
   const joinArrivals = new Map();
   const loopIteration = new Map();
@@ -162,9 +197,6 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
   }
   function closeSeg(seg, t1) { if (seg && seg.t1 === Infinity) seg.t1 = t1; }
 
-  /** A token lands (waiting, not yet started) on `nodeId` — via a hop arrival or spawn().
-   *  A landing on a node that had gone 'done' un-does that (D4 M2: "target stays pending
-   *  until its own start" — a fresh arrival is not a re-activation by itself). */
   /** Mode A stops recording a join's arrivals once the policy has fired (run.js's
    *  drop-before-push), so `arrived` saturates at `needed` there; mirror it here. */
   function noteArrival(nodeId, arrivedAt) {
@@ -174,17 +206,25 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     arr.push(arrivedAt);
   }
 
+  /** A token lands (waiting, not yet started) on `nodeId` — via a hop arrival or spawn().
+   *  A landing on a node that had gone 'done' un-does that (D4 M2: "target stays pending
+   *  until its own start" — a fresh arrival is not a re-activation by itself). 'failed' is
+   *  deliberately NOT un-done here: the failure is what happened, and an arrival is not a
+   *  retry. The retry is the explicit start() in doStart, which activates as it always did. */
   function land(nodeId, arrivedAt, tk, seg) {
     if (nodeStatus.get(nodeId) === "done") nodeStatus.set(nodeId, "pending");
     nodeQueue.get(nodeId).push({ tokenId: tk.id, arrivedAt, state: "waiting", seg });
     noteArrival(nodeId, arrivedAt);
   }
 
-  function dropHop(nodeId, hop) {
+  /** Removes the hop that is landing right now — always the node's earliest in-flight hop
+   *  (anything queued at an earlier landAt for this node would already have fired and been
+   *  dropped, since land events at t' <= t sort ahead of everything at t), so this is always
+   *  exactly the heap root: no identity lookup needed. */
+  function dropHop(nodeId) {
     const list = inFlight.get(nodeId);
-    if (!list) return;
-    const i = list.indexOf(hop);
-    if (i >= 0) list.splice(i, 1);
+    if (!list || !list.length) return;
+    heapPop(list, flightLess);
   }
 
   /** The earliest hop still traveling toward `nodeId` at `at`, unqueued and removed.
@@ -192,17 +232,9 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
    *  its target has demonstrably started, so an inbound start CONSUMES the flight. */
   function takeInFlight(nodeId, at) {
     const list = inFlight.get(nodeId);
-    if (!list || !list.length) return null;
-    let best = -1;
-    for (let i = 0; i < list.length; i++) {
-      if (list[i].landAt > at && (best < 0 || list[i].landAt < list[best].landAt)) best = i;
-    }
-    if (best < 0) return null;
-    const hop = list.splice(best, 1)[0];
-    if (hop.item) {
-      const qi = queue.indexOf(hop.item);
-      if (qi >= 0) queue.splice(qi, 1);
-    }
+    if (!list || !list.length || !(list[0].landAt > at)) return null;
+    const hop = heapPop(list, flightLess);
+    if (hop.item) hop.item.cancelled = true; // lazy delete: the main loop skips it on pop
     return hop;
   }
 
@@ -232,9 +264,11 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
       nodeStatus.set(nodeId, "active");
       return;
     }
-    // "if none is present" (source/entry node, or an already-done node being restarted —
-    // that restart IS the live loop iteration, D4 M2).
-    const wasDone = nodeStatus.get(nodeId) === "done";
+    // "if none is present" (source/entry node, or an already-terminal node being restarted —
+    // that restart IS the live loop iteration, D4 M2). A restart after a `fail` counts the
+    // same way: retrying a failed step over a bounded loop edge is exactly what that edge
+    // is for, so 'failed' is terminal for iteration-counting just like 'done'.
+    const wasDone = nodeStatus.get(nodeId) === "done" || nodeStatus.get(nodeId) === "failed";
     const tk = newToken();
     const seg = { kind: "node", id: nodeId, t0: at, t1: Infinity };
     tk.segments.push(seg);
@@ -265,17 +299,33 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
         const wseg = { kind: "node", id: e.target, t0: landAt, t1: Infinity, wait: true };
         child.segments.push(wseg);
         const hop = { landAt, tk: child, eseg, wseg, item: null };
-        inFlight.get(e.target).push(hop);
+        heapPush(inFlight.get(e.target), hop, flightLess);
         // Only materialize the landing into the target's queue if it has actually happened
         // by T — a hop still in flight at T stays represented purely by `eseg` above (and
         // by `inFlight`, so an early start(target) can still claim it).
         if (landAt <= T) {
-          hop.item = { t: landAt, seq: seq++, pri: PRI_LAND, type: "__land", id: e.target, tk: child, seg: wseg, hop };
-          sortedInsert(queue, hop.item);
+          hop.item = { t: landAt, seq: seq++, pri: PRI_LAND, type: "__land", id: e.target, tk: child, seg: wseg };
+          heapPush(queue, hop.item, queueLess);
         }
       }
     }
-    nodeStatus.set(nodeId, q.length === 0 ? "done" : "active");
+    // A finish() that found nothing occupying the node (never started, or already fully
+    // drained by an earlier finish) fans nothing out above and must not flip the status —
+    // a phantom "done" with zero tokens ever created is not the same thing as a real finish.
+    if (finished.length) nodeStatus.set(nodeId, q.length === 0 ? "done" : "active");
+  }
+
+  /** `fail` is `finish` minus the fan-out: it consumes every current occupant (a failure is
+   *  not partial — the step did not produce the output its successors were waiting for), it
+   *  never emits a hop, and it parks the node on the terminal status 'failed'. Everything
+   *  downstream simply never receives a token, which is the whole point: the branch dies.
+   *  Like finish(), a fail() that found nothing occupying the node must not flip the status —
+   *  a phantom 'failed' with no token ever created is not a failure that happened. */
+  function doFail(nodeId, at) {
+    const q = nodeQueue.get(nodeId);
+    if (!q.length) return;
+    for (const occ of q.splice(0, q.length)) closeSeg(occ.seg, at);
+    nodeStatus.set(nodeId, "failed");
   }
 
   function doSpawn(nodeId, at, n) {
@@ -290,10 +340,12 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
 
   let steps = 0;
   while (queue.length && steps++ < MAX_STEPS) {
-    const ev = queue.shift();
-    if (ev.type === "__land") { dropHop(ev.id, ev.hop); land(ev.id, ev.t, ev.tk, ev.seg); continue; }
+    const ev = heapPop(queue, queueLess);
+    if (ev.cancelled) continue; // takeInFlight consumed this landing early — lazy delete
+    if (ev.type === "__land") { dropHop(ev.id); land(ev.id, ev.t, ev.tk, ev.seg); continue; }
     if (ev.type === "start") doStart(ev.id, ev.t);
     else if (ev.type === "finish") doFinish(ev.id, ev.t, ev.n);
+    else if (ev.type === "fail") doFail(ev.id, ev.t);
     else if (ev.type === "spawn") doSpawn(ev.id, ev.t, ev.n);
   }
 
@@ -313,7 +365,10 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     const status = nodeStatus.get(id) || "pending";
     const occ = nodeQueue.get(id);
     let progress = 0;
-    if (status === "done") progress = 1;
+    // Both terminal statuses read as a full bar: the node is no longer working, and a
+    // half-drawn fill on a failed step reads as "still going" (Mode A agrees — a failing
+    // node's dwell segment is closed, so its span is fully elapsed).
+    if (status === "done" || status === "failed") progress = 1;
     else for (const o of occ) {
       if (o.state !== "active") continue;
       const p = activeProgress(o.seg, T, secOf.get(id));

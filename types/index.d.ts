@@ -13,6 +13,12 @@ export interface NodeSpec {
   label?: string;
   /** Containment: this node is a child of `parent` (compound / container nodes, D5). */
   parent?: string;
+  /** Free-form payload. Two keys are read by the Mode A run engine (src/run.js):
+   *  - `duration`: `"2h" | "45m" | "8s" | "300ms" | 12` (bare number = seconds) — paces
+   *    the dwell. Unparseable or negative values warn and fall back to the default.
+   *  - `fail`: truthy = this step runs its dwell and then FAILS — status `'failed'`, no
+   *    fan-out to its successors, a `'fail'` run event. A string value is carried through
+   *    as that event's `reason`. (Mode B's equivalent is `LiveRun.fail(id)`.) */
   data?: Record<string, unknown>;
   /** Container starts collapsed. */
   collapsed?: boolean;
@@ -47,11 +53,48 @@ export interface GraphSpec {
   edges?: EdgeSpec[];
 }
 
-/** The shape every `GraphError` thrown by `g`'s mutation methods carries. Not a class you
- *  import — `store.js`'s `GraphError` is internal; catch it structurally instead:
- *  `catch (e) { if ((e as SmvErrorLike).code === "missing") ... }`. */
+/** The shape every `GraphError` thrown by `g`'s mutation methods carries. `GraphError` is
+ *  now a real exported class (`import { GraphError } from "sparkle-motion-visualizer"`) —
+ *  `instanceof GraphError` works — but `SmvErrorLike` stays for callers that only want to
+ *  narrow structurally: `catch (e) { if ((e as SmvErrorLike).code === "missing") ... }`. */
 export interface SmvErrorLike extends Error {
-  code: string;
+  code: GraphErrorCode;
+}
+
+/** Every code a `GraphError` is thrown with (grep of every `new GraphError(...)` call site
+ *  in src/, M2). Not exhaustive-checked by the compiler — new codes are additive — but this
+ *  is the complete list as of this writing. */
+export type GraphErrorCode =
+  | "no-mount"
+  | "node-id"
+  | "edge-id"
+  | "dup-id"
+  | "dangling"
+  | "unbounded-loop"
+  | "missing"
+  | "parent-cycle"
+  | "non-convex"
+  | "split-container"
+  | "split-edge"
+  | "split-no-entry"
+  | "split-no-exit"
+  | "props-key"
+  /** g.style(fn) returned a key that isn't `--smv-*` (same contract as `props-key`,
+   *  thrown from render.js's checkStyleProps). */
+  | "style-key"
+  | "storyboard-step"
+  | "storyboard-op"
+  | "storyboard-label"
+  /** g.batch(fn) was called with an fn that returned a thenable (finding #2): batch
+   *  requires a synchronous callback. */
+  | "batch-async";
+
+/** The real, importable error class every `g` mutation method throws (`src/store.js`).
+ *  `code` is one of `GraphErrorCode`; `message` is human-readable and already carries the
+ *  code (`[smv:<code>] ...`). */
+export class GraphError extends Error {
+  constructor(code: GraphErrorCode, message: string);
+  readonly code: GraphErrorCode;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +113,36 @@ export interface Awaitable<T = { canceled: boolean }> extends PromiseLike<T> {
   /** Cancel-and-retarget (D9): the transition this awaitable is riding gets interrupted;
    *  the awaitable itself still resolves, with `{canceled: true}`. */
   cancel(): void;
+}
+
+/** What every `g` mutation method's `Awaitable` actually resolves with (M2 finding: used
+ *  to be `{canceled}` alone, which cannot say whether the graph changed — cancel() never
+ *  undoes add/remove/update, and for condense/split the structural change lands mid-flight,
+ *  so `{canceled}` meant something different before vs. after that async phase).
+ *  `applied` is additive: `canceled` is still there for existing callers. */
+export interface MutationResult {
+  canceled: boolean;
+  /** Did the structural change actually land in the store? For addNode/addEdge/removeNode/
+   *  removeEdge/update/batch this is synchronous, so it is always `true` by the time the
+   *  awaitable exists (cancel() only interrupts the relayout tween). For condense/split it
+   *  flips `true` partway through, in the async converge/diverge phase — see
+   *  `CondenseSplitResult`. `expand`/`collapse`/`expandAll`/`collapseAll` resolve
+   *  `applied:false` instead of this shape entirely when there was nothing to do (already
+   *  expanded/collapsed) — see their return types below. */
+  applied: boolean;
+}
+
+/** `g.removeNode(id)`'s resolution: the full doomed cascade (`id` plus every descendant it
+ *  swallowed, src/store.js's `removeNode`) and every edge left dangling by any of them. */
+export interface RemoveNodeResult extends MutationResult {
+  ids: { nodes: string[]; edges: string[] };
+}
+
+/** `g.condense()`/`g.split()`'s resolution. `ids` is only present once `applied` is true —
+ *  a run canceled before the store actually merged/split (phase 1, or a stale re-check)
+ *  never created or removed anything. */
+export interface CondenseSplitResult extends MutationResult {
+  ids?: { created: string[]; removed: string[] };
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +295,10 @@ export interface TokenState {
   at: { kind: "node" | "edge"; id: string; progress: number };
 }
 export interface NodeRunState {
-  status: "pending" | "active" | "done";
+  /** `'failed'` is terminal like `'done'`: the step stopped and nothing was handed on to
+   *  its successors. Mode A reaches it via `data.fail`, Mode B via `LiveRun.fail(id)`.
+   *  A failed node reports `progress: 1` and `occupancy: 0`. */
+  status: "pending" | "active" | "done" | "failed";
   progress: number;
   occupancy: number;
 }
@@ -249,7 +325,11 @@ export interface RunState {
 
 export interface RunEvent {
   t: number;
-  type: "enter" | "start" | "finish" | "spawn" | "join" | "drop" | "loop" | "done";
+  /** `'fail'` = a `data.fail` node reached the end of its dwell and died there (carries
+   *  `nodeId`, `tokenId`, and `reason` when `data.fail` was a string); `'warn'` = a
+   *  compile-time diagnostic (carries `nodeId`, `message`, `value`). Both are re-emitted
+   *  on the run bus by type, like every other event. */
+  type: "enter" | "start" | "finish" | "fail" | "spawn" | "join" | "drop" | "loop" | "warn" | "done";
   [key: string]: unknown;
 }
 
@@ -276,9 +356,11 @@ export interface RunOptsBase {
 
 export interface LiveEvent {
   t: number;
-  type: "start" | "finish" | "spawn";
+  type: "start" | "finish" | "fail" | "spawn";
   id: string;
   n?: number;
+  /** `fail` entries only, and only when one was given. Annotation: the replay ignores it. */
+  reason?: string;
 }
 
 export interface SimRunOpts extends RunOptsBase {
@@ -325,6 +407,13 @@ export type SimRun = RunControllerBase;
 export interface LiveRun extends RunControllerBase {
   start(id: string, o?: { at?: number }): number;
   finish(id: string, o?: { at?: number; n?: number }): number;
+  /** Terminal sibling of `finish`: consumes every current occupant of `id` WITHOUT fanning
+   *  tokens out (the branch dies), leaves the node on status `'failed'`, and emits a
+   *  `'fail'` bus event `{id, t, reason?}`. Logged like any other entry, so it replays,
+   *  time-travels and self-heals the same way. Returns the stamped time.
+   *  No `n`: a failure is not partial. On a node with zero occupancy it warns and is a
+   *  no-op, exactly as `finish` is. */
+  fail(id: string, o?: { at?: number; reason?: string }): number;
   spawn(id: string, n: number, o?: { at?: number }): number;
   /** Re-attach the view clock to the frontier immediately (a "jump to live" snap). */
   follow(): number;
@@ -409,6 +498,7 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "expand"; args: [string] }
   | { op: "collapse"; args: [string] }
   | { op: "condense"; args: [string[], NodeSpec] }
+  | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }] }
   | { op: "batch"; steps: StoryboardStep[] }
   | { op: "run.play"; until?: string; args?: [{ until?: string }?] }
   | { op: "run.step"; token?: string; args?: [{ token?: string }?] }
@@ -587,34 +677,51 @@ export interface Graph {
   readonly viewstate: ViewState;
 
   on<K extends keyof GraphEventMap>(type: K, fn: (payload: GraphEventMap[K]) => void): () => void;
+  /** The wildcard listener (src/events.js): unlike every other `on()` call, `fn` is
+   *  called with TWO positional arguments — the event's own type name, then its payload —
+   *  not just the payload. Declared ahead of the generic `(type: string, ...)` overload
+   *  below so a literal `"*"` resolves here instead of there. */
+  on(type: "*", fn: (type: string, payload: unknown) => void): () => void;
   on(type: string, fn: (payload: unknown) => void): () => void;
   off<K extends keyof GraphEventMap>(type: K, fn: (payload: GraphEventMap[K]) => void): void;
+  /** Same two-argument shape as the `on("*", ...)` overload above — `off()` only needs to
+   *  match the function reference, but the type has to line up for callers that keep the
+   *  listener in a typed variable. */
+  off(type: "*", fn: (type: string, payload: unknown) => void): void;
   off(type: string, fn: (payload: unknown) => void): void;
 
+  /** A plain copy, like every plural query method (`nodes()`, `children()`, …) — mutating
+   *  the returned object does not touch the store. */
   node(id: string): NodeSpec | undefined;
+  /** A plain copy — see `node()`. */
   edge(id: string): EdgeSpec | undefined;
   spec(): GraphSpec;
   bounds(): Rect | null | undefined;
   layoutResult(): LayoutResult | null;
 
-  addNode(node: NodeSpec, opts?: { after?: string }): Awaitable;
-  addEdge(edge: EdgeSpec): Awaitable;
-  removeNode(id: string): Awaitable;
-  removeEdge(id: string): Awaitable;
-  update(id: string, patch: Record<string, unknown>): Awaitable;
+  addNode(node: NodeSpec, opts?: { after?: string }): Awaitable<MutationResult>;
+  addEdge(edge: EdgeSpec): Awaitable<MutationResult>;
+  /** Resolves with the full removed-ids cascade (`ids.nodes`/`ids.edges`), not just
+   *  `{canceled, applied}` — see `RemoveNodeResult`. */
+  removeNode(id: string): Awaitable<RemoveNodeResult>;
+  removeEdge(id: string): Awaitable<MutationResult>;
+  update(id: string, patch: Record<string, unknown>): Awaitable<MutationResult>;
 
   /** D5 — children bloom out of the container's previous centre. */
-  expand(id: string): Awaitable;
+  expand(id: string): Awaitable<MutationResult>;
   /** D5 inverse — everything that just went away flies into the container's new centre. */
-  collapse(id: string): Awaitable;
-  /** D6 — merge N nodes into one over the 3-phase choreography (highlight/converge/reveal). */
-  condense(ids: Iterable<string>, node: NodeSpec): Awaitable;
-  /** D6 inverse — one node becomes N (highlight/diverge/reveal). */
-  split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): Awaitable;
+  collapse(id: string): Awaitable<MutationResult>;
+  /** D6 — merge N nodes into one over the 3-phase choreography (highlight/converge/reveal).
+   *  Resolves with the created/removed ids once the merge actually lands — see
+   *  `CondenseSplitResult`. */
+  condense(ids: Iterable<string>, node: NodeSpec): Awaitable<CondenseSplitResult>;
+  /** D6 inverse — one node becomes N (highlight/diverge/reveal). Same resolution shape as
+   *  `condense()`. */
+  split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): Awaitable<CondenseSplitResult>;
   /** Every container open in ONE commit. */
-  expandAll(): Awaitable;
+  expandAll(): Awaitable<MutationResult>;
   /** The inverse: every open container closed in ONE commit. */
-  collapseAll(): Awaitable;
+  collapseAll(): Awaitable<MutationResult>;
 
   /** D4 — the token run. Called with opts it (re)compiles; bare it returns the current one
    *  (compiling a default Mode A run on first call). */
@@ -642,8 +749,12 @@ export interface Graph {
   /** D12 — every label and caption in the storyboard at its absolute ms offset. */
   cues(): Cue[];
 
-  /** One relayout for many ops (batches into a single commit + awaitable). */
-  batch(fn: (g: Graph) => void): Awaitable;
+  /** One relayout for many ops (batches into a single commit + awaitable). NOT
+   *  transactional — `fn`'s ops land in the store as `fn` runs; batch() only defers the
+   *  relayout(s) they'd each have caused alone into one shared commit. `fn` must be
+   *  synchronous: a `Promise`-returning `fn` throws `GraphError` with code `"batch-async"`,
+   *  since its later ops would otherwise run after batch() has already returned. */
+  batch(fn: (g: Graph) => void): Awaitable<MutationResult>;
 
   /** User style functions set `--smv-*` custom properties only (D7). Pass `null` to clear. */
   style(fn: StyleFn | null): Graph;

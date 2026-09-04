@@ -14,6 +14,27 @@ import { GraphError } from "./store.js";
 
 const FIT_PAD = 24;
 
+/** Every key `resolveCameraTarget()` reads off a target object (docs/RECORDING.md §1). A key
+ *  outside this set is presumed a typo (`nod` for `node`) rather than a future extension —
+ *  it is warned about, not silently absorbed into the relative-move fallback. */
+const CAMERA_KEYS = new Set(["x", "y", "k", "node", "nodes", "fit", "pad", "by", "zoom", "ease", "dur"]);
+
+/** `variant ∈ focus | warn | ok | mute` (docs/RECORDING.md §1) — the only strings `[data-emph]`
+ *  has CSS for; anything else renders, unstyled, with no indication why. */
+const VARIANTS = new Set(["focus", "warn", "ok", "mute"]);
+
+/** Every key `highlight(sel)` reads (docs/RECORDING.md §1) — a bare `node` (singular, the
+ *  `camera` spelling) is the classic slip, and previously vanished with no trace because
+ *  nothing here ever read it. */
+const HIGHLIGHT_KEYS = new Set(["nodes", "edges", "variant", "dim", "pulse"]);
+
+/** Camera/highlight are presentational, not structural (unlike a mutation or a bad op name),
+ *  so misuse here warns instead of throwing — an existing script with one bad step must keep
+ *  playing. One console.warn per offending call, naming the op and every issue found. */
+function warnStep(op, issues) {
+  if (issues.length) console.warn(`[smv:${op}] ${issues.join("; ")}`);
+}
+
 /** M4d — the attention pulse (D17). One full breath, quantized into PULSE_STEPS buckets so
  *  a frame's intensity is a function of the tick count and nothing else: the same tick
  *  sequence writes the same string, which is what lets the frame renderer reproduce it
@@ -62,7 +83,12 @@ export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 
   const cx0 = Number.isFinite(current.x) ? current.x : 0;
   const cy0 = Number.isFinite(current.y) ? current.y : 0;
 
+  const issues = Object.keys(opts)
+    .filter((k) => !CAMERA_KEYS.has(k))
+    .map((k) => `unrecognized key "${k}"`);
+
   if (Number.isFinite(opts.x) || Number.isFinite(opts.y)) {
+    warnStep("camera", issues);
     return {
       x: Number.isFinite(opts.x) ? opts.x : cx0,
       y: Number.isFinite(opts.y) ? opts.y : cy0,
@@ -71,9 +97,15 @@ export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 
   }
 
   let box = null;
-  if (opts.node != null) box = boundsOf(layoutResult, [opts.node]);
-  else if (Array.isArray(opts.nodes)) box = boundsOf(layoutResult, opts.nodes);
-  else if (opts.fit === true) box = (layoutResult && layoutResult.bounds) || null;
+  if (opts.node != null) {
+    box = boundsOf(layoutResult, [opts.node]);
+    if (!box) issues.push(`unknown node id "${opts.node}"`);
+  } else if (Array.isArray(opts.nodes)) {
+    box = boundsOf(layoutResult, opts.nodes);
+    const nodes = (layoutResult && layoutResult.nodes) || null;
+    const missing = opts.nodes.filter((id) => !(nodes && nodes[id]));
+    if (missing.length) issues.push(`unknown node id(s) ${missing.map((id) => `"${id}"`).join(", ")}`);
+  } else if (opts.fit === true) box = (layoutResult && layoutResult.bounds) || null;
   if (box) {
     const pad = Number.isFinite(opts.pad) ? opts.pad : FIT_PAD;
     let k = opts.k;
@@ -82,6 +114,7 @@ export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 
       if (!Number.isFinite(k) || k <= 0) k = 1;
     }
     k = clampK(k);
+    warnStep("camera", issues);
     return { x: W / 2 - (box.x + box.w / 2) * k, y: H / 2 - (box.y + box.h / 2) * k, k };
   }
 
@@ -97,6 +130,7 @@ export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 
     if (Number.isFinite(opts.by.dx)) x += opts.by.dx;
     if (Number.isFinite(opts.by.dy)) y += opts.by.dy;
   }
+  warnStep("camera", issues);
   return { x, y, k };
 }
 
@@ -184,12 +218,25 @@ export function createDirector(internals = {}) {
    *  has to remember to clear the last one before setting the next. `pulse` is a modifier
    *  on top of `variant`, not one of them — a warning that breathes is still a warning. */
   function highlight(sel = {}) {
+    const drawn = drawnIds();
+    // Presentational misuse (a stray "node" instead of "nodes", an id nothing drew, a
+    // variant with no CSS for it) warns instead of throwing, and never blocks the call —
+    // an existing script with one bad step must keep playing.
+    const known = new Set(drawn);
+    const issues = Object.keys(sel)
+      .filter((k) => !HIGHLIGHT_KEYS.has(k))
+      .map((k) => `unrecognized key "${k}"`);
+    if (sel.variant != null && !VARIANTS.has(sel.variant)) issues.push(`unknown variant "${sel.variant}"`);
+    const missing = [...(sel.nodes || []), ...(sel.edges || [])].filter((id) => !known.has(id));
+    if (missing.length) issues.push(`unknown id(s) ${missing.map((id) => `"${id}"`).join(", ")}`);
+    warnStep("highlight", issues);
+
     emph.clear();
     dimmed.clear();
     const variant = sel.variant || "focus";
     for (const id of sel.nodes || []) emph.set(id, variant);
     for (const id of sel.edges || []) emph.set(id, variant);
-    if (sel.dim) for (const id of drawnIds()) if (!emph.has(id)) dimmed.add(id);
+    if (sel.dim) for (const id of drawn) if (!emph.has(id)) dimmed.add(id);
     apply();
     setPulse(!!sel.pulse && emph.size > 0);
   }

@@ -64,7 +64,7 @@ function centroid(nodes, ids) {
  * @param {object} internals { ticker, store, bus, relayout, mark, reduced }
  * @param {string[]} ids     the source nodes to merge
  * @param {object} newNodeSpec the merged node
- * @returns {{promise: Promise<{canceled:boolean}>, cancel: () => void}}
+ * @returns {{promise: Promise<{canceled:boolean, applied:boolean, ids?:{created:string[],removed:string[]}}>, cancel: () => void}}
  */
 export function runCondense(g, internals, ids, newNodeSpec) {
   const { ticker, store, bus, relayout } = internals;
@@ -84,12 +84,19 @@ export function runCondense(g, internals, ids, newNodeSpec) {
   let inFlight = null;
   let settled = false;
   let converging = false; // phase 2 has merged the store and its commit is still live
+  // Set the instant store.condense() actually runs (phase 2) — from then on the merge has
+  // structurally landed no matter what happens to this run afterwards: cancel() only ever
+  // interrupts the converge tween (see cancel() below), never un-merges the store. Before
+  // that instant `applied` stays false: a phase-1 (highlight) cancel or a failed re-check
+  // never touched the store at all.
+  let applied = false;
+  let mergeIds = null; // {created, removed} once `applied` flips true
   let settleOuter, rejectOuter;
   const promise = new Promise((res, rej) => { settleOuter = res; rejectOuter = rej; });
   const done = (canceled) => {
     if (settled) return;
     settled = true;
-    settleOuter({ canceled: !!canceled });
+    settleOuter({ canceled: !!canceled, applied, ...(mergeIds ? { ids: mergeIds } : {}) });
   };
 
   (async () => {
@@ -108,7 +115,9 @@ export function runCondense(g, internals, ids, newNodeSpec) {
     if (!stillValid()) { mark(sources, null); return done(true); }
     const { merged, removedNodes } = store.condense(sources, newNodeSpec);
     converging = true;
+    applied = true;
     const target = merged.id;
+    mergeIds = { created: [target], removed: removedNodes };
     // The merged node takes the sources' place in the solver's order, so it settles where
     // the choreography flew it from instead of at the tail of its rank.
     if (internals.reseat) internals.reseat([target], sources);

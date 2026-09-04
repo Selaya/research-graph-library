@@ -133,6 +133,37 @@ test("readingOrder is empty/defensive with no layout", () => {
   assert.deepEqual(readingOrder({ nodes: {} }), []);
 });
 
+test("readingOrder is rank-major for a TB layout: order's shared-axis grouping beats raw x", () => {
+  // Two siblings on rank 0 (screen y is IDENTICAL for both — the TB tell, per
+  // engine.js's emit()); one node on rank 1, further down. A plain x-then-y sort would
+  // read C (x=25) before B (x=50): between the two ranks instead of after both.
+  const lr = {
+    nodes: {
+      A: { x: 0, y: 0 },
+      B: { x: 50, y: 0 },
+      C: { x: 25, y: 80 },
+    },
+    order: [["A", "B"], ["C"]],
+  };
+  assert.deepEqual(readingOrder(lr), ["A", "B", "C"]);
+});
+
+test("readingOrder stays x-then-y for an LR layout's order (same-rank nodes share x, not y)", () => {
+  const lr = {
+    nodes: { A: { x: 0, y: 0 }, B: { x: 0, y: 50 }, C: { x: 80, y: 25 } },
+    order: [["A", "B"], ["C"]],
+  };
+  assert.deepEqual(readingOrder(lr), ["A", "B", "C"]);
+});
+
+test("readingOrder falls back to x-then-y when every rank is a singleton (axis is unobservable)", () => {
+  const lr = {
+    nodes: { A: { x: 0, y: 0 }, B: { x: 50, y: 10 }, C: { x: 100, y: 20 } },
+    order: [["A"], ["B"], ["C"]],
+  };
+  assert.deepEqual(readingOrder(lr), ["A", "B", "C"]);
+});
+
 // ---------------------------------------------------------------------------
 // computeRows (pure)
 // ---------------------------------------------------------------------------
@@ -185,6 +216,23 @@ test("computeRows: depth walks the parent chain; falls back to viewstate.isVisib
 test("computeRows: empty/defensive with no g or empty spec", () => {
   assert.deepEqual(computeRows(null), []);
   assert.deepEqual(computeRows(fakeG({ ids: [] })), []);
+});
+
+test("computeRows: prefers the live data-run status (read off the DOM) over the static spec status", () => {
+  const doc = new FakeDocument();
+  const root = fakeRoot(doc);
+  const specNodes = [{ id: "A", label: "A", data: { status: "done" } }];
+  const svg = fakeSvg(doc, ["A"], { A: { x: 0, y: 0 } });
+  root.appendChild(svg);
+  const g = fakeG({ ids: ["A"], specNodes, edges: [] });
+  g.el = root;
+
+  // No run in progress yet: falls back to the spec's static status.
+  assert.equal(computeRows(g)[0].status, "done");
+
+  // run-render.js writes `data-run` straight onto the node's element.
+  svg.querySelectorAll(".smv-node")[0].setAttribute("data-run", "active");
+  assert.equal(computeRows(g)[0].status, "active", "live data-run wins over spec data.status");
 });
 
 // ---------------------------------------------------------------------------
@@ -305,6 +353,133 @@ test("attachA11y: re-applies attrs on the 'commit' event against fresh elements"
   assert.equal(fresh.getAttribute("tabindex"), "0");
 });
 
+test("attachA11y: arrow-key navigation follows rank-major order for a TB layout, not raw x", () => {
+  const doc = new FakeDocument();
+  const ids = ["A", "B", "C"];
+  const pos = { A: { x: 0, y: 0 }, B: { x: 50, y: 0 }, C: { x: 25, y: 80 } };
+  const svg = fakeSvg(doc, ids, pos);
+  const root = fakeRoot(doc);
+  root.appendChild(svg);
+  const g = fakeG({ ids, pos, specNodes: ids.map((id) => ({ id, label: id })) });
+  g.layoutResult = () => ({ nodes: pos, order: [["A", "B"], ["C"]] });
+  attachA11y(g, { root, svg });
+
+  const els = new Map(svg.querySelectorAll(".smv-node").map((el) => [el.getAttribute("data-id"), el]));
+  const current = () => [...els.entries()].find(([, el]) => el.getAttribute("tabindex") === "0")[0];
+
+  assert.equal(current(), "A", "rank 0's first sibling, not the smallest x overall");
+  svg.dispatch("keydown", { key: "ArrowRight" });
+  assert.equal(current(), "B", "next in the SAME rank, though C has a smaller x than B");
+  svg.dispatch("keydown", { key: "ArrowRight" });
+  assert.equal(current(), "C", "rank 1 comes after all of rank 0");
+});
+
+// ---------------------------------------------------------------------------
+// attachA11y — aria-live region
+// ---------------------------------------------------------------------------
+
+test("attachA11y: injects a visually-hidden role=status live region", () => {
+  const doc = new FakeDocument();
+  const ids = ["A"];
+  const svg = fakeSvg(doc, ids, { A: { x: 0, y: 0 } });
+  const root = fakeRoot(doc);
+  root.appendChild(svg);
+  const g = fakeG({ ids, pos: { A: { x: 0, y: 0 } }, specNodes: [{ id: "A", label: "A" }] });
+  const handle = attachA11y(g, { root, svg });
+
+  const live = root.children.find((c) => c.getAttribute("role") === "status");
+  assert.ok(live, "a role=status element is appended near the svg");
+  assert.equal(live.getAttribute("aria-live"), "polite");
+  assert.ok((live.getAttribute("class") || "").includes("smv-a11y-live"));
+
+  handle.destroy();
+  assert.ok(!root.children.includes(live), "destroy removes the live region");
+});
+
+test("attachA11y: onRunStatus announces started/finished into the live region, coalescing a same-tick burst", async () => {
+  const doc = new FakeDocument();
+  const ids = ["A", "B"];
+  const svg = fakeSvg(doc, ids, { A: { x: 0, y: 0 }, B: { x: 10, y: 0 } });
+  const root = fakeRoot(doc);
+  root.appendChild(svg);
+  const specNodes = [{ id: "A", label: "Ingest" }, { id: "B", label: "Clean" }];
+  const g = fakeG({ ids, pos: { A: { x: 0, y: 0 }, B: { x: 10, y: 0 } }, specNodes });
+  attachA11y(g, { root, svg });
+
+  const live = root.children.find((c) => c.getAttribute("role") === "status");
+
+  g.emit("runstatus", { id: "A", status: "active" });
+  assert.equal(live.textContent, "", "not written synchronously — coalesced to the next microtask");
+  await Promise.resolve();
+  assert.equal(live.textContent, "Ingest started");
+
+  // A burst in the same tick (e.g. a fan-out step landing on two nodes at once) joins
+  // into one announcement instead of two separate writes.
+  g.emit("runstatus", { id: "A", status: "done" });
+  g.emit("runstatus", { id: "B", status: "active" });
+  await Promise.resolve();
+  assert.equal(live.textContent, "Ingest finished. Clean started");
+
+  // "pending" (a reset) is not an announced transition.
+  g.emit("runstatus", { id: "A", status: "pending" });
+  await Promise.resolve();
+  assert.equal(live.textContent, "Ingest finished. Clean started", "pending is silent");
+});
+
+test("attachA11y: a failed run status is announced and reaches the accessible name — no special-casing", async () => {
+  const doc = new FakeDocument();
+  const ids = ["A"];
+  const svg = fakeSvg(doc, ids, { A: { x: 0, y: 0 } });
+  const root = fakeRoot(doc);
+  root.appendChild(svg);
+  const g = fakeG({ ids, pos: { A: { x: 0, y: 0 } }, specNodes: [{ id: "A", label: "Ingest" }] });
+  attachA11y(g, { root, svg });
+  const live = root.children.find((c) => c.getAttribute("role") === "status");
+
+  g.emit("runstatus", { id: "A", status: "active" });
+  await Promise.resolve();
+
+  // run-render.js writes data-run to the element, THEN emits 'runstatus' — same order here.
+  const el = svg.querySelectorAll(".smv-node").find((n) => n.getAttribute("data-id") === "A");
+  el.setAttribute("data-run", "failed");
+  g.emit("runstatus", { id: "A", status: "failed" });
+  await Promise.resolve();
+
+  assert.equal(live.textContent, "Ingest failed");
+  assert.equal(el.getAttribute("aria-label"), "Ingest · failed", "the live status wins in the accessible name");
+});
+
+test("attachA11yTable: the status column carries 'failed' straight off the data-run channel", () => {
+  const doc = new FakeDocument();
+  const root = fakeRoot(doc);
+  const svg = fakeSvg(doc, ["A"], { A: { x: 0, y: 0 } });
+  root.appendChild(svg);
+  const g = fakeG({ ids: ["A"], specNodes: [{ id: "A", label: "Ingest" }], edges: [] });
+  g.el = root;
+
+  const handle = attachA11yTable(g);
+  const tbody = handle.el.children.find((c) => c.tagName === "tbody");
+
+  svg.querySelectorAll(".smv-node")[0].setAttribute("data-run", "failed");
+  g.emit("runstatus", { id: "A", status: "failed" });
+  assert.equal(tbody.children[0].children[1].textContent, "failed");
+  assert.equal(computeRows(g)[0].status, "failed");
+});
+
+test("attachA11y: a queued live-region flush after destroy() is a no-op, not a write to a detached node", async () => {
+  const doc = new FakeDocument();
+  const ids = ["A"];
+  const svg = fakeSvg(doc, ids, { A: { x: 0, y: 0 } });
+  const root = fakeRoot(doc);
+  root.appendChild(svg);
+  const g = fakeG({ ids, pos: { A: { x: 0, y: 0 } }, specNodes: [{ id: "A", label: "A" }] });
+  const handle = attachA11y(g, { root, svg });
+
+  g.emit("runstatus", { id: "A", status: "active" });
+  handle.destroy(); // must not throw when the queued microtask flush lands afterward
+  await Promise.resolve();
+});
+
 // ---------------------------------------------------------------------------
 // attachA11yTable — lightweight fake-DOM smoke
 // ---------------------------------------------------------------------------
@@ -358,4 +533,23 @@ test("attachA11yTable: visible:true skips the hidden class; rows refresh on 'com
   specNodes[0].label = "A again";
   g.emit("update", {});
   assert.equal(tbody.children[0].children[0].textContent, "A again");
+});
+
+test("attachA11yTable: is THE accessible surface — rows refresh on 'runstatus' and prefer the live data-run status", () => {
+  const doc = new FakeDocument();
+  const root = fakeRoot(doc);
+  const specNodes = [{ id: "A", label: "A", data: { status: "done" } }];
+  const svg = fakeSvg(doc, ["A"], { A: { x: 0, y: 0 } });
+  root.appendChild(svg);
+  const g = fakeG({ ids: ["A"], specNodes, edges: [] });
+  g.el = root;
+
+  const handle = attachA11yTable(g);
+  const tbody = handle.el.children.find((c) => c.tagName === "tbody");
+  assert.equal(tbody.children[0].children[1].textContent, "done", "no run yet: falls back to spec status");
+
+  // run-render.js writes data-run to the node's element, THEN emits 'runstatus'.
+  svg.querySelectorAll(".smv-node")[0].setAttribute("data-run", "active");
+  g.emit("runstatus", { id: "A", status: "active" });
+  assert.equal(tbody.children[0].children[1].textContent, "active", "refreshed on 'runstatus', live status wins");
 });

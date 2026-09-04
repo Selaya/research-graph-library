@@ -51,7 +51,7 @@ function awaitTransition(ticker, tr) {
  * @param {object} internals  { ticker, store, bus, relayout, mark, reduced }
  * @param {string} id         the node being split
  * @param {object} parts      { nodes, edges? } — store.split()'s second argument
- * @returns {{promise: Promise<{canceled:boolean}>, cancel: () => void}}
+ * @returns {{promise: Promise<{canceled:boolean, applied:boolean, ids?:{created:string[],removed:string[]}}>, cancel: () => void}}
  */
 export function runSplit(g, internals, id, parts) {
   const { ticker, store, bus, relayout } = internals;
@@ -65,12 +65,17 @@ export function runSplit(g, internals, id, parts) {
   let inFlight = null;
   let settled = false;
   let diverging = false; // phase 2 has split the store and its commit is still live
+  // Same discipline as condense-anim.js: `applied` flips the instant store.split() actually
+  // runs (phase 2) and stays true regardless of what happens to this run afterwards — cancel()
+  // only ever interrupts the diverge tween (see cancel() below), never un-splits the store.
+  let applied = false;
+  let splitIds = null; // {created, removed} once `applied` flips true
   let settleOuter, rejectOuter;
   const promise = new Promise((res, rej) => { settleOuter = res; rejectOuter = rej; });
   const done = (canceled) => {
     if (settled) return;
     settled = true;
-    settleOuter({ canceled: !!canceled });
+    settleOuter({ canceled: !!canceled, applied, ...(splitIds ? { ids: splitIds } : {}) });
   };
 
   (async () => {
@@ -84,7 +89,9 @@ export function runSplit(g, internals, id, parts) {
     if (!stillValid()) { mark([id], null); return done(true); }
     const { added } = store.split(id, parts);
     diverging = true;
+    applied = true;
     const targets = [...added];
+    splitIds = { created: targets, removed: [id] };
     // Same as condense: the parts inherit the slot the node they came out of held.
     if (internals.reseat) internals.reseat(targets, [id]);
     const tr = relayout({

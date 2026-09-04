@@ -113,7 +113,10 @@ test("split: tearing the clock down MID-DIVERGE settles the run instead of stran
   await advance(h.ticker, SPLIT_PHASES.highlight + 1);
   assert.equal(h.store.hasNode("m1"), true, "phase 2 has already split the store");
   h.ticker.destroy(); // g.ticker is public — this can happen without scene.destroy()
-  assert.deepEqual(await within(run.promise), { canceled: true });
+  assert.deepEqual(await within(run.promise), {
+    canceled: true, applied: true,
+    ids: { created: ["m1", "m2"], removed: ["M"] },
+  });
 });
 
 test("condense: tearing the clock down MID-CONVERGE settles the run instead of stranding it", async () => {
@@ -125,7 +128,10 @@ test("condense: tearing the clock down MID-CONVERGE settles the run instead of s
   await advance(h.ticker, CONDENSE_PHASES.highlight + 1);
   assert.equal(h.store.hasNode("M"), true, "phase 2 has already merged the store");
   h.ticker.destroy();
-  assert.deepEqual(await within(run.promise), { canceled: true });
+  assert.deepEqual(await within(run.promise), {
+    canceled: true, applied: true,
+    ids: { created: ["M"], removed: ["A", "B"] },
+  });
 });
 
 test("split: the normal phase-2 completion still resolves {canceled:false}", async () => {
@@ -136,7 +142,10 @@ test("split: the normal phase-2 completion still resolves {canceled:false}", asy
   await advance(h.ticker, SPLIT_PHASES.highlight + 1);
   await advance(h.ticker, SPLIT_PHASES.diverge + 1);
   await advance(h.ticker, SPLIT_PHASES.reveal + 1);
-  assert.deepEqual(await within(run.promise, 200), { canceled: false });
+  assert.deepEqual(await within(run.promise, 200), {
+    canceled: false, applied: true,
+    ids: { created: ["m1", "m2"], removed: ["M"] },
+  });
 });
 
 // The same guard must fire at the g.split() call site, synchronously — index.js's stated

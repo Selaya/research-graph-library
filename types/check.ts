@@ -6,15 +6,21 @@ import {
   mount,
   version,
   presetPipeline,
+  GraphError,
   type Graph,
   type GraphSpec,
   type MountOpts,
   type NodeSpec,
   type EdgeSpec,
   type Awaitable,
+  type MutationResult,
+  type RemoveNodeResult,
+  type CondenseSplitResult,
   type SmvErrorLike,
+  type GraphErrorCode,
   type SimRun,
   type LiveRun,
+  type LiveEvent,
   type Run,
   type StoryboardStep,
   type Timeline,
@@ -62,35 +68,44 @@ const v: string = version;
 const presetHandle = presetPipeline(g);
 presetHandle.destroy();
 
-// ---- mutations return an awaitable + cancelable handle ------------------------------
-const addP: Awaitable = g.addNode({ id: "check", label: "Health check" }, { after: "deploy" });
-addP.then((r) => r.canceled).catch(() => {}).finally(() => {});
+// ---- mutations return an awaitable + cancelable handle, resolving {canceled, applied, …} --
+const addP: Awaitable<MutationResult> = g.addNode({ id: "check", label: "Health check" }, { after: "deploy" });
+addP.then((r) => { r.canceled; r.applied; }).catch(() => {}).finally(() => {});
 addP.cancel();
 
-const upd: Awaitable = g.update("check", { data: { status: "done" } });
-const rm: Awaitable<{ canceled: boolean }> = g.removeNode("check");
-void rm;
+const upd: Awaitable<MutationResult> = g.update("check", { data: { status: "done" } });
+void upd;
+// removeNode() resolves the full removed-ids cascade on top of {canceled, applied}.
+const rm: Awaitable<RemoveNodeResult> = g.removeNode("check");
+rm.then((r) => { const nodeIds: string[] = r.ids.nodes; const edgeIds: string[] = r.ids.edges; void [nodeIds, edgeIds]; });
 
-g.batch((inner: Graph) => {
+const batchP: Awaitable<MutationResult> = g.batch((inner: Graph) => {
   inner.addEdge({ id: "e4", source: "check", target: "deploy" });
   inner.removeEdge("e4");
 });
+void batchP;
+// batch(fn) requires a synchronous fn (finding #2) — enforced at RUNTIME only
+// (GraphError "batch-async"), not by this signature: TypeScript's `void` return type
+// accepts a Promise-returning function too, so an async callback still type-checks here.
 
 g.expand("clean");
 g.collapse("clean");
 g.expandAll();
 g.collapseAll();
 
-const splitAwaitable: Awaitable = g.split("build", {
+// condense()/split() resolve the created/removed ids once the merge/split actually lands
+// (`applied:true`) — `ids` is optional because a run canceled before that never happened.
+const splitAwaitable: Awaitable<CondenseSplitResult> = g.split("build", {
   nodes: [
     { id: "build.compile", label: "Compile" },
     { id: "build.link", label: "Link" },
   ],
   edges: [{ id: "compile->link", source: "build.compile", target: "build.link" }],
 });
-void splitAwaitable;
+splitAwaitable.then((r) => { if (r.applied && r.ids) { const created: string[] = r.ids.created; void created; } });
 
-g.condense(["build.compile", "build.link"], { id: "build" });
+const condenseAwaitable: Awaitable<CondenseSplitResult> = g.condense(["build.compile", "build.link"], { id: "build" });
+void condenseAwaitable;
 
 g.style((n: NodeSpec) => (n.data && n.data.status === "done" ? { "--smv-fill": "#e8f6ec" } : null));
 g.theme("dark");
@@ -144,6 +159,12 @@ g.on("expandAll", (payload) => {
 });
 g.on("arbitrary-custom-event", (payload: unknown) => void payload);
 
+// The wildcard listener gets TWO positional args — type, then payload (src/events.js) —
+// not just the payload every other on() overload hands its callback.
+const offAny = g.on("*", (type: string, payload: unknown) => { void [type, payload]; });
+offAny();
+g.off("*", (type: string, payload: unknown) => { void [type, payload]; });
+
 // ---- run: Mode A (simulate, default) ---------------------------------------------------
 const runA: SimRun = g.run({ hopMs: 300, rates: [{ t: 0, scope: "*", factor: 1 }] });
 runA.play({ until: "deploy" }).then((r) => r.canceled);
@@ -164,8 +185,21 @@ void bare.duration;
 const runB: LiveRun = g.run({ mode: "live" });
 runB.start("ingest");
 runB.finish("ingest", { n: 1 });
+runB.fail("clean.dedupe");
+const failedAt: number = runB.fail("clean.dedupe", { at: 1200, reason: "OOM" });
+void failedAt;
 runB.spawn("clean.dedupe", 3);
 runB.follow();
+
+// The failure primitive end to end: a declared Mode A failure, the 'failed' status it
+// produces, and the log entry a live fail() writes.
+const failingNode: NodeSpec = { id: "flaky", label: "Flaky", data: { duration: "3s", fail: true } };
+void failingNode;
+const runState = runB.state().nodes.ingest;
+if (runState && runState.status === "failed") void runState.progress;
+const failEntry: LiveEvent = { t: 10, type: "fail", id: "ingest", reason: "timeout" };
+void failEntry;
+void runB.sim().events.filter((e) => e.type === "fail");
 const following: boolean = runB.following;
 const nowMs: number = runB.now();
 const log = runB.log();
@@ -251,12 +285,20 @@ void rows[0]?.targets;
 const tableHandle = attachA11yTable(g, { visible: false });
 tableHandle.destroy();
 
-// ---- error shape (catch-and-inspect, structural — not an importable class) -------------
+// ---- error shape ------------------------------------------------------------------------
+// GraphError is a real, importable class (M2 finding): instanceof narrows it directly, and
+// `.code` is one of the pinned GraphErrorCode union. SmvErrorLike stays for callers who
+// prefer to narrow structurally instead.
 try {
   g.addNode({ id: "" });
 } catch (err) {
+  if (err instanceof GraphError) {
+    const code: GraphErrorCode = err.code;
+    void code;
+  }
   const smvErr = err as SmvErrorLike;
-  void smvErr.code;
+  const structCode: GraphErrorCode = smvErr.code;
+  void structCode;
 }
 
 // ---- deliberately wrong usages: these MUST fail to compile -----------------------------
@@ -266,3 +308,9 @@ g.split("build", "not-a-parts-object");
 
 // @ts-expect-error — 'live' run's start/finish/spawn/follow are not on the Mode A surface.
 runA.start("ingest");
+
+// @ts-expect-error — fail() is a live-mode primitive; Mode A declares failure via data.fail.
+runA.fail("ingest");
+
+// @ts-expect-error — a failure is not partial: fail() takes no `n`.
+runB.fail("ingest", { n: 1 });

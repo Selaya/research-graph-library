@@ -115,6 +115,73 @@ test("camera target: an unknown node id resolves to 'stay put', never the origin
 });
 
 // ---------------------------------------------------------------------------
+// Regression: camera/highlight misuse used to be completely silent — now it warns once
+// per offending call, naming the op and the issue, without changing the resolved result.
+// ---------------------------------------------------------------------------
+
+function captureWarn(fn) {
+  const calls = [];
+  const orig = console.warn;
+  console.warn = (...args) => calls.push(args.join(" "));
+  try { fn(); } finally { console.warn = orig; }
+  return calls;
+}
+
+test("camera: an unresolved node/nodes id warns once, naming the op and the id, and still resolves to stay put", () => {
+  let warns = captureWarn(() => resolveCameraTarget({ node: "ghost" }, LAYOUT, SIZE, CUR));
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /\[smv:camera\]/);
+  assert.match(warns[0], /"ghost"/);
+
+  warns = captureWarn(() => resolveCameraTarget({ node: "a" }, LAYOUT, SIZE, CUR));
+  assert.deepEqual(warns, [], "a real id never warns");
+
+  warns = captureWarn(() => resolveCameraTarget({ nodes: ["a", "ghost"] }, LAYOUT, SIZE, CUR));
+  assert.equal(warns.length, 1, "one warning for the whole step, not one per id");
+  assert.match(warns[0], /"ghost"/);
+});
+
+test("camera: a typo'd key (e.g. \"nod\" for \"node\") warns instead of silently falling through to a relative move", () => {
+  const warns = captureWarn(() => resolveCameraTarget({ nod: "a" }, LAYOUT, SIZE, CUR));
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /\[smv:camera\]/);
+  assert.match(warns[0], /"nod"/);
+});
+
+test("camera: documented keys (including ease/dur, which this function itself never reads) never warn", () => {
+  const warns = captureWarn(() =>
+    resolveCameraTarget({ node: "a", k: 1.8, pad: 60, ease: "cubic-in-out", dur: 500 }, LAYOUT, SIZE, CUR),
+  );
+  assert.deepEqual(warns, []);
+});
+
+test("highlight: unknown nodes/edges ids and a bad variant warn once each call", () => {
+  const { dir } = makeHost();
+
+  let warns = captureWarn(() => dir.highlight({ nodes: ["ghost"], variant: "focus" }));
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /\[smv:highlight\]/);
+  assert.match(warns[0], /"ghost"/);
+
+  warns = captureWarn(() => dir.highlight({ nodes: ["a"], variant: "shout" }));
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /"shout"/);
+
+  warns = captureWarn(() => dir.highlight({ nodes: ["a"], edges: ["e1"], variant: "warn", dim: true }));
+  assert.deepEqual(warns, [], "a well-formed call never warns");
+});
+
+test("highlight: a wrong key name (\"node\" for \"nodes\") warns, and is still silently ignored exactly as before — the behavior itself does not change", () => {
+  const { dir, calls } = makeHost(); // fresh instance: nothing highlighted yet to clear
+
+  const warns = captureWarn(() => dir.highlight({ node: "a" }));
+  assert.equal(warns.length, 1, "the typo'd key is flagged");
+  assert.match(warns[0], /\[smv:highlight\]/);
+  assert.match(warns[0], /"node"/);
+  assert.deepEqual(calls, [], "…and, exactly as before, it is never actually read: no emphasis lands");
+});
+
+// ---------------------------------------------------------------------------
 // createDirector — emphasis + caption state machine against a fake host.
 // ---------------------------------------------------------------------------
 

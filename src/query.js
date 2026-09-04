@@ -1,8 +1,10 @@
 // Query sugar over a Store (M2). PURE — no DOM, no animation, just reads.
 
 /** Same cloning discipline as store.spec(): callers never get a live ref they can
- *  mutate to corrupt the store. */
-function cloneItem(item) {
+ *  mutate to corrupt the store. Exported so index.js's singular g.node()/g.edge() can
+ *  return copies too — the same contract the README already promises for the whole
+ *  query surface (M2 finding: they used to hand back the live store record). */
+export function cloneItem(item) {
   return item.data ? { ...item, data: { ...item.data } } : { ...item };
 }
 

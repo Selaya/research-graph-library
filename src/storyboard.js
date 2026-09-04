@@ -8,7 +8,7 @@ import { emitter } from "./events.js";
 
 const OPS = new Set([
   "addNode", "addEdge", "removeNode", "removeEdge", "update",
-  "expand", "collapse", "condense", "batch",
+  "expand", "collapse", "condense", "split", "batch",
   "run.play", "run.step", "run.seek", "wait",
   // M4 director ops — method-shaped like the mutations, so applyStep's default branch
   // dispatches them straight to g.camera/g.highlight/g.clearHighlight/g.caption.
@@ -17,13 +17,43 @@ const OPS = new Set([
   "props",
 ]);
 
-function validate(steps) {
+/** The same --smv-* key-shape check director.setPropsMap() runs at commit time (D16), run
+ *  again here so a malformed props step fails at build time like every other op does,
+ *  instead of only once the storyboard reaches it mid-playback. `where` is the step's
+ *  (possibly dotted, for a nested step) index, so the error still names its location. */
+function validateProps(step, where) {
+  const map = (step.args && step.args[0]) || null;
+  for (const [id, p] of Object.entries(map || {})) {
+    if (!p) continue;
+    for (const k of Object.keys(p)) {
+      if (!k.startsWith("--smv-")) {
+        throw new GraphError(
+          "props-key",
+          `props only sets --smv-* properties (D7): "${k}" on "${id}" is not one (step ${where})`,
+        );
+      }
+    }
+  }
+}
+
+/** `where` prefixes a nested step's index with its parent's (batch children read "1.2"), so
+ *  a typo anywhere in the tree still throws the library's own GraphError, step-indexed,
+ *  instead of surfacing as a raw TypeError once playback reaches it. */
+function validate(steps, where = "") {
   steps.forEach((step, i) => {
+    const at = where ? `${where}.${i}` : `${i}`;
     if (step.op === undefined) {
-      if (step.label === undefined) throw new GraphError("storyboard-step", `step ${i} needs an "op" or a "label"`);
+      if (step.label === undefined) throw new GraphError("storyboard-step", `step ${at} needs an "op" or a "label"`);
       return;
     }
-    if (!OPS.has(step.op)) throw new GraphError("storyboard-op", `unknown storyboard op "${step.op}" at step ${i}`);
+    if (!OPS.has(step.op)) throw new GraphError("storyboard-op", `unknown storyboard op "${step.op}" at step ${at}`);
+    if (step.op === "props") validateProps(step, at);
+    if (step.op === "batch") {
+      // Same extraction applyOp's batch case uses: raw JSON gives `steps`, the fluent
+      // builder gives `args[0]`.
+      const list = Array.isArray(step.steps) ? step.steps : Array.isArray(step.args && step.args[0]) ? step.args[0] : [];
+      validate(list, at);
+    }
   });
 }
 
@@ -178,7 +208,8 @@ export function createStoryboard(host, steps) {
  * matches the sync signature `mount`/`g` use elsewhere) and reserved for future validation. */
 const NAMED = {
   addNode: "addNode", addEdge: "addEdge", removeNode: "removeNode", removeEdge: "removeEdge",
-  update: "update", expand: "expand", collapse: "collapse", condense: "condense", batch: "batch",
+  update: "update", expand: "expand", collapse: "collapse", condense: "condense", split: "split",
+  batch: "batch",
   run: "run.play", runStep: "run.step", runSeek: "run.seek",
   camera: "camera", highlight: "highlight", clearHighlight: "clearHighlight", caption: "caption",
   props: "props",
@@ -194,7 +225,9 @@ export function timeline(_g) {
     },
     label(name) { steps.push({ label: name }); return t; },
     wait(ms) { steps.push({ op: "wait", ms }); return t; },
-    build: () => steps,
+    // A copy, not the live array: build() then chaining more steps onto `t` must not mutate
+    // an array the caller already has in hand.
+    build: () => [...steps],
   };
   for (const [name, op] of Object.entries(NAMED)) t[name] = (...args) => t.to(op, ...args);
   return t;

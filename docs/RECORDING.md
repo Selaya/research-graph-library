@@ -13,7 +13,17 @@ Design background: PLAN.md D12–D17 and §5.7; module contracts in INTERNALS.md
 
 A director script is an ordinary storyboard (PLAN §5.5): a serializable JSON op array.
 M4 adds five ops and one field. Nothing here needs authored JS — the array is the whole
-artifact, and `smv-pack --storyboard` ships it.
+artifact, and `smv-pack --storyboard` ships it. `split` (the mirror of `condense`, README
+§API) is a full storyboard op too — `{ "op": "split", "args": ["clean", { "nodes": [...],
+"edges": [...] }] }` — and paces the same way `condense` does (900ms default, see below).
+
+Validation runs at *build* time, before any step plays: `g.storyboard(steps)` (and the
+`storyboard` mount option) throws immediately on an unknown op name, a step with neither
+`op` nor `label`, or a malformed `props` step (a key that isn't `--smv-*`) — including
+inside a `batch` step's nested children, at any depth, which is where a typo used to hide
+until playback reached it and threw a bare `TypeError` instead of the library's own
+`GraphError`. The error names the step's position, dotted for a nested one
+(`unknown storyboard op "spilt" at step 2.1` for the second child of the batch at index 2).
 
 ### The op reference
 
@@ -152,6 +162,19 @@ npx smv-pack spec.json -o story.html --storyboard sb.json --preset pipeline --ti
 
 ## 3. Rendering with `smv-record`
 
+`smv-record` drives a real headless Chromium, so it needs one on disk — `playwright-core`
+(a devDependency of this package; `npm install -D playwright-core` for an npm consumer)
+plus the browser binary itself, which is a separate download:
+
+```
+npx playwright install chromium
+```
+
+`findChromium()` (`scripts/harness.mjs`) looks for it in the usual places — this repo's
+image, `$PLAYWRIGHT_BROWSERS_PATH`, then playwright-core's own standard cache location — and
+only fails once none of them has it, naming every path it tried and pointing at the command
+above.
+
 ```
 npm run build                       # dist/smv.iife.min.js is what gets packed
 npx smv-record spec.json --storyboard sb.json --out story.mp4 \
@@ -191,9 +214,10 @@ rendering a take it cannot encode.
 | `--from label` / `--to label` | — | render only that chapter range (§3.3) |
 | `--font pinned.woff2` | — | pin the typeface so the layout is the same on every machine (§3.4) |
 
-Needs `dist/smv.iife.min.js` (`npm run build`) and the dev-installed `playwright-core`;
-any bad input — a missing encoder, an unknown `--cues` extension, a `--font` that is not
-there or is not a font, a `--from` label the storyboard does not have — exits 1 with
+Needs `dist/smv.iife.min.js` (`npm run build`), the dev-installed `playwright-core`, and a
+chromium binary for it to drive (`npx playwright install chromium` — see the prerequisite
+above); any bad input — a missing encoder, an unknown `--cues` extension, a `--font` that is
+not there or is not a font, a `--from` label the storyboard does not have — exits 1 with
 `smv-record: <reason>` before a browser is launched.
 
 **Interrupting a take.** Ctrl+C at any point removes the partial `--out` file and exits

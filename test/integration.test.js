@@ -432,6 +432,43 @@ test("expand then condense mid-run does not throw and tokens remap onto the merg
   g.destroy();
 });
 
+test("split mid-run recompiles the sim onto the new nodes (the condense mirror)", async () => {
+  const { g } = mountPipeline();
+  const run = g.run({});
+  run.play();
+  await pumpUntil(() => run.state().nodes["ingest"].status === "active", 600);
+
+  const remaps = [];
+  run.on("remap", (e) => remaps.push(e));
+
+  const split = g.split("lint", {
+    nodes: [{ id: "lint.style", data: { duration: "4s" } }, { id: "lint.types", data: { duration: "4s" } }],
+    edges: [{ id: "ls1", source: "lint.style", target: "lint.types" }],
+  });
+  await pumpUntil(() => remaps.length > 0, 400);
+  let settled = null;
+  split.then((r) => { settled = r; });
+  await pumpUntil(() => settled !== null, 4000);
+
+  assert.equal(remaps.length, 1, "the transport recompiled and announced one remap");
+  assert.deepEqual(remaps[0].sources, ["lint"]);
+  assert.equal(remaps[0].target, "lint.style", "progress lands on the entry part, as in Mode B");
+
+  const st = run.state();
+  assert.ok(st.nodes["lint.style"] && st.nodes["lint.types"], "the recompiled schedule knows the new nodes");
+  assert.equal(st.nodes["lint"], undefined, "…and forgot the split source");
+
+  // The schedule is real, not a stale-unknown no-op: waiting on a new node actually waits.
+  let reached = false;
+  run.play({ until: "lint.types" }).then(() => { reached = true; });
+  await pump(6);
+  assert.equal(reached && run.state().nodes["lint.types"].status === "pending", false,
+    "play({until: <new node>}) does not resolve while the node is still pending");
+
+  run.pause();
+  g.destroy();
+});
+
 test("opts.controls mounts the transport bar and its scrubber seeks the storyboard timeline", async () => {
   const steps = [
     { label: "start" },

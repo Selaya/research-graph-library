@@ -6,6 +6,7 @@
 
 import { clipEnds, pathString, pointAt } from "./path.js";
 import { truncate, NODE_PAD_X, NODE_MAX_W } from "./measure.js";
+import { GraphError } from "./store.js";
 
 const NS = "http://www.w3.org/2000/svg";
 const CORNER = 8;
@@ -66,8 +67,25 @@ function asMap(x) {
   return new Map(Object.entries(x));
 }
 
-function rectOf(n) {
-  return n ? { x: n.x, y: n.y, w: n.w, h: n.h, r: CORNER } : null;
+function rectOf(n, r) {
+  return n ? { x: n.x, y: n.y, w: n.w, h: n.h, r } : null;
+}
+
+/** --smv-radius (THEMING.md) — read from the mount root's computed style, once per commit
+ *  (D7: geometry/measurement never happens per frame). Falls back to CORNER when the
+ *  property is unset, unparseable, or getComputedStyle itself is missing/minimal (the
+ *  repo's Node DOM test stub has no `window.getComputedStyle` at all) — never throws. */
+function resolveRadius(rootEl, doc) {
+  try {
+    const view = (doc && doc.defaultView) || (typeof window !== "undefined" ? window : null);
+    if (!view || typeof view.getComputedStyle !== "function") return CORNER;
+    const cs = view.getComputedStyle(rootEl);
+    const raw = cs && typeof cs.getPropertyValue === "function" ? cs.getPropertyValue("--smv-radius") : null;
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? n : CORNER;
+  } catch {
+    return CORNER;
+  }
 }
 
 export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
@@ -95,6 +113,11 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
   const nodeStyle = new Map(); // id -> committed style descriptor
   const edgeStyle = new Map();
   const edgeMeta = new Map(); // id -> {source, target}
+
+  // --smv-radius (THEMING.md): re-resolved once per styleCommit(), read by every rx/ry
+  // write below. Starts at the CORNER fallback so an element created before the first
+  // commit (shouldn't happen, but see D7) still gets a sane radius.
+  let corner = CORNER;
 
   // Viewport culling (M3): `fn()` returns the current world-space visible rect (or null
   // to cull nothing) — set by index.js from viewport.visibleWorldRect(). Only consulted
@@ -128,8 +151,8 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     const g = make("g", "smv-node");
     g.setAttribute("data-id", id);
     const rect = make("rect", "smv-node-box");
-    rect.setAttribute("rx", String(CORNER));
-    rect.setAttribute("ry", String(CORNER));
+    rect.setAttribute("rx", String(corner));
+    rect.setAttribute("ry", String(corner));
     const text = make("text", "smv-node-label");
     g.appendChild(rect);
     g.appendChild(text);
@@ -144,14 +167,14 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
   function ensureContainerParts(e) {
     if (e.stack) return;
     e.stack = make("rect", "smv-node-stack");
-    e.stack.setAttribute("rx", String(CORNER));
-    e.stack.setAttribute("ry", String(CORNER));
+    e.stack.setAttribute("rx", String(corner));
+    e.stack.setAttribute("ry", String(corner));
     e.stack.setAttribute("x", String(STACK_OFF));
     e.stack.setAttribute("y", String(STACK_OFF));
     e.g.insertBefore(e.stack, e.rect); // paints behind the card
     e.header = make("rect", "smv-node-header");
-    e.header.setAttribute("rx", String(CORNER));
-    e.header.setAttribute("ry", String(CORNER));
+    e.header.setAttribute("rx", String(corner));
+    e.header.setAttribute("ry", String(corner));
     e.header.setAttribute("x", "0");
     e.header.setAttribute("y", "0");
     e.g.insertBefore(e.header, e.text);
@@ -195,10 +218,27 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
   function setProps(el, props) {
     if (!props) return;
     for (const [k, v] of Object.entries(props)) {
-      if (!k.startsWith("--smv-")) continue; // user style functions only set custom properties (D7)
+      // Both feeders of `props` (the style fn, via checkStyleProps below; the director's
+      // props layer, via its own "props-key" check) are validated at their source, so this
+      // never actually sees a non---smv-* key — kept as a last-line guard, not the contract.
+      if (!k.startsWith("--smv-")) continue;
       if (v == null || v === false) el.style.removeProperty(k);
       else el.style.setProperty(k, String(v));
     }
+  }
+
+  /** `g.style(fn)` only sets --smv-* properties (D7) — same contract, and the same error
+   *  shape, as the director's `props-key` check (director.js). Was a silent drop; THEMING.md
+   *  has always documented both as throwing (docs/THEMING.md), so this brings the code to
+   *  match instead of the other way round. */
+  function checkStyleProps(id, p) {
+    if (!p) return p;
+    for (const k of Object.keys(p)) {
+      if (!k.startsWith("--smv-")) {
+        throw new GraphError("style-key", `style only sets --smv-* properties (D7): "${k}" on "${id}" is not one`);
+      }
+    }
+    return p;
   }
 
   /** M4d/D16 — the director's per-step override layer sits ON TOP of the user style
@@ -226,6 +266,14 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
   function applyNodeStyle(id, e) {
     const st = nodeStyle.get(id);
     if (!st) return;
+    if (e.rect.getAttribute("rx") !== String(corner)) {
+      // --smv-radius may change between commits (theme toggle, runtime CSS edit) — an
+      // already-created element's rx/ry was only ever set once, at ensureNode() time.
+      e.rect.setAttribute("rx", String(corner));
+      e.rect.setAttribute("ry", String(corner));
+      if (e.stack) { e.stack.setAttribute("rx", String(corner)); e.stack.setAttribute("ry", String(corner)); }
+      if (e.header) { e.header.setAttribute("rx", String(corner)); e.header.setAttribute("ry", String(corner)); }
+    }
     const d = st.data || {};
     setData(e.g, "data-status", d.status);
     setData(e.g, "data-mode", d.mode);
@@ -267,6 +315,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
    * spec items, plus optional {reversed:Set, style:fn, sizes:{id:{w,h}}}.
    */
   function styleCommit(like) {
+    corner = resolveRadius(rootEl, doc); // --smv-radius, resolved once per commit (D7)
     const nodes = asMap(like && like.nodes);
     const edges = asMap(like && like.edges);
     const reversed = (like && (like.reversed || like.reversedEdgeIds)) || new Set();
@@ -283,7 +332,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
         count: n.count > 0 ? n.count : null,
         depth: n.depth || 0,
         text: truncate(String(n.label ?? id), Math.max(8, w - 2 * NODE_PAD_X)),
-        props: mergeProps(styleFn ? styleFn(n) : null, over && over.get(id)),
+        props: mergeProps(styleFn ? checkStyleProps(id, styleFn(n)) : null, over && over.get(id)),
       });
       const e = nodeEls.get(id);
       if (e) applyNodeStyle(id, e);
@@ -367,7 +416,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
       }
       setCulled(e, false);
       // Clip against the CURRENT-frame rects so edges stay attached while nodes resize.
-      const { points, arrow } = clipEnds(ed.points, rectOf(vNodes.get(meta.source)), rectOf(vNodes.get(meta.target)));
+      const { points, arrow } = clipEnds(ed.points, rectOf(vNodes.get(meta.source), corner), rectOf(vNodes.get(meta.target), corner));
       e.line.setAttribute("d", pathString(points));
       e.arrow.setAttribute("transform", `translate(${r2(arrow.x)},${r2(arrow.y)}) rotate(${deg(arrow.angle)})`);
       if (e.label) {

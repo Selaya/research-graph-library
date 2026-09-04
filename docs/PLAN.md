@@ -430,7 +430,7 @@ sequential sum or the parallel max of its children (default `sum`) — so the fl
 
 ```html
 <div id="pipe" style="height:480px"></div>
-<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@1/dist/smv.iife.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sparkle-motion-visualizer@0.1.0/dist/smv.iife.min.js"></script>
 <script>
   const g = SparkleMotion.mount("#pipe", spec, {
     theme: "auto",                       // "light" | "dark" | "auto" | token object
