@@ -6,10 +6,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { findChromium, chromiumNotFoundMessage } from "../scripts/harness.mjs";
 
-test("findChromium() resolves a real path in this dev image (the fast /opt path)", () => {
-  const p = findChromium();
-  assert.equal(typeof p, "string");
-  assert.ok(p.length > 0);
+test("findChromium() returns a real path where a browser exists, else throws the actionable message", () => {
+  // Portable across environments: in this dev image a browser lives under /opt/pw-browsers
+  // so a path comes back; on a bare runner (CI) nothing is discoverable, so the contract is
+  // to throw the `npx playwright install chromium` guidance — never to return a junk path.
+  try {
+    const p = findChromium();
+    assert.equal(typeof p, "string");
+    assert.ok(p.length > 0);
+  } catch (e) {
+    assert.match(e.message, /npx playwright install chromium/);
+  }
 });
 
 test("chromiumNotFoundMessage() names every path tried and the fix", () => {
