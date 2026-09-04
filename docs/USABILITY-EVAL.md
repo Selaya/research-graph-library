@@ -123,6 +123,14 @@ the run engine.
 
 ## Prioritized roadmap
 
+> **Status (2026-09-04): all 21 items below are implemented** in the commits following this
+> report on this branch — seven parallel code workstreams, the failed-step engine primitive,
+> a full docs pass (README plus new `docs/RUN.md`, `docs/LIVE.md`, `docs/PRESETS.md`), and a
+> three-lens adversarial review whose one confirmed finding (the Mode A sim transport never
+> recompiled on a mid-run `split`) is also fixed. Test suite grew 554 → 643, all passing;
+> types/build/size/doc-version gates green; the core bundle budget moved 40 → 45KB to absorb
+> the added validation and features (shipped IIFE still under its unchanged 50KB budget).
+
 Quick wins first — the high-impact/small-effort set is disproportionately large because most
 problems are doc/consistency gaps, not architecture.
 
