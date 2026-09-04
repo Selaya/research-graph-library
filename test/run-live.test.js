@@ -40,6 +40,29 @@ test("replayLive: an unrecognized event type or unknown node id is ignored, not 
   assert.equal(st.nodes.a.status, "active");
 });
 
+test("replayLive: finish() before any start() is a no-op — no phantom 'done' with zero tokens ever created", () => {
+  const spec = chainSpec();
+  const events = [{ t: 5, type: "finish", id: "a" }];
+  const st = replayLive(spec, events, 10);
+  assert.equal(st.nodes.a.status, "pending"); // NOT "done" — nothing ever occupied it
+  assert.equal(st.nodes.a.occupancy, 0);
+  assert.equal(st.tokens.length, 0); // no phantom token, no fan-out onto "ab"
+  assert.equal(st.edges.ab.traversed, 0);
+});
+
+test("replayLive: a second finish() past a node's occupancy is a no-op, not a second 'done'", () => {
+  const spec = chainSpec();
+  const events = [
+    { t: 0, type: "start", id: "a" },
+    { t: 5, type: "finish", id: "a" },   // legitimately drains a's one occupant -> done
+    { t: 8, type: "finish", id: "a" },   // a already has zero occupants now
+  ];
+  const st = replayLive(spec, events, 1000);
+  assert.equal(st.nodes.a.status, "done"); // still done from the real finish, not re-derived
+  assert.equal(st.tokens.length, 1); // exactly the one real fan-out, not a second phantom
+  near(st.edges.ab.traversed, 1);
+});
+
 // ---- start/finish/hop travel -------------------------------------------------------
 
 test("replayLive: start activates, finish travels the hop, then waits at the target", () => {

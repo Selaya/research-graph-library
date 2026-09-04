@@ -7,6 +7,15 @@ import { emitter } from "../src/events.js";
 
 const near = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `expected ${a} ≈ ${b}`);
 
+/** Captures console.warn calls made inside `fn`, restoring the real console.warn after. */
+function captureWarnings(fn) {
+  const calls = [];
+  const orig = console.warn;
+  console.warn = (...args) => calls.push(args.join(" "));
+  try { fn(); } finally { console.warn = orig; }
+  return calls;
+}
+
 function makeInternals() {
   const ticker = createTicker({ manual: true });
   const store = new Store({
@@ -188,6 +197,90 @@ test("live transport: destroy() stops the frontier ticker and settles the pendin
   const before = run.duration;
   ticker.tick(50);
   assert.equal(run.duration, before); // no longer subscribed to the ticker
+});
+
+// ---- start/finish/spawn validation warnings (unknown ids still heal, they just now warn) ---
+
+test("live transport: start()/finish()/spawn() on an unknown id still logs the event (self-heals) but warns", () => {
+  const { ticker, store } = makeInternals();
+  const run = createRunTransport({ ticker, store }, { mode: "live" });
+  ticker.tick(10);
+
+  const startWarns = captureWarnings(() => run.start("nope"));
+  assert.equal(startWarns.length, 1);
+  assert.match(startWarns[0], /nope/);
+
+  const finishWarns = captureWarnings(() => run.finish("nope"));
+  assert.equal(finishWarns.length, 1);
+  assert.match(finishWarns[0], /nope/);
+
+  const spawnWarns = captureWarnings(() => run.spawn("nope", 2));
+  assert.equal(spawnWarns.length, 1);
+  assert.match(spawnWarns[0], /nope/);
+
+  // still logged — an unknown id today can self-heal if the node is added later (D4 M2)
+  assert.equal(run.log().length, 3);
+  run.destroy();
+});
+
+test("live transport: start()/finish()/spawn() on a real node id never warns", () => {
+  const { ticker, store } = makeInternals();
+  const run = createRunTransport({ ticker, store }, { mode: "live" });
+  ticker.tick(10);
+  const warns = captureWarnings(() => {
+    run.start("a");
+    run.finish("a");
+    run.spawn("b", 1);
+  });
+  assert.deepEqual(warns, []);
+  run.destroy();
+});
+
+test("live transport: finish() on a node with zero current occupancy warns (and stays pending, not done)", () => {
+  const { ticker, store } = makeInternals();
+  const run = createRunTransport({ ticker, store }, { mode: "live" });
+  ticker.tick(10);
+  const warns = captureWarnings(() => run.finish("a")); // "a" was never start()'d
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /zero current occupancy/);
+  assert.equal(run.state().nodes.a.status, "pending"); // finding 2: no phantom "done"
+  run.destroy();
+});
+
+test("live transport: a second finish() past occupancy warns again but stays a no-op", () => {
+  const { ticker, store } = makeInternals();
+  const run = createRunTransport({ ticker, store }, { mode: "live" });
+  ticker.tick(10);
+  run.start("a");
+  run.finish("a"); // legitimately drains a's one occupant
+  const warns = captureWarnings(() => run.finish("a")); // a already has zero occupants
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /zero current occupancy/);
+  assert.equal(run.state().nodes.a.status, "done"); // unchanged, not re-derived
+  run.destroy();
+});
+
+test("live transport: a non-numeric n passed to finish()/spawn() warns", () => {
+  const { ticker, store } = makeInternals();
+  const run = createRunTransport({ ticker, store }, { mode: "live" });
+  ticker.tick(10);
+  run.start("a");
+  const finishWarns = captureWarnings(() => run.finish("a", { n: "oops" }));
+  assert.ok(finishWarns.some((w) => /non-numeric n/.test(w)));
+
+  const spawnWarns = captureWarnings(() => run.spawn("b", "oops"));
+  assert.ok(spawnWarns.some((w) => /non-numeric n/.test(w)));
+  run.destroy();
+});
+
+test("live transport: finish() with no n at all does not warn about n", () => {
+  const { ticker, store } = makeInternals();
+  const run = createRunTransport({ ticker, store }, { mode: "live" });
+  ticker.tick(10);
+  run.start("a");
+  const warns = captureWarnings(() => run.finish("a"));
+  assert.deepEqual(warns, []);
+  run.destroy();
 });
 
 // ---- mode A untouched sanity ----------------------------------------------------------
