@@ -305,3 +305,74 @@ test("timeline() builder emits exactly the same op array as hand-written JSON", 
 test("timeline().to() rejects an unknown op immediately", () => {
   assert.throws(() => timeline().to("nope"), (err) => err instanceof GraphError);
 });
+
+// ---------------------------------------------------------------------------
+// Regressions: split (docs/code mismatch), nested batch validation, props
+// build-time validation, build()'s returned array.
+// ---------------------------------------------------------------------------
+
+test("a top-level {op:\"split\"} step validates and plays, and the fluent builder has .split()", async () => {
+  const host = fakeHost();
+  const raw = { op: "split", args: ["clean", { nodes: [{ id: "clean.a" }, { id: "clean.b" }] }] };
+  assert.doesNotThrow(() => createStoryboard(host, [raw]));
+  const sb = createStoryboard(host, [raw]);
+  await sb.play();
+  assert.equal(host.state().v, 1, "the split step actually landed on the host");
+  assert.equal(host.state().from, raw);
+
+  const built = timeline().split("clean", { nodes: [{ id: "clean.a" }] }).build();
+  assert.deepEqual(built, [{ op: "split", args: ["clean", { nodes: [{ id: "clean.a" }] }] }]);
+  assert.doesNotThrow(() => createStoryboard(fakeHost(), built));
+});
+
+test("a typo'd op nested inside a batch step's steps array throws the same GraphError validate() gives at top level", () => {
+  const host = fakeHost();
+  assert.throws(
+    () => createStoryboard(host, [{ op: "batch", steps: [step("a"), { op: "condesne" }] }]),
+    (err) => err instanceof GraphError && err.code === "storyboard-op" && /step 0\.1/.test(err.message),
+  );
+  // Nested inside the fluent builder's args[0] shape too.
+  assert.throws(
+    () => createStoryboard(host, [{ op: "batch", args: [[{ op: "nope" }]] }]),
+    (err) => err instanceof GraphError && err.code === "storyboard-op",
+  );
+});
+
+test("a valid nested batch script still plays through unaffected", async () => {
+  // The sequencer itself hands a batch step to host.apply() whole — unpacking `steps` into
+  // individual mutations is index.js's job (D8/INTERNALS.md), so validate() recursing into
+  // it must not change how many times host.apply() is called: one per TOP-LEVEL step.
+  const host = fakeHost();
+  const sb = createStoryboard(host, [
+    { op: "batch", steps: [step("a"), step("b")] },
+    step("c"),
+  ]);
+  await sb.play();
+  assert.equal(host.calls.filter((c) => c.type === "apply").length, 2);
+  assert.deepEqual(host.calls.filter((c) => c.type === "apply").map((c) => c.step.op), ["batch", "addNode"]);
+});
+
+test("a malformed props step (a non --smv-* key) fails at build time, not mid-playback", () => {
+  const host = fakeHost();
+  assert.throws(
+    () => createStoryboard(host, [{ op: "props", args: [{ a: { fill: "red" } }] }]),
+    (err) => err instanceof GraphError && err.code === "props-key" && /step 0/.test(err.message),
+  );
+  // A well-formed props step is untouched.
+  assert.doesNotThrow(() =>
+    createStoryboard(host, [{ op: "props", args: [{ a: { "--smv-fill": "red" } }] }]),
+  );
+  // And the same check applies nested inside a batch.
+  assert.throws(
+    () => createStoryboard(host, [{ op: "batch", steps: [{ op: "props", args: [{ a: { fill: "red" } }] }] }]),
+    (err) => err instanceof GraphError && err.code === "props-key" && /step 0\.0/.test(err.message),
+  );
+});
+
+test("timeline().build() returns a copy: chaining more steps after build() never mutates it", () => {
+  const t = timeline().addNode({ id: "a" });
+  const first = t.build();
+  t.addNode({ id: "b" });
+  assert.equal(first.length, 1, "the array already handed back is untouched by later chaining");
+  assert.equal(t.build().length, 2);
+});
