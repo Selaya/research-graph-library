@@ -25,6 +25,13 @@ export const CSS = `
   --smv-container:#f2f4f9;
   --smv-header:#e7eaf3;
   --smv-condense:#f0a000;
+  /* Text-only token (WCAG AA, D7): #f0a000 text is ~2.1:1 on --smv-bg/--smv-fill, well
+   * under the 4.5:1 floor for the loop badge's 10px label. --smv-condense itself stays
+   * put — it also paints non-text strokes/emphasis (data-condense, data-emph="warn")
+   * where a AA text ratio isn't the requirement and darkening it would just be a
+   * cosmetic shift nobody asked for. Measured (see contrast note below): #8a5600 is
+   * 5.96:1 on #fbfbfd and 6.16:1 on #ffffff. */
+  --smv-condense-text:#8a5600;
   --smv-radius:8px;
   font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
 }
@@ -43,6 +50,7 @@ export const CSS = `
   --smv-container:#161b24;
   --smv-header:#222836;
   --smv-condense:#e0a53a;
+  --smv-condense-text:var(--smv-condense); /* dark theme's badge already clears AA, unchanged */
 }
 @media (prefers-color-scheme:dark){
   .smv-root[data-smv-theme="auto"]{
@@ -60,6 +68,7 @@ export const CSS = `
     --smv-container:#161b24;
     --smv-header:#222836;
     --smv-condense:#e0a53a;
+    --smv-condense-text:var(--smv-condense);
   }
 }
 
@@ -154,7 +163,7 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-token[data-frozen]{opacity:.45}
 .smv-ghost{fill:var(--smv-muted)}
 .smv-token-badge{fill:var(--smv-muted); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:end; dominant-baseline:central}
-.smv-loop-badge{fill:var(--smv-condense); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:middle; dominant-baseline:central}
+.smv-loop-badge{fill:var(--smv-condense-text); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:middle; dominant-baseline:central}
 .smv-join-pip{fill:none; stroke:var(--smv-muted); stroke-width:1.2}
 .smv-join-pip[data-filled]{fill:var(--smv-accent); stroke:var(--smv-accent)}
 /* Traversed edges keep a persistent progress channel: --smv-traversed is 0..1 (§6). */
