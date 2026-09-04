@@ -272,7 +272,10 @@ test("split phases run in order: highlight -> diverge -> reveal, on the shared t
   ]);
   await advance(h.ticker, SPLIT_PHASES.reveal + 1);
   assert.deepEqual(h.marks.at(-1), { ids: ["m1", "m2"], value: null });
-  assert.deepEqual(await run.promise, { canceled: false });
+  assert.deepEqual(await run.promise, {
+    canceled: false, applied: true,
+    ids: { created: ["m1", "m2"], removed: ["M"] },
+  });
 });
 
 test("split event payload carries source, targets and the pre-split source data", async () => {
@@ -326,7 +329,10 @@ test("split reduced motion keeps every phase and its ordering, just ~1ms each (G
   assert.deepEqual(seen, ["split"]);
   await advance(h.ticker, 1);
   await advance(h.ticker, 1);
-  assert.deepEqual(await run.promise, { canceled: false });
+  assert.deepEqual(await run.promise, {
+    canceled: false, applied: true,
+    ids: { created: ["n1"], removed: ["M"] },
+  });
   assert.deepEqual(h.marks.map((m) => m.value), ["src", null, "reveal", null], "the full sequence still ran");
   assert.equal(h.store.hasNode("n1"), true);
 });
@@ -341,7 +347,10 @@ test("a mutation mid-diverge cancels the run cleanly (D9), leaving the split in 
   h.relayout({ duration: 100 });
   await flush();
 
-  assert.deepEqual(await run.promise, { canceled: true });
+  assert.deepEqual(await run.promise, {
+    canceled: true, applied: true,
+    ids: { created: ["m1", "m2"], removed: ["M"] },
+  }, "the structural split landed (applied:true) even though this run reports canceled:true");
   assert.deepEqual(h.marks.map((m) => m.value), ["src", null], "no reveal after a cancel");
   assert.equal(h.store.hasNode("m1"), true, "the structural split already happened and stands");
 
@@ -356,7 +365,7 @@ test("tearing the clock down mid-phase settles the run instead of stranding it",
   const run = runSplit(h.g, h.internals, "M", PARTS);
   await advance(h.ticker, 32); // inside the highlight phase
   h.ticker.destroy();
-  assert.deepEqual(await within(run.promise), { canceled: true });
+  assert.deepEqual(await within(run.promise), { canceled: true, applied: false });
 });
 
 test("cancel() mid-diverge lands the split state instead of freezing it half-entered", async () => {
@@ -370,7 +379,10 @@ test("cancel() mid-diverge lands the split state instead of freezing it half-ent
   assert.ok(midway > 0 && midway < 1, "m1 is halfway into its entrance");
 
   run.cancel();
-  assert.deepEqual(await run.promise, { canceled: true });
+  assert.deepEqual(await run.promise, {
+    canceled: true, applied: true,
+    ids: { created: ["m1", "m2"], removed: ["M"] },
+  }, "the split landed before this explicit cancel, so applied stays true");
   await advance(h.ticker, 200);
 
   assert.deepEqual(
@@ -387,7 +399,7 @@ test("cancel() before diverge stops the run and clears the highlight", async () 
   const h = host();
   const run = runSplit(h.g, h.internals, "M", PARTS);
   run.cancel();
-  assert.deepEqual(await run.promise, { canceled: true });
+  assert.deepEqual(await run.promise, { canceled: true, applied: false });
   assert.deepEqual(h.marks.map((m) => m.value), ["src", null]);
   assert.equal(h.store.hasNode("m1"), false, "canceling during highlight never touches the store");
   assert.equal(h.commits.length, 0);

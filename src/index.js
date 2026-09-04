@@ -16,7 +16,7 @@ import { createViewState } from "./viewstate.js";
 import { runCondense, CONDENSE_PHASES } from "./condense-anim.js";
 import { runSplit } from "./split-anim.js";
 import { createDirector, resolveCameraTarget } from "./director.js";
-import { makeQuery } from "./query.js";
+import { makeQuery, cloneItem } from "./query.js";
 import { attachA11y } from "./a11y.js";
 import { attachTapToggle } from "./interact.js";
 import { createRunTransport } from "./run-transport.js";
@@ -26,6 +26,12 @@ import { createTransport } from "./transport.js";
 import { applyPipelinePreset } from "./preset-pipeline.js";
 
 export const version = "0.1.0";
+
+// Re-exported so consumers can `instanceof`-check a caught error and read `.code` off a
+// real class instead of only structurally (finding: GraphError was internal-only, and its
+// ~17 codes were discoverable nowhere but source). Also folded into the default export
+// below so it rides into the IIFE global the same way mount/presetPipeline do.
+export { GraphError };
 
 /** A camera move with no declared `dur`. */
 const CAMERA_MS = 600;
@@ -75,6 +81,16 @@ function deferred() {
   let resolve;
   const promise = new Promise((r) => { resolve = r; });
   return { promise, resolve };
+}
+
+/** Layers extra resolved fields onto an existing awaitable without disturbing its timing
+ *  or `.cancel()` (finding: mutation handles used to resolve with only `{canceled}`, which
+ *  cannot say whether the graph actually changed — cancel() never undoes add/remove/update,
+ *  and for condense/split the structural change lands mid-flight, in the async phase, so
+ *  `{canceled}` alone means something different before vs. after that phase). Additive: the
+ *  `canceled` field callers already read is untouched. */
+function withMeta(awaitable, meta) {
+  return thenable(Promise.resolve(awaitable).then((r) => ({ ...r, ...meta })), awaitable.cancel);
 }
 
 const centerOf = (b) => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
@@ -277,8 +293,10 @@ export function mount(el, spec = {}, opts = {}) {
     return thenable(tr.promise, () => tr.cancel());
   }
 
-  /** Inside batch(): one relayout for many ops, one shared awaitable. */
-  function commitOrDefer(focal, extra) {
+  /** Inside batch(): one relayout for many ops, one shared awaitable. `meta` (typically
+   *  `{applied: true}`, sometimes with `ids`) rides on top — see withMeta(). */
+  function commitOrDefer(focal, extra, meta) {
+    let t;
     if (batching > 0) {
       if (!batchDefer) batchDefer = deferred();
       if (focal && !batchFocal) batchFocal = focal;
@@ -289,12 +307,16 @@ export function mount(el, spec = {}, opts = {}) {
         Object.assign(batchExtra.easeOverride, extra.easeOverride);
       }
       const d = batchDefer;
-      return thenable(d.promise, () => transition && transition.cancel());
+      t = thenable(d.promise, () => transition && transition.cancel());
+    } else {
+      t = relayout({ focal, ...extra });
     }
-    return relayout({ focal, ...extra });
+    return meta ? withMeta(t, meta) : t;
   }
 
-  const settled = () => thenable(Promise.resolve({ canceled: false }), () => {});
+  /** For a mutation that turned out to be a no-op (e.g. expand() on an already-open
+   *  container) — `applied:false` says nothing actually changed. */
+  const settled = () => thenable(Promise.resolve({ canceled: false, applied: false }), () => {});
 
   /** Nearest positioned ancestor of `id` (itself first) in a layout's node map. What makes
    *  expandAll/collapseAll bloom from / fly into the RIGHT container when several, possibly
@@ -676,8 +698,10 @@ export function mount(el, spec = {}, opts = {}) {
     on(type, fn) { return bus.on(type, fn); },
     off(type, fn) { bus.off(type, fn); },
 
-    node(id) { return store.node(id); },
-    edge(id) { return store.edge(id); },
+    // Copies, not live store refs (same discipline as the plural query methods, M2): a
+    // caller mutating what these return must never be able to corrupt internal state.
+    node(id) { const n = store.node(id); return n ? cloneItem(n) : undefined; },
+    edge(id) { const e = store.edge(id); return e ? cloneItem(e) : undefined; },
     spec() { return store.spec(); },
     bounds() { return last && last.bounds; },
     layoutResult() { return last; },
@@ -689,38 +713,48 @@ export function mount(el, spec = {}, opts = {}) {
         const e = store.addEdge({ id: `e:${o.after}->${n.id}`, source: o.after, target: n.id });
         bus.emit("add", { kind: "edge", id: e.id, item: e });
       }
-      return commitOrDefer(n.id);
+      // `applied` is unconditionally true from here down: the store mutation above already
+      // happened synchronously, and cancel() only ever interrupts the relayout tween, never
+      // undoes it (finding #4).
+      return commitOrDefer(n.id, undefined, { applied: true });
     },
 
     addEdge(edge) {
       const e = store.addEdge(edge);
       bus.emit("add", { kind: "edge", id: e.id, item: e });
-      return commitOrDefer(e.target);
+      return commitOrDefer(e.target, undefined, { applied: true });
     },
 
     removeNode(id) {
       const edgesBefore = new Set(store.edges.keys());
       const removed = store.removeNode(id);
       for (const r of removed) bus.emit("remove", { kind: "node", id: r });
+      const removedEdges = [];
       for (const eid of edgesBefore) {
         if (store.edges.has(eid)) continue;
         pinnedReversals.delete(eid);
+        removedEdges.push(eid);
         bus.emit("remove", { kind: "edge", id: eid });
       }
-      return commitOrDefer(null);
+      // The doomed cascade (store.js's removeNode): `id` plus every descendant it swallowed,
+      // and every edge left dangling by any of them.
+      return commitOrDefer(null, undefined, {
+        applied: true,
+        ids: { nodes: [...removed], edges: removedEdges },
+      });
     },
 
     removeEdge(id) {
       store.removeEdge(id);
       pinnedReversals.delete(id);
       bus.emit("remove", { kind: "edge", id });
-      return commitOrDefer(null);
+      return commitOrDefer(null, undefined, { applied: true });
     },
 
     update(id, patch) {
       const item = store.update(id, patch);
       bus.emit("update", { id, patch, item });
-      return commitOrDefer(store.hasNode(id) ? id : null);
+      return commitOrDefer(store.hasNode(id) ? id : null, undefined, { applied: true });
     },
 
     /** D5 — children bloom out of the container's *previous* centre. */
@@ -735,7 +769,7 @@ export function mount(el, spec = {}, opts = {}) {
           for (const k of Object.keys(res.nodes)) if (!prev || !prev.nodes[k]) out[k] = at;
           return out;
         },
-      });
+      }, { applied: true });
     },
 
     /** The exact inverse: everything that just went away flies into the container's new centre. */
@@ -750,7 +784,7 @@ export function mount(el, spec = {}, opts = {}) {
           if (c && prev) for (const k of Object.keys(prev.nodes)) if (!res.nodes[k]) out[k] = { x: c.x, y: c.y };
           return out;
         },
-      });
+      }, { applied: true });
     },
 
     /** D6 — merge N nodes into one over the 3-phase choreography. Guards fire synchronously. */
@@ -824,7 +858,7 @@ export function mount(el, spec = {}, opts = {}) {
           }
           return out;
         },
-      });
+      }, { applied: true });
     },
 
     /** The inverse: everything that just went away flies into its new collapsed box. */
@@ -843,7 +877,7 @@ export function mount(el, spec = {}, opts = {}) {
           }
           return out;
         },
-      });
+      }, { applied: true });
     },
 
     /** D4 — the token run. Called with opts it (re)compiles; bare it returns the live one.
@@ -861,21 +895,35 @@ export function mount(el, spec = {}, opts = {}) {
     /** One relayout for many ops. An op that throws mid-batch still has to leave through
      *  the drain: the ops that DID land are in the store and must be rendered, the
      *  awaitables already handed out must settle, and batchDefer/batchFocal/batchExtra
-     *  must not leak into the next, unrelated batch. */
+     *  must not leak into the next, unrelated batch.
+     *
+     *  NOT transactional: `fn`'s ops run — and land in the store — one at a time, as `fn`
+     *  itself executes; batch() only defers the relayout(s) they'd each have caused alone
+     *  into one shared commit at the end. An op that throws partway through leaves every
+     *  op before it committed (see the drain above) — batch buys one paint, not rollback. */
     batch(fn) {
       batching++;
-      let failure = null;
-      try { fn(g); } catch (err) { failure = err; } finally { batching--; }
+      let failure = null, result;
+      try { result = fn(g); } catch (err) { failure = err; } finally { batching--; }
+      // A Promise-returning (async) fn is refused rather than silently mishandled: fn's
+      // body keeps running after this synchronous call has already returned, so any op
+      // after the first `await` would land outside the commit batch() just closed out —
+      // or, for a nested batch, after the outer batch has already drained.
+      if (result && typeof result.then === "function") {
+        throw new GraphError("batch-async", "batch(fn) requires a synchronous fn — an async/Promise-returning callback keeps running after batch() has already returned, so its later ops would land outside this commit");
+      }
       if (batching > 0) {
         if (failure) throw failure; // an outer batch owns the drain
-        return settled();
+        // The ops above DID land (batch is not transactional, see above) — only the
+        // shared relayout is deferred to the outer batch's own drain.
+        return thenable(Promise.resolve({ canceled: false, applied: true }), () => {});
       }
       const d = batchDefer, focal = batchFocal, extra = batchExtra;
       batchDefer = null; batchFocal = null; batchExtra = null;
       const tr = relayout({ focal, ...extra });
       if (d) d.resolve(tr);
       if (failure) throw failure;
-      return tr;
+      return withMeta(tr, { applied: true });
     },
 
     /** User style functions set --smv-* custom properties only (D7). */
@@ -1020,4 +1068,4 @@ export function mount(el, spec = {}, opts = {}) {
 /** `opts.preset: 'pipeline'` inline, or `SparkleMotion.presetPipeline(g)` after the fact. */
 export const presetPipeline = applyPipelinePreset;
 
-export default { mount, version, presetPipeline };
+export default { mount, version, presetPipeline, GraphError };
