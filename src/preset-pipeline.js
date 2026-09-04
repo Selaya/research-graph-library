@@ -5,9 +5,9 @@
 // this file is the only place that reads `data.duration`.
 //
 // Boundary: subscribes ONLY via the public instance surface (g.on/g.node/g.spec/g.el/
-// g.renderer.node|edge/g.ticker) plus DOM elements it creates itself. Never reaches into
-// scene/render/index internals — so it can ship as a separate entry point (own stylesheet,
-// own marker) that a core-only page never has to load.
+// g.renderer.node|edge/g.ticker/g.layoutResult) plus DOM elements it creates itself. Never
+// reaches into scene/render/index internals — so it can ship as a separate entry point (own
+// stylesheet, own marker) that a core-only page never has to load.
 
 import { parseDuration } from "./run.js";
 import { prefersReducedMotion } from "./anim.js";
@@ -359,6 +359,15 @@ export function applyPipelinePreset(g) {
 
   const offCommit = g.on("commit", onCommit);
   const offCondense = g.on("condense", onCondense);
+
+  // Back-fill: presetPipeline(g) "after the fact" must decorate what is ALREADY on screen,
+  // not just future commits — README/types/INTERNALS present it as equivalent to mount's
+  // preset:'pipeline', which gets the layout that triggers the mount's own initial "commit"
+  // for free. Run the same pass once, synchronously, against the current layout — guarded
+  // for a `g` with no layoutResult() (older fake host, or nothing laid out yet), where
+  // there is nothing to back-fill and the first real commit covers it as before.
+  const lr = typeof g.layoutResult === "function" && g.layoutResult();
+  if (lr && lr.nodes) onCommit(lr);
 
   return {
     destroy() {
