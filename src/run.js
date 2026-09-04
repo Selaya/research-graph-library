@@ -168,6 +168,17 @@ export function compileRun(spec = {}, opts = {}) {
     secOf.set(n.id, s);
     if (s != null && s > maxSec) maxSec = s;
   }
+  // ---- declared failure (Mode A's counterpart to live mode's run.fail(id)) ----
+  // `data.fail` sits next to `data.duration` and reads the same way: it is part of the
+  // declared truth this mode compiles. Truthy = this step runs its dwell and then fails;
+  // a string is carried through as the `reason` on the emitted event (nothing else reads
+  // it — a reason is annotation, not state).
+  const failReason = new Map(); // nodeId -> string | undefined, present iff the node fails
+  for (const n of nodes.values()) {
+    const f = n.data && n.data.fail;
+    if (f) failReason.set(n.id, typeof f === "string" ? f : undefined);
+  }
+
   const dwellFn = typeof opts.dwell === "function" ? opts.dwell : null;
   const dwellOf = new Map();
   for (const id of nodes.keys()) {
@@ -214,6 +225,10 @@ export function compileRun(spec = {}, opts = {}) {
 
   // ---- discrete-event machinery ----
   const tokens = [];
+  /** nodeId -> the EARLIEST instant it failed. A node can be entered by several tokens
+   *  (fan-in, loop), so the first failure is what the status window turns on. */
+  const failedAt = new Map();
+  const noteFail = (id, t) => { const p = failedAt.get(id); if (p == null || t < p) failedAt.set(id, t); };
   const loopTimeline = new Map(); // edgeId -> [{iteration, t}]
   const loopMax = new Map();
   for (const e of edges) if (e.loop) { loopTimeline.set(e.id, []); loopMax.set(e.id, e.maxIterations || 0); }
@@ -290,6 +305,18 @@ export function compileRun(spec = {}, opts = {}) {
     segment(tk, { kind: "node", id: nodeId, t0: t, t1: t + d });
     if (!Number.isFinite(d)) return;
     push(t + d, () => {
+      // A declared failure runs the dwell in full and then ends here: no 'finish', no
+      // loop, no fan-out. The token is closed rather than stranded, so a failing branch
+      // reports the run 'done' instead of 'stalled' — nothing is still moving.
+      if (failReason.has(nodeId)) {
+        const ev = { t: t + d, type: "fail", tokenId: tk.id, nodeId };
+        const reason = failReason.get(nodeId);
+        if (reason !== undefined) ev.reason = reason;
+        emit(ev);
+        noteFail(nodeId, t + d);
+        endToken(tk, t + d);
+        return;
+      }
       emit({ t: t + d, type: "finish", tokenId: tk.id, nodeId });
       exitNode(tk, nodeId, t + d);
     });
@@ -393,6 +420,22 @@ export function compileRun(spec = {}, opts = {}) {
     return win || null;
   }
   for (const id of childrenOf.keys()) rollUp(id);
+  // A container is not an executable step, so it can never carry `data.fail` itself — but it
+  // must not report 'done' when the work inside it did not succeed. Its failure instant is
+  // the earliest of its descendants', mirroring the window rollup above.
+  const failRolled = new Set();
+  function rollUpFail(id) {
+    if (failRolled.has(id)) return failedAt.get(id);
+    failRolled.add(id);
+    let at = failedAt.get(id);
+    for (const c of childrenOf.get(id) || []) {
+      const cf = rollUpFail(c);
+      if (cf != null && (at == null || cf < at)) at = cf;
+    }
+    if (at != null) failedAt.set(id, at);
+    return at;
+  }
+  for (const id of childrenOf.keys()) rollUpFail(id);
 
   const stalled = tokens.some((tk) => !Number.isFinite(tk.endT));
   events.push({ t: duration, type: "done", stalled });
@@ -440,7 +483,11 @@ export function compileRun(spec = {}, opts = {}) {
       const win = nodeWindow.get(id);
       let status = "pending", progress = 0, occupancy = 0;
       if (win) {
-        status = t >= win.to ? "done" : t >= win.from ? "active" : "pending";
+        const fAt = failedAt.get(id);
+        // 'failed' outranks 'done' from the failure instant on: both are terminal, and the
+        // window's `to` for a failing node IS that instant.
+        status = fAt != null && t >= fAt ? "failed"
+          : t >= win.to ? "done" : t >= win.from ? "active" : "pending";
         for (const s of segs) {
           if (holds(s, t)) occupancy++;
           if (s.wait) continue; // waiting at a join is not dwell progress

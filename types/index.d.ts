@@ -13,6 +13,12 @@ export interface NodeSpec {
   label?: string;
   /** Containment: this node is a child of `parent` (compound / container nodes, D5). */
   parent?: string;
+  /** Free-form payload. Two keys are read by the Mode A run engine (src/run.js):
+   *  - `duration`: `"2h" | "45m" | "8s" | "300ms" | 12` (bare number = seconds) — paces
+   *    the dwell. Unparseable or negative values warn and fall back to the default.
+   *  - `fail`: truthy = this step runs its dwell and then FAILS — status `'failed'`, no
+   *    fan-out to its successors, a `'fail'` run event. A string value is carried through
+   *    as that event's `reason`. (Mode B's equivalent is `LiveRun.fail(id)`.) */
   data?: Record<string, unknown>;
   /** Container starts collapsed. */
   collapsed?: boolean;
@@ -73,6 +79,9 @@ export type GraphErrorCode =
   | "split-no-entry"
   | "split-no-exit"
   | "props-key"
+  /** g.style(fn) returned a key that isn't `--smv-*` (same contract as `props-key`,
+   *  thrown from render.js's checkStyleProps). */
+  | "style-key"
   | "storyboard-step"
   | "storyboard-op"
   | "storyboard-label"
@@ -286,7 +295,10 @@ export interface TokenState {
   at: { kind: "node" | "edge"; id: string; progress: number };
 }
 export interface NodeRunState {
-  status: "pending" | "active" | "done";
+  /** `'failed'` is terminal like `'done'`: the step stopped and nothing was handed on to
+   *  its successors. Mode A reaches it via `data.fail`, Mode B via `LiveRun.fail(id)`.
+   *  A failed node reports `progress: 1` and `occupancy: 0`. */
+  status: "pending" | "active" | "done" | "failed";
   progress: number;
   occupancy: number;
 }
@@ -313,7 +325,11 @@ export interface RunState {
 
 export interface RunEvent {
   t: number;
-  type: "enter" | "start" | "finish" | "spawn" | "join" | "drop" | "loop" | "done";
+  /** `'fail'` = a `data.fail` node reached the end of its dwell and died there (carries
+   *  `nodeId`, `tokenId`, and `reason` when `data.fail` was a string); `'warn'` = a
+   *  compile-time diagnostic (carries `nodeId`, `message`, `value`). Both are re-emitted
+   *  on the run bus by type, like every other event. */
+  type: "enter" | "start" | "finish" | "fail" | "spawn" | "join" | "drop" | "loop" | "warn" | "done";
   [key: string]: unknown;
 }
 
@@ -340,9 +356,11 @@ export interface RunOptsBase {
 
 export interface LiveEvent {
   t: number;
-  type: "start" | "finish" | "spawn";
+  type: "start" | "finish" | "fail" | "spawn";
   id: string;
   n?: number;
+  /** `fail` entries only, and only when one was given. Annotation: the replay ignores it. */
+  reason?: string;
 }
 
 export interface SimRunOpts extends RunOptsBase {
@@ -389,6 +407,13 @@ export type SimRun = RunControllerBase;
 export interface LiveRun extends RunControllerBase {
   start(id: string, o?: { at?: number }): number;
   finish(id: string, o?: { at?: number; n?: number }): number;
+  /** Terminal sibling of `finish`: consumes every current occupant of `id` WITHOUT fanning
+   *  tokens out (the branch dies), leaves the node on status `'failed'`, and emits a
+   *  `'fail'` bus event `{id, t, reason?}`. Logged like any other entry, so it replays,
+   *  time-travels and self-heals the same way. Returns the stamped time.
+   *  No `n`: a failure is not partial. On a node with zero occupancy it warns and is a
+   *  no-op, exactly as `finish` is. */
+  fail(id: string, o?: { at?: number; reason?: string }): number;
   spawn(id: string, n: number, o?: { at?: number }): number;
   /** Re-attach the view clock to the frontier immediately (a "jump to live" snap). */
   follow(): number;

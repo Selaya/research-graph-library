@@ -118,7 +118,9 @@ function createSimTransport(internals, opts = {}) {
     if (t >= s.duration) return true;
     if (until == null) return false;
     const n = s.stateAt(t).nodes[until];
-    return !n || n.status === "done"; // an unknown node can never fire — never hang on it
+    // An unknown node can never fire — never hang on it. Nor on a failed one: 'failed' is
+    // as terminal as 'done', and "play until X" must not outlive X.
+    return !n || n.status === "done" || n.status === "failed";
   }
 
   function endPlay(canceled = false) {
@@ -214,10 +216,13 @@ function createSimTransport(internals, opts = {}) {
   }
 
   /** First moment `nodeId` is finished — what a `play({until})` step is worth on a
-   *  storyboard's cumulative timeline. Falls back to the whole run. */
+   *  storyboard's cumulative timeline. A `fail` counts: it is the instant that node stops
+   *  being something to wait for (see satisfied()). Falls back to the whole run. */
   function timeOf(nodeId) {
     const s = current();
-    for (const ev of s.events) if (ev.type === "finish" && ev.nodeId === nodeId) return ev.t;
+    for (const ev of s.events) {
+      if ((ev.type === "finish" || ev.type === "fail") && ev.nodeId === nodeId) return ev.t;
+    }
     return s.duration;
   }
 
@@ -365,7 +370,8 @@ function createLiveTransport(internals, opts = {}) {
   function satisfied() {
     if (until != null) {
       const n = stateAt(t).nodes[until];
-      return !n || n.status === "done"; // an unknown node can never fire — never hang on it
+      // Unknown or failed: neither will ever go 'done', so neither may hang the play().
+      return !n || n.status === "done" || n.status === "failed";
     }
     return t >= frontier;
   }
@@ -492,6 +498,29 @@ function createLiveTransport(internals, opts = {}) {
     return at;
   }
 
+  /** The terminal sibling of finish(): logs a `fail`, which on replay consumes the node's
+   *  occupants WITHOUT fanning anything out (src/run-live.js's doFail) and parks it on
+   *  status 'failed'. Same log/self-heal/time-travel rules as every other entry — and the
+   *  same diagnostics, including finish()'s zero-occupancy warning, since a fail() on a
+   *  node nothing ever started is the same phantom-status mistake. */
+  function fail(id, o) {
+    if (destroyed) return t;
+    const at = stampAt(o);
+    if (!store.hasNode(id)) warnUnknownNode("fail", id);
+    else {
+      const n = stateAt(at).nodes[id];
+      if (n && n.occupancy === 0) {
+        console.warn(`run-transport: fail("${id}") — "${id}" has zero current occupancy; this fail() is a no-op.`);
+      }
+    }
+    const ev = { t: at, type: "fail", id };
+    if (o && typeof o.reason === "string" && o.reason) ev.reason = o.reason;
+    log.push(ev);
+    touchLog();
+    bus.emit("fail", { id, t: at, reason: ev.reason });
+    return at;
+  }
+
   function spawn(id, n, o) {
     if (destroyed) return t;
     if (!store.hasNode(id)) warnUnknownNode("spawn", id);
@@ -504,7 +533,9 @@ function createLiveTransport(internals, opts = {}) {
   }
 
   function timeOf(nodeId) {
-    for (const ev of log) if (ev.type === "finish" && ev.id === nodeId) return ev.t;
+    for (const ev of log) {
+      if ((ev.type === "finish" || ev.type === "fail") && ev.id === nodeId) return ev.t;
+    }
     return frontier;
   }
 
@@ -575,7 +606,7 @@ function createLiveTransport(internals, opts = {}) {
 
   return {
     play, pause, seek, speed, step, timeOf, reset,
-    start, finish: finishNode, spawn, follow,
+    start, finish: finishNode, fail, spawn, follow,
     get following() { return following; },
     reload() { return frontier; },
     get playing() { return playing; },

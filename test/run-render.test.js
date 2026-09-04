@@ -177,3 +177,33 @@ test("run-render: a fully-traversed edge's data-traversed decoration reappears a
 
   g.destroy();
 });
+
+test("run-render: a failed node is written to the same data-run channel and announced on the 'runstatus' bus", async () => {
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, {
+    nodes: [
+      { id: "a", label: "A", data: { duration: "1s" } },
+      { id: "b", label: "B", data: { duration: "1s", fail: true } },
+      { id: "z", label: "Z", data: { duration: "1s" } },
+    ],
+    edges: [{ id: "e1", source: "a", target: "b" }, { id: "e2", source: "b", target: "z" }],
+  }, { animation: { duration: 40 } });
+
+  const seen = [];
+  g.on("runstatus", (ev) => seen.push(`${ev.id}:${ev.status}`));
+
+  const run = g.run({});
+  run.play();
+  await pumpUntil(() => run.state().nodes.b.status === "failed", 800);
+  await pump(2);
+
+  assert.equal(g.renderer.node("b").getAttribute("data-run"), "failed",
+    "the same attribute channel 'active'/'done' use — the stylesheet needs nothing else");
+  assert.equal(g.renderer.node("a").getAttribute("data-run"), "done");
+  assert.equal(g.renderer.node("z").getAttribute("data-run"), null,
+    "the successor is never decorated: nothing was handed on to it");
+  assert.ok(seen.includes("b:failed"), "a11y.js and the a11y table hear it on the existing bus channel");
+
+  g.destroy();
+});

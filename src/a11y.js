@@ -273,6 +273,7 @@ export function attachA11y(g, { root, svg } = {}) {
     const label = (n && n.label) || id;
     if (ev.status === "active") announce(`${label} started`);
     else if (ev.status === "done") announce(`${label} finished`);
+    else if (ev.status === "failed") announce(`${label} failed`);
   }
 
   /** Focus can arrive by routes this module does not drive — a click on the `<g>`, an

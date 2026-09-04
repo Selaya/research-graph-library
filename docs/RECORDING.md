@@ -13,7 +13,17 @@ Design background: PLAN.md D12–D17 and §5.7; module contracts in INTERNALS.md
 
 A director script is an ordinary storyboard (PLAN §5.5): a serializable JSON op array.
 M4 adds five ops and one field. Nothing here needs authored JS — the array is the whole
-artifact, and `smv-pack --storyboard` ships it.
+artifact, and `smv-pack --storyboard` ships it. `split` (the mirror of `condense`, README
+§API) is a full storyboard op too — `{ "op": "split", "args": ["clean", { "nodes": [...],
+"edges": [...] }] }` — and paces the same way `condense` does (900ms default, see below).
+
+Validation runs at *build* time, before any step plays: `g.storyboard(steps)` (and the
+`storyboard` mount option) throws immediately on an unknown op name, a step with neither
+`op` nor `label`, or a malformed `props` step (a key that isn't `--smv-*`) — including
+inside a `batch` step's nested children, at any depth, which is where a typo used to hide
+until playback reached it and threw a bare `TypeError` instead of the library's own
+`GraphError`. The error names the step's position, dotted for a nested one
+(`unknown storyboard op "spilt" at step 2.1` for the second child of the batch at index 2).
 
 ### The op reference
 

@@ -426,6 +426,46 @@ test("attachA11y: onRunStatus announces started/finished into the live region, c
   assert.equal(live.textContent, "Ingest finished. Clean started", "pending is silent");
 });
 
+test("attachA11y: a failed run status is announced and reaches the accessible name — no special-casing", async () => {
+  const doc = new FakeDocument();
+  const ids = ["A"];
+  const svg = fakeSvg(doc, ids, { A: { x: 0, y: 0 } });
+  const root = fakeRoot(doc);
+  root.appendChild(svg);
+  const g = fakeG({ ids, pos: { A: { x: 0, y: 0 } }, specNodes: [{ id: "A", label: "Ingest" }] });
+  attachA11y(g, { root, svg });
+  const live = root.children.find((c) => c.getAttribute("role") === "status");
+
+  g.emit("runstatus", { id: "A", status: "active" });
+  await Promise.resolve();
+
+  // run-render.js writes data-run to the element, THEN emits 'runstatus' — same order here.
+  const el = svg.querySelectorAll(".smv-node").find((n) => n.getAttribute("data-id") === "A");
+  el.setAttribute("data-run", "failed");
+  g.emit("runstatus", { id: "A", status: "failed" });
+  await Promise.resolve();
+
+  assert.equal(live.textContent, "Ingest failed");
+  assert.equal(el.getAttribute("aria-label"), "Ingest · failed", "the live status wins in the accessible name");
+});
+
+test("attachA11yTable: the status column carries 'failed' straight off the data-run channel", () => {
+  const doc = new FakeDocument();
+  const root = fakeRoot(doc);
+  const svg = fakeSvg(doc, ["A"], { A: { x: 0, y: 0 } });
+  root.appendChild(svg);
+  const g = fakeG({ ids: ["A"], specNodes: [{ id: "A", label: "Ingest" }], edges: [] });
+  g.el = root;
+
+  const handle = attachA11yTable(g);
+  const tbody = handle.el.children.find((c) => c.tagName === "tbody");
+
+  svg.querySelectorAll(".smv-node")[0].setAttribute("data-run", "failed");
+  g.emit("runstatus", { id: "A", status: "failed" });
+  assert.equal(tbody.children[0].children[1].textContent, "failed");
+  assert.equal(computeRows(g)[0].status, "failed");
+});
+
 test("attachA11y: a queued live-region flush after destroy() is a no-op, not a write to a detached node", async () => {
   const doc = new FakeDocument();
   const ids = ["A"];

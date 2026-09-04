@@ -22,6 +22,11 @@ export const CSS = `
   --smv-ok-stroke:#4c9a63;
   --smv-active:#eef1ff;
   --smv-active-stroke:#5b6ef5;
+  /* Failed run status (D4) — the fill/stroke pair --smv-ok is for 'done'. Measured: the
+   * node label (--smv-text #1b2230) is 13.95:1 on this fill, and the stroke is 5.72:1 on
+   * it / 6.32:1 on --smv-bg, so both clear AA as text and as a non-text boundary. */
+  --smv-fail:#fdecec;
+  --smv-fail-stroke:#b3261e;
   --smv-container:#f2f4f9;
   --smv-header:#e7eaf3;
   --smv-condense:#f0a000;
@@ -47,6 +52,9 @@ export const CSS = `
   --smv-ok-stroke:#4f9c68;
   --smv-active:#1e2440;
   --smv-active-stroke:#8b9bff;
+  /* Measured: --smv-text #e6e9f0 is 13.67:1 on this fill; the stroke 6.71:1 on it. */
+  --smv-fail:#2a1a1d;
+  --smv-fail-stroke:#f0868a;
   --smv-container:#161b24;
   --smv-header:#222836;
   --smv-condense:#e0a53a;
@@ -65,6 +73,8 @@ export const CSS = `
     --smv-ok-stroke:#4f9c68;
     --smv-active:#1e2440;
     --smv-active-stroke:#8b9bff;
+    --smv-fail:#2a1a1d;
+    --smv-fail-stroke:#f0868a;
     --smv-container:#161b24;
     --smv-header:#222836;
     --smv-condense:#e0a53a;
@@ -175,6 +185,10 @@ svg.smv.smv-grabbing{cursor:grabbing}
 /* Run-derived node state, the token engine's mirror of data-status (never spec-written). */
 .smv-node[data-run="active"]{--smv-fill:var(--smv-active); --smv-stroke:var(--smv-active-stroke)}
 .smv-node[data-run="done"]{--smv-fill:var(--smv-ok); --smv-stroke:var(--smv-ok-stroke)}
+/* 'failed' is terminal like 'done' and is styled through the same two channels — the
+   heavier boundary is what separates it from 'done' at a glance without relying on hue. */
+.smv-node[data-run="failed"]{--smv-fill:var(--smv-fail); --smv-stroke:var(--smv-fail-stroke)}
+.smv-node[data-run="failed"] rect.smv-node-box{stroke-width:2.25}
 
 /* Director emphasis (D14): discrete state, no transition — a wall clock cannot reproduce
    byte-for-byte under frame capture. --smv-pulse (D17) is written per tick by the

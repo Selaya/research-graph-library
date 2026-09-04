@@ -20,6 +20,7 @@ import {
   type GraphErrorCode,
   type SimRun,
   type LiveRun,
+  type LiveEvent,
   type Run,
   type StoryboardStep,
   type Timeline,
@@ -184,8 +185,21 @@ void bare.duration;
 const runB: LiveRun = g.run({ mode: "live" });
 runB.start("ingest");
 runB.finish("ingest", { n: 1 });
+runB.fail("clean.dedupe");
+const failedAt: number = runB.fail("clean.dedupe", { at: 1200, reason: "OOM" });
+void failedAt;
 runB.spawn("clean.dedupe", 3);
 runB.follow();
+
+// The failure primitive end to end: a declared Mode A failure, the 'failed' status it
+// produces, and the log entry a live fail() writes.
+const failingNode: NodeSpec = { id: "flaky", label: "Flaky", data: { duration: "3s", fail: true } };
+void failingNode;
+const runState = runB.state().nodes.ingest;
+if (runState && runState.status === "failed") void runState.progress;
+const failEntry: LiveEvent = { t: 10, type: "fail", id: "ingest", reason: "timeout" };
+void failEntry;
+void runB.sim().events.filter((e) => e.type === "fail");
 const following: boolean = runB.following;
 const nowMs: number = runB.now();
 const log = runB.log();
@@ -294,3 +308,9 @@ g.split("build", "not-a-parts-object");
 
 // @ts-expect-error — 'live' run's start/finish/spawn/follow are not on the Mode A surface.
 runA.start("ingest");
+
+// @ts-expect-error — fail() is a live-mode primitive; Mode A declares failure via data.fail.
+runA.fail("ingest");
+
+// @ts-expect-error — a failure is not partial: fail() takes no `n`.
+runB.fail("ingest", { n: 1 });
