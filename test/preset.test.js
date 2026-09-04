@@ -272,6 +272,7 @@ function fakeInstance(initialSpec) {
   const ticker = createTicker({ manual: true });
   const nodeEls = new Map();
   let spec = initialSpec;
+  let lastCommit = null; // mirrors g.layoutResult() — the real index.js keeps this in sync
 
   const g = {
     el: root,
@@ -279,6 +280,7 @@ function fakeInstance(initialSpec) {
     spec: () => spec,
     setSpec: (s) => { spec = s; },
     node: (id) => spec.nodes.find((n) => n.id === id),
+    layoutResult: () => lastCommit,
     renderer: {
       node(id) {
         if (!nodeEls.has(id)) {
@@ -291,7 +293,10 @@ function fakeInstance(initialSpec) {
     },
     on: (type, fn) => bus.on(type, fn),
     off: (type, fn) => bus.off(type, fn),
-    emit: (type, payload) => bus.emit(type, payload), // test-only helper
+    emit: (type, payload) => { // test-only helper
+      if (type === "commit") lastCommit = payload;
+      bus.emit(type, payload);
+    },
   };
   return g;
 }
@@ -331,6 +336,56 @@ test("applyPipelinePreset: chips render the effective duration and total bar sum
   const label = g.el.children.find((c) => c.attrs.class === "smv-totalbar").children
     .find((c) => c.attrs.class === "smv-totalbar-label");
   assert.equal(label.textContent, formatDuration(45 * 60 + 2 * 3600));
+
+  handle.destroy();
+});
+
+test("applyPipelinePreset: presetPipeline(g) 'after the fact' back-fills already-rendered state (no further mutation needed)", () => {
+  const spec = {
+    nodes: [
+      { id: "ingest", data: { duration: "45m", status: "done" } },
+      { id: "clean", data: { duration: "2h", status: "active", mode: "manual" } },
+    ],
+    edges: [],
+  };
+  const g = fakeInstance(spec);
+
+  // Mounted WITHOUT the preset — mirrors mount()'s own initial "commit", which fires
+  // whether or not opts.preset:'pipeline' was given.
+  g.emit("commit", { nodes: rectsFrom(spec) });
+
+  // presetPipeline(g) attached only now, "after the fact" — no mutation/commit follows.
+  const handle = applyPipelinePreset(g);
+
+  const clean = g.renderer.node("clean");
+  const chip = clean.children.find((c) => c.attrs.class === "smv-chip");
+  const status = clean.children.find((c) => c.attrs.class === "smv-status-glyph");
+  const mode = clean.children.find((c) => c.attrs.class === "smv-mode-badge");
+  assert.ok(chip && status && mode, "adornments exist immediately, before any further commit");
+  assert.equal(chip.textContent, "2h");
+  assert.equal(status.textContent, "●");
+  assert.equal(mode.textContent, "✋");
+
+  const ingest = g.renderer.node("ingest");
+  assert.equal(ingest.children.find((c) => c.attrs.class === "smv-chip").textContent, "45m");
+
+  const label = g.el.children.find((c) => c.attrs.class === "smv-totalbar").children
+    .find((c) => c.attrs.class === "smv-totalbar-label");
+  assert.equal(label.textContent, formatDuration(45 * 60 + 2 * 3600), "total bar back-filled too");
+
+  handle.destroy();
+});
+
+test("applyPipelinePreset: with no prior commit (layoutResult() unset), attach is a no-op until the next commit — same as before", () => {
+  const spec = { nodes: [{ id: "a", data: { duration: "1m" } }], edges: [] };
+  const g = fakeInstance(spec); // never emits "commit" before attaching
+  const handle = applyPipelinePreset(g);
+
+  const host = g.renderer.node("a");
+  assert.equal(host.children.find((c) => c.attrs.class === "smv-chip"), undefined, "nothing to back-fill yet");
+
+  g.emit("commit", { nodes: rectsFrom(spec) });
+  assert.equal(host.children.find((c) => c.attrs.class === "smv-chip").textContent, "1m");
 
   handle.destroy();
 });
