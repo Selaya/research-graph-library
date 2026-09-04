@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    { "id": "ingest", "label": "Ingest", "data": { "duration": "45m" } },
+    { "id": "clean", "label": "Clean data", "collapsed": true, "durationAgg": "sum" },
+    { "id": "clean.dedupe", "parent": "clean", "label": "Dedupe", "data": { "duration": "30m" } },
+    { "id": "clean.validate", "parent": "clean", "label": "Validate", "data": { "duration": "1h" } },
+    { "id": "build", "label": "Build" },
+    { "id": "deploy", "label": "Deploy" },
+    { "id": "check", "label": "Health check" }
+  ],
+  "edges": [
+    { "id": "e1", "source": "ingest", "target": "clean" },
+    { "id": "e2", "source": "clean", "target": "build" },
+    { "id": "e3", "source": "build", "target": "deploy" },
+    { "id": "e4", "source": "deploy", "target": "check" },
+    { "id": "retry", "source": "check", "target": "deploy", "loop": true, "maxIterations": 5 }
+  ]
+}
