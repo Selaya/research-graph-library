@@ -138,6 +138,8 @@ export function mount(el, spec = {}, opts = {}) {
   let pinnedReversals = new Set();   // FAS pinning persisted across layouts (D3)
   let lastOrder = [];                // per-rank solver order persisted across layouts (M3)
   let lastLayers = [];               // the same per-rank order WITH edge bends (M3)
+  let lastSlots = null;              // componentOrder: id -> slot, from the last drawing
+  let slotsKey = null;               // the componentOrder that memory belongs to (JSON)
   let last = null;                   // previous layout result
   let transition = null;
   let batching = 0;
@@ -236,6 +238,36 @@ export function mount(el, spec = {}, opts = {}) {
   }
   const orUndef = (o) => (Object.keys(o).length ? o : undefined);
 
+  /**
+   * componentOrder, as the SOLVER needs to see it. Two things the caller's raw list cannot
+   * express on its own:
+   *
+   *  - Collapse. A listed id may not be in the view at all right now — hidden behind a
+   *    collapsed container — so every id resolves to the leaf actually standing in for it.
+   *  - STICKINESS. A slot is meant to belong to a component, but the spec can only name
+   *    ids, and a user who removes a pipeline's head has removed the very id that named
+   *    its slot; the component would drop into the trailing unlisted band, which is the
+   *    reordering the option exists to prevent. So every entry is also joined by the ids
+   *    the LAST drawing put in that slot and the store still has: the slot survives as
+   *    long as any node of the component does, however many named ids are gone.
+   *
+   * The trailing "everything unlisted" slot (index === spec.length) is deliberately never
+   * fed from memory — it is not an entry, and nothing should be pinned into it.
+   */
+  function resolveComponentOrder(spec) {
+    const remembered = new Map(); // slot index -> ids from the previous drawing, still live
+    for (const [id, slot] of Object.entries(lastSlots || {})) {
+      if (!(slot < spec.length) || !store.hasNode(id)) continue;
+      const live = vs.visibleAncestor(id) ?? id;
+      const list = remembered.get(slot);
+      if (list) list.push(live); else remembered.set(slot, [live]);
+    }
+    return spec.map((entry, i) => {
+      const ids = (Array.isArray(entry) ? entry : [entry]).map((id) => vs.visibleAncestor(id) ?? id);
+      return [...new Set(ids.concat(remembered.get(i) || []))];
+    });
+  }
+
   function relayout({ focal = null, duration, enterFrom, exitTo, easeOverride } = {}) {
     if (destroyed) return thenable(Promise.resolve({ canceled: true }), () => {});
     const v = vs.view();
@@ -243,18 +275,18 @@ export function mount(el, spec = {}, opts = {}) {
     // pinnedReversals: feed the last drawing's per-rank order back in and appending a node
     // cannot reshuffle the ranks around it (mental-map preservation, D3's sibling rule).
     const lo = { ...layoutOpts, pinnedReversals, prevOrder: lastOrder, prevLayers: lastLayers };
-    // componentOrder names ids the CALLER knows about, and a listed id may not be in the
-    // view at all right now — collapsed away behind a container. Resolve each to the leaf
-    // actually standing in for it so a collapse cannot drop a component out of its slot;
-    // ids that resolve to nothing stay as they are and the solver ignores them.
-    if (Array.isArray(lo.componentOrder)) {
-      lo.componentOrder = lo.componentOrder.map((entry) =>
-        (Array.isArray(entry) ? entry : [entry]).map((id) => vs.visibleAncestor(id) ?? id));
-    }
+    // The remembered slots belong to ONE componentOrder. A caller who hands g.layout() a
+    // different list (or switches the option off) is redrawing from scratch, and replaying
+    // the old memory over the new list would union components the new list separates —
+    // so the memory dies with the list it was built for.
+    const key = JSON.stringify(layoutOpts.componentOrder ?? null);
+    if (key !== slotsKey) { lastSlots = null; slotsKey = key; }
+    if (Array.isArray(lo.componentOrder)) lo.componentOrder = resolveComponentOrder(lo.componentOrder);
     const res = layout(v, lo);
     pinnedReversals = res.reversedEdgeIds || new Set();
     lastOrder = res.order || [];
     lastLayers = res.layers || [];
+    lastSlots = res.slots || null;
 
     // Containers get their real (solver-computed) box here, so labels truncate to it.
     const sizes = { ...v.sizes };
@@ -467,6 +499,11 @@ export function mount(el, spec = {}, opts = {}) {
         reversals: [...pinnedReversals],
         order: lastOrder.map((rank) => [...rank]),
         layers: lastLayers.map((rank) => [...rank]),
+        // Same reasoning as `order` below: the componentOrder memory belongs to the
+        // topology that produced it, so a backward seek has to replay the slots that spec
+        // was drawn with rather than a future drawing's.
+        slots: lastSlots ? { ...lastSlots } : null,
+        slotsKey,
         runTime: runCtl ? runCtl.time() : 0,
         runOpts: runCtl ? runCtl.options() : null,
         // D14 — emphasis and the caption are state a step moves, so they are always here.
@@ -494,6 +531,8 @@ export function mount(el, spec = {}, opts = {}) {
       // *future* order and lands in a different arrangement than the one being replayed.
       lastOrder = (snap.order || []).map((rank) => [...rank]);
       lastLayers = (snap.layers || []).map((rank) => [...rank]);
+      lastSlots = snap.slots ? { ...snap.slots } : null;
+      slotsKey = snap.slotsKey ?? null;
       // BEFORE the relayout, unlike the camera below: the property override layer (D16) is
       // read by the style commit *inside* relayout, so restoring it afterwards would leave
       // the step's overrides on screen for a whole commit. Emphasis is re-asserted off the

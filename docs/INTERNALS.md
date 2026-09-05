@@ -699,6 +699,10 @@ engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},
   `componentOrder` means `g.slot === null`, every slot is 0, every comparison above is a
   no-op, and the drawing is identical to one built without the feature. It is engine-only;
   the dagre adapter reads the opts it knows and ignores this one.
+  The solve also EMITS `slots` (`{id: slotIndex}` over the real leaf/cluster ids) — just
+  `g.slot` serialized — and only when the option was active, so a result built without it
+  keeps exactly the shape it had. The engine stays pure: it remembers nothing between
+  calls, it only hands the caller what it decided.
 - `chromePad` is how much padding the CALLER will add around a container rect after the
   solve (layout.js passes its `CONTAINER_PAD`). The solver reserves it in the rank axis;
   without that the padded rect eats the neighbouring rank whenever `ranksep` is small.
@@ -754,7 +758,19 @@ solver is the ACYCLIC one, every cycle-broken edge withheld, so a solver judging
 connectivity on it alone would tear a cyclic pipeline — or any component whose only link is
 a `loop:true` edge — into two components and slot them independently. `backLinks` names the
 withheld pairs so connectivity is judged on the real graph; the solver uses them for nothing
-else. Both are written onto the shell's own merged copy of the opts, never the caller's. Everything else in the shell (breakCycles
+else. Both are written onto the shell's own merged copy of the opts, never the caller's. The
+result passes the solver's `slots` straight through, key and all, or omits it.
+
+**Sticky slots live in `src/index.js`, not the engine.** A spec entry can only name ids, and
+the user who removes a pipeline's head has removed the id that named its slot — the
+component would drop into the trailing unlisted band, which is the reordering the option
+exists to prevent. So `relayout()` persists each result's `slots` (beside `prevOrder` /
+`prevLayers`, snapshotted and restored with them for the same G2 reason) and, when building
+the list it hands `layout()`, joins every entry `i` with the ids the last drawing put in
+slot `i` that the store still has. The trailing unlisted slot (`spec.length`) is never fed
+from memory. The memory belongs to ONE list: `relayout()` compares a JSON of the raw
+`componentOrder` against the one it memorised and drops the memory whenever it changes (a
+non-array included), or a new list would be unioned with components the old one separated. Everything else in the shell (breakCycles
 + pinning, back-edge/self-loop arcs, `padContainers`, bounds) is UNCHANGED. The dagre
 import is REMOVED from this file.
 

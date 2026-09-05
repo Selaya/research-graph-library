@@ -5,7 +5,8 @@
 //     nodes: { [id]: {x, y, w, h} },          // x,y = center; a container covers its children
 //     edges: { [id]: { points: [{x,y}, …] } },// source -> target, bend chain included
 //     order: string[][],                      // final per-rank real-node order
-//     layers: string[][]                      // …the same, with edge bends interleaved
+//     layers: string[][],                     // …the same, with edge bends interleaved
+//     slots?: { [id]: number }                // per-id component slot, iff opts.componentOrder
 //   }
 //
 // Caller invariants (layout.js shell): the edge set is acyclic (back edges withheld) and
@@ -944,5 +945,10 @@ function emit(L, g, o) {
     order.push(row);
     layers.push(full);
   }
-  return { nodes, edges, order, layers };
+  // The slot map goes out with the drawing — the caller remembers it so a component keeps
+  // its slot after every id the spec named for it has been removed (index.js). Real ids
+  // only (leaves and clusters, never a bend token), and the key exists ONLY when
+  // componentOrder was actually in play, so output without the option is untouched.
+  return g.slot ? { nodes, edges, order, layers, slots: Object.fromEntries(g.slot) }
+                : { nodes, edges, order, layers };
 }

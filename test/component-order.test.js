@@ -84,6 +84,9 @@ test("componentOrder puts the components in the listed order, on every rank", ()
 test("componentOrder holds the components in place across a mutation that used to reorder them", () => {
   // The entry for pipeline b lists ALIASES: its head is about to be removed, and an entry
   // whose every id is gone names no component at all (it falls in with the unlisted ones).
+  // A bare `layout()` call has no memory of the previous drawing's slots — mount() keeps
+  // one and makes the slot sticky (the mount tests below pin pipeline b by its head alone),
+  // but the pure seam only ever knows the list it was handed.
   const spec = ["d0", "c0", ["b0", "b1"], "a0"];
   const first = layout(FOUR(), { dir: "LR", componentOrder: spec });
   const before = bandOrder(first, ["a", "b", "c", "d"]);
@@ -288,22 +291,63 @@ function liveBands(g, prefixes) {
 }
 
 const PIPE_SPEC = () => pipelines({ a: 3, b: 3, c: 3, d: 3 });
-const ORDER = ["d0", "c0", ["b0", "b1"], "a0"];
+const ORDER = ["d0", "c0", "b0", "a0"];
 
-test("mount: componentOrder survives a removal in one pipeline and an append in another", async () => {
+test("mount: a slot outlives the id that named it, and every id after that", async () => {
   const g = mountGraph(PIPE_SPEC(), { dir: "LR", componentOrder: ORDER });
   await pump(3);
   const before = liveBands(g, ["a", "b", "c", "d"]);
   assert.deepEqual(before, ["d", "c", "b", "a"]);
 
+  // b0 is the ONLY id the spec named for pipeline b, and it is the first thing to go: the
+  // slot has to survive on the strength of the drawing's own memory from here on.
   const rm = g.removeNode("b0");
   await pump(10);
   await rm;
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), before, "after losing the named head");
+
   const add = g.addNode({ id: "d3", w: 100, h: 36 }, { after: "d2" });
   await pump(10);
   await add;
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), before, "after a sibling pipeline grew");
 
-  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), before);
+  // …and again, one id further: only b2 is left of the component the spec ever named.
+  const rm2 = g.removeNode("b1");
+  await pump(10);
+  await rm2;
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), before, "after losing the second node too");
+
+  const grow = g.addNode({ id: "b3", w: 100, h: 36 }, { after: "b2" });
+  await pump(10);
+  await grow;
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), before, "after regrowing from the remnant");
+  assert.ok(g.layoutResult().nodes.b3, "the new node really is there");
+  g.destroy();
+});
+
+test("mount: a new componentOrder re-resolves from scratch — the old memory cannot leak in", async () => {
+  const g = mountGraph(PIPE_SPEC(), { dir: "LR", componentOrder: ORDER });
+  await pump(3);
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), ["d", "c", "b", "a"]);
+
+  // Reversed list. Every id of pipeline d is remembered in slot 0, which is now a0's slot:
+  // replaying that memory over the new list would fuse a and d into one band.
+  const flip = g.layout({ componentOrder: ["a0", "b0", "c0", "d0"] });
+  await pump(10);
+  await flip;
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), ["a", "b", "c", "d"]);
+  assertGrouped(g.layoutResult().order, "after the list changed");
+
+  // Off, then on again with a list that names only one component: a, c and d must fall
+  // into the trailing unlisted band, not back into the slots they used to hold.
+  const off = g.layout({ componentOrder: null });
+  await pump(10);
+  await off;
+  const on = g.layout({ componentOrder: ["b0"] });
+  await pump(10);
+  await on;
+  assert.equal(liveBands(g, ["a", "b", "c", "d"])[0], "b", "the only listed component leads");
+  assertGrouped(g.layoutResult().order, "after the option came back");
   g.destroy();
 });
 

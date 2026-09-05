@@ -8,6 +8,7 @@
 //     reversedEdgeIds: Set<string>            // persist -> opts.pinnedReversals (D3)
 //     order:  string[][]                      // persist -> opts.prevOrder (order stability)
 //     layers: string[][]                      // persist -> opts.prevLayers (bend stability)
+//     slots?: { [id]: number }                // componentOrder only — the slot each id landed in
 //   }
 //
 // This file is the SHELL around a pluggable solver: `opts.solver` (default `engineSolve`)
@@ -122,6 +123,11 @@ export function layout(view, opts = {}) {
     // arrangement differently, and reshuffling ranks nobody touched. Solvers that do not
     // produce it (the dagre adapter) simply return nothing here.
     layers: Array.isArray(solved.layers) ? solved.layers : [],
+    // componentOrder only: which slot each id's component landed in, for the caller to
+    // remember (index.js keeps a component's slot alive after every id the spec named for
+    // it is gone). The key is absent whenever the solver did not produce one, so a result
+    // built without the option has exactly the shape it always had.
+    ...(solved.slots && typeof solved.slots === "object" ? { slots: solved.slots } : null),
   };
 }
 

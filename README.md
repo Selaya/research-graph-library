@@ -416,6 +416,11 @@ g.layout({ componentOrder: ["export0", "ingest0"] });  // re-slot at runtime; it
 g.layout({ componentOrder: null });                    // back to whatever the solver likes
 ```
 
+Slots are **sticky**: `mount()` remembers which component landed in which slot, so a
+pipeline keeps its band even after every id you listed for it has been removed — name its
+head and stop worrying about whether that head survives. Handing `g.layout()` a different
+list (or `null`) drops the memory and re-resolves from what you just passed.
+
 It is an engine-only option — the dagre adapter ignores it — and it costs nothing when it
 is absent: with no list there are no slots and the drawing is the one you already had.
 

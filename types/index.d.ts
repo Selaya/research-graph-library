@@ -180,6 +180,10 @@ export interface LayoutResult {
    *  back as `LayoutOpts.prevLayers` — together they make a re-layout of an unchanged graph
    *  reproduce the identical picture. Empty for a solver that does not produce it. */
   layers: string[][];
+  /** `componentOrder` only: which slot each real id's component landed in. mount() persists
+   *  it to keep a component's slot alive after every id the option named for it is gone.
+   *  Absent when the option was not in play (or the solver does not produce it). */
+  slots?: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +219,8 @@ export interface SolverResult {
   order: string[][];
   /** Optional: `order` with each edge bend interleaved, for full re-layout stability. */
   layers?: string[][];
+  /** Optional: per-id component slot, produced only when `LayoutOpts.componentOrder` was set. */
+  slots?: Record<string, number>;
 }
 
 export type LayoutSolver = (input: SolverInput, opts: LayoutOpts) => SolverResult;
@@ -251,6 +257,11 @@ export interface LayoutOpts {
    * Unknown ids are ignored. A container and its children are one component, so listing
    * either the container or any child places the whole thing. Every component nobody
    * listed shares one slot after all the listed ones.
+   *
+   * Through `mount()` the slots are STICKY: each drawing's slot assignment is remembered,
+   * so a component keeps its slot even once every id listed for it has been removed — you
+   * do not have to guess which ids will survive. Handing `g.layout()` a different list (or
+   * switching the option off) drops that memory and re-resolves from the new list.
    *
    * Engine-only: the dagre adapter ignores it. `null` (or anything that is not an array)
    * turns it off.
