@@ -12,3 +12,8 @@ Seven parallel research passes + one adversarial critique produced the design in
 - [Adversarial critique (conflicts, gaps, MVP cut)](./critique.md)
 - [Cyclic graphs in layered layout](./cyclic-layout.md)
 - [Token-based execution semantics (loops & parallelism)](./token-semantics.md)
+
+Follow-up, written against the shipped library (v0.1.0) rather than before it existed:
+
+- [Feature gaps vs. other node/edge libraries, and additional use-cases](./feature-gaps.md) (synthesized report)
+- [Feature-gap research corpus](./feature-gaps/README.md): the inventory, 13 cohort surveys with per-claim verification, 8 use-case passes, the critic, and the workflow script
