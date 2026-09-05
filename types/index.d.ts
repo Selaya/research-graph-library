@@ -269,6 +269,12 @@ export interface LayoutOpts {
    * turns it off.
    */
   componentOrder?: Array<string | string[]> | null;
+  /**
+   * Solver-seam only: the previous drawing's `slots`, applied to components that no
+   * `componentOrder` entry claims. `mount()` derives and overwrites this on every relayout,
+   * so set it only when driving `layout()` directly. Ignored without `componentOrder`.
+   */
+  componentOrderMemory?: Record<string, number> | null;
   [key: string]: unknown;
 }
 

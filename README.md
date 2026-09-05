@@ -421,7 +421,9 @@ pipeline keeps its band even after every id you listed for it has been removed �
 head and stop worrying about whether that head survives, and a `condense()` or `split()`
 hands the slot on to the nodes it mints. The list always outranks that memory, which only
 places components no listed id claims; handing `g.layout()` a different list (or `null`)
-drops the memory entirely and re-resolves from what you just passed.
+drops the memory entirely and re-resolves from what you just passed. One consequence: if a
+remembered component and a listed one end up with the same slot (re-add a deleted head as a
+fresh, unconnected node, say), they share that band rather than splitting it.
 
 It is an engine-only option — the dagre adapter ignores it — and it costs nothing when it
 is absent: with no list there are no slots and the drawing is the one you already had.
