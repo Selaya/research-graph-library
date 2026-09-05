@@ -418,8 +418,10 @@ g.layout({ componentOrder: null });                    // back to whatever the s
 
 Slots are **sticky**: `mount()` remembers which component landed in which slot, so a
 pipeline keeps its band even after every id you listed for it has been removed — name its
-head and stop worrying about whether that head survives. Handing `g.layout()` a different
-list (or `null`) drops the memory and re-resolves from what you just passed.
+head and stop worrying about whether that head survives, and a `condense()` or `split()`
+hands the slot on to the nodes it mints. The list always outranks that memory, which only
+places components no listed id claims; handing `g.layout()` a different list (or `null`)
+drops the memory entirely and re-resolves from what you just passed.
 
 It is an engine-only option — the dagre adapter ignores it — and it costs nothing when it
 is absent: with no list there are no slots and the drawing is the one you already had.

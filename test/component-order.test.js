@@ -162,6 +162,53 @@ test("dir TB orders the components along x instead of y", () => {
   assertGrouped(res.order, "TB");
 });
 
+test("RL and BT order the components the same way LR and TB do", () => {
+  // The dirs are one transposition/flip apart, and the flip must not reverse the bands:
+  // slot 0 leads whichever axis the dir puts the ranks on.
+  for (const [dir, axis] of [["RL", "y"], ["BT", "x"]]) {
+    const res = layout(FOUR(), { dir, componentOrder: ["d0", "c0", "b0", "a0"] });
+    assert.deepEqual(bandOrder(res, ["a", "b", "c", "d"], axis), ["d", "c", "b", "a"], dir);
+    assert.deepEqual(res.order[0], ["d0", "c0", "b0", "a0"], `${dir} order`);
+  }
+});
+
+test("the result carries `slots` only when the option was in play", () => {
+  assert.equal("slots" in layout(FOUR(), { dir: "LR" }), false, "absent without the option");
+  const on = layout(FOUR(), { dir: "LR", componentOrder: ["b0"] });
+  assert.deepEqual(on.slots.b0, 0);
+  assert.deepEqual(on.slots.a0, 1, "unlisted components share the trailing slot");
+  // An EMPTY drawing still answers with the key: its presence tracks the option, not the
+  // graph, so a caller persisting it sees an empty memory rather than "no memory at all".
+  const empty = layout({ nodes: [], edges: [] }, { dir: "LR", componentOrder: ["x"] });
+  assert.deepEqual(empty.slots, {});
+  assert.equal("slots" in layout({ nodes: [], edges: [] }, { dir: "LR" }), false);
+});
+
+test("componentOrderMemory places only the components the list does not claim", () => {
+  // The list is the authority. A memory entry naming a component the list also names is
+  // ignored outright — otherwise a re-slot after two components split apart never takes.
+  const memory = { a0: 0, a1: 0, a2: 0, b0: 0, b1: 0, b2: 0, c0: 2, c1: 2, c2: 2 };
+  const view = pipelines({ a: 3, b: 3, c: 3, d: 3 });
+  const res = layout(view, {
+    dir: "LR", componentOrder: ["a0", "b0", "c0"], componentOrderMemory: memory,
+  });
+  assert.deepEqual(res.order[0], ["a0", "b0", "c0", "d0"]);
+  assert.equal(res.slots.b0, 1, "the explicit entry wins over the remembered slot 0");
+  assert.equal(res.slots.d0, 3, "and an unremembered, unlisted component still goes last");
+
+  // With the same memory but b unlisted, memory is what places it.
+  const fallback = layout(view, { dir: "LR", componentOrder: ["c0", "a0"], componentOrderMemory: { b0: 0 } });
+  assert.equal(fallback.slots.b0, 0, "memory places a component the list is silent about");
+  assert.equal(fallback.order[0][0], "b0");
+
+  // Junk memory never displaces anything: out-of-range, non-integer and unknown ids.
+  const junk = layout(view, {
+    dir: "LR", componentOrder: ["c0"],
+    componentOrderMemory: { a0: 9, b0: -1, d0: 0.5, nope: 0, c0: 1 },
+  });
+  assert.deepEqual(junk.order, layout(view, { dir: "LR", componentOrder: ["c0"] }).order);
+});
+
 test("a long edge's bends stay inside their own component's band", () => {
   const view = {
     nodes: [N("a0"), N("a1"), N("a2"), N("a3"), N("b0"), N("b1"), N("b2"), N("b3")],
@@ -346,8 +393,11 @@ test("mount: a new componentOrder re-resolves from scratch — the old memory ca
   const on = g.layout({ componentOrder: ["b0"] });
   await pump(10);
   await on;
+  // Only b's slot is promised. a, c and d all share the trailing unlisted slot, and
+  // nothing says components inside THAT band do not interleave — so do not assert it.
   assert.equal(liveBands(g, ["a", "b", "c", "d"])[0], "b", "the only listed component leads");
-  assertGrouped(g.layoutResult().order, "after the option came back");
+  const first = g.layoutResult().order[0];
+  assert.equal(first[0], "b0", "b leads its rank");
   g.destroy();
 });
 
@@ -373,6 +423,108 @@ test("mount: g.layout({componentOrder}) persists across later mutations, and nul
   const res = g.layoutResult();
   assert.ok(res && res.nodes.a0 && Number.isFinite(res.nodes.a0.y), "the drawing is still valid");
   assert.equal(Object.keys(res.nodes).length, 13, "every node is still placed");
+  g.destroy();
+});
+
+test("mount: when a component splits at runtime, the list re-slots it — memory does not pin it", async () => {
+  // a and b start JOINED, so both live in slot 0 (a0's). Cutting the join makes them two
+  // components, and the list has always said b belongs in slot 1: the remembered slot 0
+  // must not outvote that, nor let b drift ahead of a once a's named head is removed.
+  const spec = {
+    nodes: ["a0", "a1", "a2", "b0", "b1", "b2", "c0", "c1", "c2"].map((id) => ({ id, w: 100, h: 36 })),
+    edges: [
+      { id: "ea1", source: "a0", target: "a1" }, { id: "ea2", source: "a1", target: "a2" },
+      { id: "eb1", source: "b0", target: "b1" }, { id: "eb2", source: "b1", target: "b2" },
+      { id: "ec1", source: "c0", target: "c1" }, { id: "ec2", source: "c1", target: "c2" },
+      { id: "join", source: "a2", target: "b0" },
+    ],
+  };
+  const g = mountGraph(spec, { dir: "LR", componentOrder: ["a0", "b0", "c0"] });
+  await pump(3);
+  assert.equal(g.layoutResult().slots.b0, 0, "joined to a, b IS a's component");
+
+  const cut = g.removeEdge("join");
+  await pump(10);
+  await cut;
+  assert.equal(g.layoutResult().slots.b0, 1, "split apart, b takes the slot the list gives it");
+  assert.deepEqual(liveBands(g, ["a", "b", "c"]), ["a", "b", "c"]);
+
+  // …and it stays there when a loses the id that named ITS slot.
+  const rm = g.removeNode("a0");
+  await pump(10);
+  await rm;
+  assert.deepEqual(liveBands(g, ["a", "b", "c"]), ["a", "b", "c"], "a still leads b");
+  g.destroy();
+});
+
+test("mount: condense and split hand the slot on to the ids they mint", async () => {
+  const g = mountGraph(PIPE_SPEC(), { dir: "LR", componentOrder: ORDER });
+  await pump(3);
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), ["d", "c", "b", "a"]);
+
+  // Every id pipeline b was ever remembered by is consumed in ONE commit: without the
+  // memory following the id change, B is a brand-new component nobody remembers and lands
+  // in the trailing band.
+  const merge = g.condense(["b0", "b1", "b2"], { id: "B", w: 100, h: 36 });
+  await pump(140);
+  await merge;
+  assert.equal(g.layoutResult().slots.B, 2, "the merged node inherits its sources' slot");
+  assert.ok(!g.layoutResult().nodes.b0, "the sources really are gone");
+  assert.deepEqual(liveBands(g, ["a", "B", "c", "d"]), ["d", "c", "B", "a"]);
+
+  // …and back out again: the parts inherit the slot the node they came from held.
+  const undo = g.split("B", { nodes: [{ id: "b9", w: 100, h: 36 }, { id: "b8", w: 100, h: 36 }] });
+  await pump(140);
+  await undo;
+  const slots = g.layoutResult().slots;
+  assert.equal(slots.b9, 2, "b9 kept B's slot");
+  assert.equal(slots.b8, 2, "b8 kept B's slot");
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), ["d", "c", "b", "a"]);
+  g.destroy();
+});
+
+test("mount: a storyboard scrub replays the band order it is seeking back to", async () => {
+  const steps = [
+    { label: "start" },
+    { label: "cut", op: "removeNode", args: ["b0"] },
+    { label: "cut2", op: "removeNode", args: ["b1"] },
+  ];
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, PIPE_SPEC(), {
+    animation: { duration: 0 }, a11y: false, interaction: { tapToggle: false },
+    layout: { dir: "LR", componentOrder: ORDER }, storyboard: steps,
+  });
+  await pump(3);
+  const before = liveBands(g, ["a", "b", "c", "d"]);
+  assert.deepEqual(before, ["d", "c", "b", "a"]);
+
+  const sb = g.storyboard();
+  const play = sb.play();
+  await pump(60);
+  await play;
+  assert.ok(!g.layoutResult().nodes.b0 && !g.layoutResult().nodes.b1, "the steps ran");
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), before, "forward: b holds its band");
+
+  // Backward, to a state where b0 — the ONLY id the list names for b — is already gone.
+  // Only the memory the snapshot carries can hold b's band there, exactly the way the
+  // snapshot carries order/layers: the restored drawing has to be the one being replayed,
+  // not one seeded from a future assignment.
+  // seek(label) restores the state the step was about to run FROM, so "cut2" is the state
+  // in which b0 is already gone and b1 has not gone yet.
+  const mid = sb.seek("cut2");
+  await pump(60);
+  await mid;
+  const atCut = g.layoutResult().nodes;
+  assert.ok(!atCut.b0 && atCut.b1, "seeked to the state right after b0 went");
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), before, "backward: same bands");
+  assertGrouped(g.layoutResult().order, "after the scrub");
+
+  const back = sb.seek("start");
+  await pump(60);
+  await back;
+  assert.ok(g.layoutResult().nodes.b0, "b0 is back");
+  assert.deepEqual(liveBands(g, ["a", "b", "c", "d"]), before, "and at the start too");
   g.destroy();
 });
 

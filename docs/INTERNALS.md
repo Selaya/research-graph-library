@@ -765,12 +765,20 @@ result passes the solver's `slots` straight through, key and all, or omits it.
 the user who removes a pipeline's head has removed the id that named its slot — the
 component would drop into the trailing unlisted band, which is the reordering the option
 exists to prevent. So `relayout()` persists each result's `slots` (beside `prevOrder` /
-`prevLayers`, snapshotted and restored with them for the same G2 reason) and, when building
-the list it hands `layout()`, joins every entry `i` with the ids the last drawing put in
-slot `i` that the store still has. The trailing unlisted slot (`spec.length`) is never fed
-from memory. The memory belongs to ONE list: `relayout()` compares a JSON of the raw
-`componentOrder` against the one it memorised and drops the memory whenever it changes (a
-non-array included), or a new list would be unioned with components the old one separated. Everything else in the shell (breakCycles
+`prevLayers`, snapshotted and restored with them for the same G2 reason) and hands it back
+down as **`opts.componentOrderMemory`** (`{id: slot}`), filtered to ids the store still has,
+resolved through any collapse, and never naming the trailing unlisted slot. `assignSlots`
+applies it strictly AFTER the list and only to components no listed id claimed — memory is
+a fallback, never a rival. It is deliberately NOT merged into the entries: a remembered id
+folded into entry `i` would be seen first and silently beat the same id listed explicitly
+in entry `j > i`, so an explicit re-slot after two components split apart would not take.
+`reseat()` (the condense/split hook that already remaps `order`/`layers` through an id
+change) remaps the memory too, so a condense that consumes every remembered id of a
+component hands the merged node the lowest slot its sources held. The memory belongs to ONE
+list: `relayout()` compares a JSON of the raw `componentOrder` against the one it memorised
+and drops the memory whenever it changes (a non-array included).
+
+Everything else in the shell (breakCycles
 + pinning, back-edge/self-loop arcs, `padContainers`, bounds) is UNCHANGED. The dagre
 import is REMOVED from this file.
 

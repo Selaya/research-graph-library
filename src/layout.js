@@ -64,6 +64,8 @@ export function layout(view, opts = {}) {
   // pipeline into two components the solver then orders independently. Hand the withheld
   // pairs down separately so connectivity is judged on the real graph. `o` is this
   // function's own merged copy of the opts, so writing to it cannot leak into the caller's.
+  // (`componentOrderMemory`, the other companion option, needs no derivation here — it
+  // comes straight from the caller and rides the opts spread down to the solver.)
   if (Array.isArray(o.componentOrder)) {
     o.backLinks = realEdges.filter((e) => reversed.has(e.id)).map((e) => [e.source, e.target]);
   }

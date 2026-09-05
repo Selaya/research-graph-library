@@ -259,9 +259,11 @@ export interface LayoutOpts {
    * listed shares one slot after all the listed ones.
    *
    * Through `mount()` the slots are STICKY: each drawing's slot assignment is remembered,
-   * so a component keeps its slot even once every id listed for it has been removed — you
-   * do not have to guess which ids will survive. Handing `g.layout()` a different list (or
-   * switching the option off) drops that memory and re-resolves from the new list.
+   * so a component keeps its slot even once every id listed for it has been removed (a
+   * `condense()`/`split()` passes it to the nodes it mints) — you do not have to guess
+   * which ids will survive. The list always outranks that memory, which only places
+   * components no listed id claims. Handing `g.layout()` a different list (or switching
+   * the option off) drops the memory and re-resolves from the new list.
    *
    * Engine-only: the dagre adapter ignores it. `null` (or anything that is not an array)
    * turns it off.

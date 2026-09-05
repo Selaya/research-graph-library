@@ -238,34 +238,37 @@ export function mount(el, spec = {}, opts = {}) {
   }
   const orUndef = (o) => (Object.keys(o).length ? o : undefined);
 
-  /**
-   * componentOrder, as the SOLVER needs to see it. Two things the caller's raw list cannot
-   * express on its own:
-   *
-   *  - Collapse. A listed id may not be in the view at all right now — hidden behind a
-   *    collapsed container — so every id resolves to the leaf actually standing in for it.
-   *  - STICKINESS. A slot is meant to belong to a component, but the spec can only name
-   *    ids, and a user who removes a pipeline's head has removed the very id that named
-   *    its slot; the component would drop into the trailing unlisted band, which is the
-   *    reordering the option exists to prevent. So every entry is also joined by the ids
-   *    the LAST drawing put in that slot and the store still has: the slot survives as
-   *    long as any node of the component does, however many named ids are gone.
-   *
-   * The trailing "everything unlisted" slot (index === spec.length) is deliberately never
-   * fed from memory — it is not an entry, and nothing should be pinned into it.
-   */
+  /** componentOrder as the SOLVER needs to see it: a listed id may not be in the view at
+   *  all right now — hidden behind a collapsed container — so each resolves to the leaf
+   *  actually standing in for it. Structure is preserved (every entry becomes an array). */
   function resolveComponentOrder(spec) {
-    const remembered = new Map(); // slot index -> ids from the previous drawing, still live
-    for (const [id, slot] of Object.entries(lastSlots || {})) {
-      if (!(slot < spec.length) || !store.hasNode(id)) continue;
+    return spec.map((entry) =>
+      [...new Set((Array.isArray(entry) ? entry : [entry]).map((id) => vs.visibleAncestor(id) ?? id))]);
+  }
+
+  /**
+   * STICKINESS. A slot is meant to belong to a component, but the option can only name
+   * ids, and the user who removes a pipeline's head has removed the very id that named its
+   * slot; the component would drop into the trailing unlisted band — the reordering the
+   * option exists to prevent. So the last drawing's slot assignment rides along as
+   * `componentOrderMemory`, and the engine consults it only for components the list itself
+   * does not claim. It is deliberately NOT merged into the list: a remembered id folded
+   * into an entry would rival (and, being seen first, silently beat) the same id listed
+   * explicitly in a later entry.
+   *
+   * Ids the store no longer has are dropped, survivors resolve through a collapse the same
+   * way listed ids do, and the trailing unlisted slot (index === spec.length) is never
+   * remembered — it is not an entry, and nothing should be pinned into it.
+   */
+  function componentOrderMemory(spec) {
+    if (!lastSlots) return null;
+    const out = {};
+    for (const [id, slot] of Object.entries(lastSlots)) {
+      if (!Number.isInteger(slot) || slot < 0 || slot >= spec.length || !store.hasNode(id)) continue;
       const live = vs.visibleAncestor(id) ?? id;
-      const list = remembered.get(slot);
-      if (list) list.push(live); else remembered.set(slot, [live]);
+      if (out[live] === undefined || slot < out[live]) out[live] = slot;
     }
-    return spec.map((entry, i) => {
-      const ids = (Array.isArray(entry) ? entry : [entry]).map((id) => vs.visibleAncestor(id) ?? id);
-      return [...new Set(ids.concat(remembered.get(i) || []))];
-    });
+    return Object.keys(out).length ? out : null;
   }
 
   function relayout({ focal = null, duration, enterFrom, exitTo, easeOverride } = {}) {
@@ -281,7 +284,10 @@ export function mount(el, spec = {}, opts = {}) {
     // so the memory dies with the list it was built for.
     const key = JSON.stringify(layoutOpts.componentOrder ?? null);
     if (key !== slotsKey) { lastSlots = null; slotsKey = key; }
-    if (Array.isArray(lo.componentOrder)) lo.componentOrder = resolveComponentOrder(lo.componentOrder);
+    if (Array.isArray(lo.componentOrder)) {
+      lo.componentOrderMemory = componentOrderMemory(lo.componentOrder);
+      lo.componentOrder = resolveComponentOrder(lo.componentOrder);
+    }
     const res = layout(v, lo);
     pinnedReversals = res.reversedEdgeIds || new Set();
     lastOrder = res.order || [];
@@ -721,6 +727,19 @@ export function mount(el, spec = {}, opts = {}) {
     };
     lastOrder = seat(lastOrder);
     lastLayers = seat(lastLayers);
+    // …and the componentOrder memory, for the same reason one step further out: a condense
+    // that consumes EVERY id a slot was remembered by would otherwise leave the merged node
+    // as the only survivor of a component nothing remembers, and it would land in the
+    // trailing band — the very jump this function exists to prevent. The new ids inherit
+    // the lowest slot the sources held (split: the one node's own slot).
+    if (lastSlots) {
+      let low = Infinity;
+      for (const id of src) { const v = lastSlots[id]; if (Number.isInteger(v) && v < low) low = v; }
+      if (low !== Infinity) {
+        lastSlots = { ...lastSlots };
+        for (const id of fresh) lastSlots[id] = low;
+      }
+    }
   }
 
   // Handed to the choreography modules: everything they need, nothing DOM-shaped, so

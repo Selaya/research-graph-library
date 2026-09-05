@@ -69,6 +69,10 @@ export function engineSolve(input = {}, opts = {}) {
     // The shell withholds cycle-broken edges from us (layout.js), which would split a
     // cyclic pipeline into two components — these name them so connectivity survives.
     backLinks: Array.isArray(opts.backLinks) ? opts.backLinks : null,
+    // {id: slot} from a previous drawing, a FALLBACK only: it places components that no
+    // listed id claims, so a slot outlives the ids that named it (index.js keeps it).
+    componentOrderMemory:
+      opts.componentOrderMemory && typeof opts.componentOrderMemory === "object" ? opts.componentOrderMemory : null,
   };
   // Container chrome has to be *reserved*, not assumed: a border dummy is the only thing
   // standing between a foreign node and the CLUSTER_PAD the rect grows by, so it is at
@@ -84,7 +88,12 @@ export function engineSolve(input = {}, opts = {}) {
   o.chromePad = Math.max(CLUSTER_PAD, num(opts.chromePad, 0));
   const g = indexInput(input, o);
   assignSlots(g);
-  if (!g.leaves.length) return { nodes: {}, edges: {}, order: [], layers: [] };
+  // An empty drawing still answers with `slots` when the option is on, so the key's
+  // presence tracks the OPTION, not the graph — a caller persisting it (index.js) sees an
+  // empty memory rather than "no memory at all". With no ids left there is genuinely
+  // nothing to remember, so empty is the honest answer, not a lost one.
+  if (!g.leaves.length) return g.slot ? { nodes: {}, edges: {}, order: [], layers: [], slots: {} }
+                                      : { nodes: {}, edges: {}, order: [], layers: [] };
   rankLeaves(g);
   const L = buildLayers(g, o);
   orderLayers(L);
@@ -172,6 +181,12 @@ function indexInput(input, o) {
  * slot. A component holding ids from several entries takes the smallest. Unknown ids are
  * ignored. Every component nobody named shares ONE slot after all of them, so their
  * relative order stays whatever the ordering pass would have made of it.
+ *
+ * `opts.componentOrderMemory` ({id: slot}, from a previous drawing) is consulted STRICTLY
+ * AFTER the list and only for components no listed id claimed — it exists so a slot can
+ * outlive the ids that named it, never to overrule what the caller just asked for. A
+ * component the list still names ignores its memory entirely; two components that merged
+ * take the lower of their remembered slots, same as for listed ids.
  */
 function assignSlots(g) {
   const spec = Array.isArray(g.o.componentOrder) ? g.o.componentOrder : null;
@@ -182,6 +197,7 @@ function assignSlots(g) {
   for (let i = 0; i < uf.length; i++) uf[i] = i;
   const find = (x) => { while (uf[x] !== x) { uf[x] = uf[uf[x]]; x = uf[x]; } return x; };
   const union = (a, b) => {
+    if (a < 0 || b < 0) return; // an id that is not in this drawing joins nothing
     const ra = find(a), rb = find(b);
     if (ra === rb) return;
     if (ra < rb) uf[rb] = ra; else uf[ra] = rb; // lowest index wins: deterministic roots
@@ -211,12 +227,29 @@ function assignSlots(g) {
     if (cur === undefined || i < cur) rootSlot.set(r, i);
   }
 
+  // Memory, second and strictly subordinate: only roots the list left unclaimed, and only
+  // for slots the list actually has (never the trailing unlisted band).
+  const mem = g.o.componentOrderMemory;
+  if (mem) {
+    const fromMemory = new Map();
+    for (const id of Object.keys(mem)) {
+      const i = mem[id];
+      if (!g.nodes.has(id) || typeof i !== "number" || !Number.isInteger(i) || i < 0 || i >= spec.length) continue;
+      const r = find(idx(id));
+      if (rootSlot.has(r)) continue; // a listed id already spoke for this component
+      const cur = fromMemory.get(r);
+      if (cur === undefined || i < cur) fromMemory.set(r, i);
+    }
+    for (const [r, i] of fromMemory) rootSlot.set(r, i);
+  }
+
   const slot = new Map();
   for (const id of g.ids) {
     const s = rootSlot.get(find(idx(id)));
     slot.set(id, s === undefined ? spec.length : s); // unlisted components all go last
   }
   g.slot = slot;
+  g.unslotted = spec.length; // the band a slot lookup falls back to, never band 0
 }
 
 // ---------------------------------------------------------------------------- 2 ranking
@@ -329,7 +362,7 @@ function buildLayers(g, o) {
   const byNode = new Map();
   // slotOf: 0 everywhere unless componentOrder is in play (assignSlots), which makes every
   // slot comparison below a no-op and the drawing identical to a build without the feature.
-  const slotOf = (id) => (g.slot ? g.slot.get(id) ?? 0 : 0);
+  const slotOf = (id) => (g.slot ? g.slot.get(id) ?? g.unslotted : 0);
   const mk = (kind, rank, cluster, rw, rh, pref, slot) => {
     const v = { i: V.length, kind, rank, cluster, rw, rh, pref, slot, pos: 0, x: 0, in: [], out: [] };
     V.push(v);
@@ -602,7 +635,7 @@ function sortRank(L, r, keyOf, emptyKey) {
       items.push({
         cluster: c, items: kids,
         key: n ? sum / n : (emptyKey ? emptyKey(c, r) : rec.l[r - rec.lo].pos),
-        slot: L.g.slot ? L.g.slot.get(c) ?? 0 : 0,
+        slot: L.g.slot ? L.g.slot.get(c) ?? L.g.unslotted : 0,
       });
     }
     // `slot` (componentOrder) outranks every other key: a component is a band, and no
