@@ -401,6 +401,24 @@ the real nodes alone do not determine a drawing) and feeds both back as `prevOrd
 graph reproduces it exactly, appending a node does not reshuffle the ranks around it, and
 storyboard snapshots carry both so a backward scrub restores the drawing it is replaying.
 
+That channel holds a *connected* drawing together, but it cannot hold apart what was never
+joined: draw four parallel pipelines in one graph and there are no edges between them, so
+nothing decides which sits above which — remove a node from the second and it can slide to
+the bottom, taking every later addition with it. **`componentOrder`** pins that down. Each
+entry is one slot, in order: an id, or an array of ids that are aliases for the same slot
+(list a few, and the slot survives losing one). Unknown ids are ignored, a container and
+its children count as one component (list either), and every component nobody listed shares
+one slot after the listed ones — so naming the two that matter is enough.
+
+```js
+mount(el, spec, { layout: { componentOrder: ["ingest0", ["enrich0", "enrich1"], "export0"] } });
+g.layout({ componentOrder: ["export0", "ingest0"] });  // re-slot at runtime; it persists
+g.layout({ componentOrder: null });                    // back to whatever the solver likes
+```
+
+It is an engine-only option — the dagre adapter ignores it — and it costs nothing when it
+is absent: with no list there are no slots and the drawing is the one you already had.
+
 *Want dagre back?* It lives on as an optional adapter behind the same solver seam —
 install the optional peer and pass a solver:
 

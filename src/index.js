@@ -242,7 +242,16 @@ export function mount(el, spec = {}, opts = {}) {
     // M3 — `prevOrder` is the solver's order-stability channel, the exact counterpart of
     // pinnedReversals: feed the last drawing's per-rank order back in and appending a node
     // cannot reshuffle the ranks around it (mental-map preservation, D3's sibling rule).
-    const res = layout(v, { ...layoutOpts, pinnedReversals, prevOrder: lastOrder, prevLayers: lastLayers });
+    const lo = { ...layoutOpts, pinnedReversals, prevOrder: lastOrder, prevLayers: lastLayers };
+    // componentOrder names ids the CALLER knows about, and a listed id may not be in the
+    // view at all right now — collapsed away behind a container. Resolve each to the leaf
+    // actually standing in for it so a collapse cannot drop a component out of its slot;
+    // ids that resolve to nothing stay as they are and the solver ignores them.
+    if (Array.isArray(lo.componentOrder)) {
+      lo.componentOrder = lo.componentOrder.map((entry) =>
+        (Array.isArray(entry) ? entry : [entry]).map((id) => vs.visibleAncestor(id) ?? id));
+    }
+    const res = layout(v, lo);
     pinnedReversals = res.reversedEdgeIds || new Set();
     lastOrder = res.order || [];
     lastLayers = res.layers || [];

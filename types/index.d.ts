@@ -240,6 +240,22 @@ export interface LayoutOpts {
   prevOrder?: string[][];
   /** The bend half of the same channel (LayoutResult.layers). Persist and pass both. */
   prevLayers?: string[][];
+  /**
+   * Pin the order of the drawing's DISCONNECTED components (e.g. several parallel
+   * pipelines), which nothing else holds in place: with no edges between them, adding or
+   * removing a node in one can slide the whole component past the others.
+   *
+   * Each entry is ONE slot, in order: a node id, or an array of ids that are aliases for
+   * the same slot (list a few, so the slot survives losing one). The component containing
+   * any listed id takes that entry's index — the lowest one, if it holds ids from several.
+   * Unknown ids are ignored. A container and its children are one component, so listing
+   * either the container or any child places the whole thing. Every component nobody
+   * listed shares one slot after all the listed ones.
+   *
+   * Engine-only: the dagre adapter ignores it. `null` (or anything that is not an array)
+   * turns it off.
+   */
+  componentOrder?: Array<string | string[]> | null;
   [key: string]: unknown;
 }
 

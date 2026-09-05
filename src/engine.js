@@ -61,6 +61,13 @@ export function engineSolve(input = {}, opts = {}) {
     marginy: num(opts.marginy, DEFAULTS.marginy),
     prevOrder: Array.isArray(opts.prevOrder) ? opts.prevOrder : null,
     prevLayers: Array.isArray(opts.prevLayers) ? opts.prevLayers : null,
+    // Disconnected components have no edges between them, so crossing minimization has
+    // nothing to say about their relative order and a re-solve is free to shuffle them.
+    // `componentOrder` pins that order down; anything but an array switches it off.
+    componentOrder: Array.isArray(opts.componentOrder) ? opts.componentOrder : null,
+    // The shell withholds cycle-broken edges from us (layout.js), which would split a
+    // cyclic pipeline into two components — these name them so connectivity survives.
+    backLinks: Array.isArray(opts.backLinks) ? opts.backLinks : null,
   };
   // Container chrome has to be *reserved*, not assumed: a border dummy is the only thing
   // standing between a foreign node and the CLUSTER_PAD the rect grows by, so it is at
@@ -75,6 +82,7 @@ export function engineSolve(input = {}, opts = {}) {
   // ranksep alone never accounted for it, so a small ranksep let a rect eat the next rank.
   o.chromePad = Math.max(CLUSTER_PAD, num(opts.chromePad, 0));
   const g = indexInput(input, o);
+  assignSlots(g);
   if (!g.leaves.length) return { nodes: {}, edges: {}, order: [], layers: [] };
   rankLeaves(g);
   const L = buildLayers(g, o);
@@ -146,6 +154,68 @@ function indexInput(input, o) {
   };
   for (const e of rankEdges) { push(g.out, e.source, e.target); push(g.in, e.target, e.source); }
   return g;
+}
+
+/**
+ * `slot` is the PRIMARY in-rank ordering key (ahead of `pref`): every id in one connected
+ * component carries the same one, so a component can never be split or leapfrogged by a
+ * neighbour, whatever the median sweeps make of it. Absent `opts.componentOrder` there are
+ * no slots at all (`g.slot === null`) and every layout node takes slot 0 — the comparisons
+ * downstream are then uniformly inert and the drawing is bit-identical to before.
+ *
+ * Components are the connected components of: every edge (including the cycle-broken ones
+ * the shell withholds, named by `opts.backLinks`) PLUS containment, because a container and
+ * its children are one thing on screen and have to move as one.
+ *
+ * Each spec entry is one slot: an id, or an array of ids that are aliases for the same
+ * slot. A component holding ids from several entries takes the smallest. Unknown ids are
+ * ignored. Every component nobody named shares ONE slot after all of them, so their
+ * relative order stays whatever the ordering pass would have made of it.
+ */
+function assignSlots(g) {
+  const spec = Array.isArray(g.o.componentOrder) ? g.o.componentOrder : null;
+  if (!spec) { g.slot = null; return; }
+
+  // Union-find over ALL ids (leaves and clusters), indexed by the input index.
+  const uf = new Int32Array(g.ids.length);
+  for (let i = 0; i < uf.length; i++) uf[i] = i;
+  const find = (x) => { while (uf[x] !== x) { uf[x] = uf[uf[x]]; x = uf[x]; } return x; };
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra === rb) return;
+    if (ra < rb) uf[rb] = ra; else uf[ra] = rb; // lowest index wins: deterministic roots
+  };
+  const idx = (id) => (g.nodes.has(id) ? g.nodes.get(id).index : -1);
+
+  for (const e of g.allEdges) union(idx(e.source), idx(e.target)); // both endpoints exist
+  for (const id of g.ids) {
+    const p = g.nodes.get(id).parent;
+    if (p !== undefined) union(idx(id), idx(p));
+  }
+  for (const pair of g.o.backLinks || []) {
+    if (!Array.isArray(pair)) continue;
+    const a = idx(pair[0]), b = idx(pair[1]);
+    if (a >= 0 && b >= 0) union(a, b);
+  }
+
+  const entry = new Map(); // listed id -> spec index (first occurrence wins)
+  for (let i = 0; i < spec.length; i++) {
+    const ids = Array.isArray(spec[i]) ? spec[i] : [spec[i]];
+    for (const id of ids) if (g.nodes.has(id) && !entry.has(id)) entry.set(id, i);
+  }
+  const rootSlot = new Map();
+  for (const [id, i] of entry) {
+    const r = find(idx(id));
+    const cur = rootSlot.get(r);
+    if (cur === undefined || i < cur) rootSlot.set(r, i);
+  }
+
+  const slot = new Map();
+  for (const id of g.ids) {
+    const s = rootSlot.get(find(idx(id)));
+    slot.set(id, s === undefined ? spec.length : s); // unlisted components all go last
+  }
+  g.slot = slot;
 }
 
 // ---------------------------------------------------------------------------- 2 ranking
@@ -256,15 +326,18 @@ function buildLayers(g, o) {
   const horiz = o.dir === "LR" || o.dir === "RL";
   const V = [];
   const byNode = new Map();
-  const mk = (kind, rank, cluster, rw, rh, pref) => {
-    const v = { i: V.length, kind, rank, cluster, rw, rh, pref, pos: 0, x: 0, in: [], out: [] };
+  // slotOf: 0 everywhere unless componentOrder is in play (assignSlots), which makes every
+  // slot comparison below a no-op and the drawing identical to a build without the feature.
+  const slotOf = (id) => (g.slot ? g.slot.get(id) ?? 0 : 0);
+  const mk = (kind, rank, cluster, rw, rh, pref, slot) => {
+    const v = { i: V.length, kind, rank, cluster, rw, rh, pref, slot, pos: 0, x: 0, in: [], out: [] };
     V.push(v);
     return v;
   };
 
   for (const id of g.leaves) {
     const n = g.nodes.get(id);
-    const v = mk(0, g.rank.get(id), n.parent, horiz ? n.h : n.w, horiz ? n.w : n.h, g.pref.get(id));
+    const v = mk(0, g.rank.get(id), n.parent, horiz ? n.h : n.w, horiz ? n.w : n.h, g.pref.get(id), slotOf(id));
     v.node = id;
     byNode.set(id, v);
   }
@@ -315,7 +388,7 @@ function buildLayers(g, o) {
     const parent = g.nodes.get(c).parent;
     for (let r = s[0]; r <= s[1]; r++) {
       for (const side of [0, 1]) {
-        const b = mk(2, r, parent, o.borderW, 0, 0);
+        const b = mk(2, r, parent, o.borderW, 0, 0, slotOf(c));
         b.of = c;
         b.side = side;
         (side ? rec.r : rec.l).push(b);
@@ -358,7 +431,7 @@ function buildLayers(g, o) {
       // end it is nearer instead of parking every bend in the same slot.
       const seeded = seeds.bends.get(tok);
       const pref = seeded === undefined ? a.pref + ((b.pref - a.pref) * (r - a.rank)) / steps : seeded;
-      const d = mk(1, r, cluster, DUMMY_W, 0, pref);
+      const d = mk(1, r, cluster, DUMMY_W, 0, pref, slotOf(e.source));
       d.tok = tok;
       link(prev, d);
       chain.push(d);
@@ -515,7 +588,7 @@ function sortRank(L, r, keyOf, emptyKey) {
 
   const build = (key) => {
     const items = [];
-    for (const v of direct.get(key) || []) items.push({ node: v, key: keyOf(v) });
+    for (const v of direct.get(key) || []) items.push({ node: v, key: keyOf(v), slot: v.slot });
     for (const c of subs.get(key) || []) {
       const kids = build(c);
       let sum = 0, n = 0;
@@ -524,18 +597,27 @@ function sortRank(L, r, keyOf, emptyKey) {
       // A block with no members on this rank (a container whose span was grown to cover a
       // sibling's) has no local key. The initial sort supplies one on the pref scale; a
       // median sweep keeps it where it is, which is the only value on the right scale there.
-      items.push({ cluster: c, items: kids, key: n ? sum / n : (emptyKey ? emptyKey(c, r) : rec.l[r - rec.lo].pos) });
+      // Its slot comes off the CLUSTER id, not its members, for the same reason.
+      items.push({
+        cluster: c, items: kids,
+        key: n ? sum / n : (emptyKey ? emptyKey(c, r) : rec.l[r - rec.lo].pos),
+        slot: L.g.slot ? L.g.slot.get(c) ?? 0 : 0,
+      });
     }
-    items.sort((a, b) => a.key - b.key); // stable: equal keys keep the previous order
+    // `slot` (componentOrder) outranks every other key: a component is a band, and no
+    // median can move an item out of its own band. All-zero without the option, so the
+    // comparison collapses back to the plain key sort.
+    items.sort((a, b) => (a.slot - b.slot) || (a.key - b.key)); // stable: equal keys keep the previous order
     // Sibling cluster blocks keep the slots this rank's keys gave them, but which block
     // lands in which slot is decided ONCE, globally (clusterSeq) — never per rank.
-    const slots = [];
-    for (let i = 0; i < items.length; i++) if (items[i].cluster !== undefined) slots.push(i);
-    if (slots.length > 1) {
-      const blocks = slots.map((i) => items[i]);
-      blocks.sort((a, b) => (L.seq.get(a.cluster) - L.seq.get(b.cluster))
+    const at = [];
+    for (let i = 0; i < items.length; i++) if (items[i].cluster !== undefined) at.push(i);
+    if (at.length > 1) {
+      const blocks = at.map((i) => items[i]);
+      blocks.sort((a, b) => (a.slot - b.slot)
+        || (L.seq.get(a.cluster) - L.seq.get(b.cluster))
         || (L.g.nodes.get(a.cluster).index - L.g.nodes.get(b.cluster).index));
-      for (let i = 0; i < slots.length; i++) items[slots[i]] = blocks[i];
+      for (let i = 0; i < at.length; i++) items[at[i]] = blocks[i];
     }
     return items;
   };
@@ -577,7 +659,8 @@ function transpose(L, reverse) {
       const arr = L.ranks[r];
       for (let i = 0; i < arr.length - 1; i++) {
         const v = arr[i], w = arr[i + 1];
-        if (v.kind === 2 || w.kind === 2 || v.cluster !== w.cluster) continue;
+        // …and never across two componentOrder bands (v.slot === w.slot always without it).
+        if (v.kind === 2 || w.kind === 2 || v.cluster !== w.cluster || v.slot !== w.slot) continue;
         const cur = pairCross(v.out, w.out) + pairCross(v.in, w.in);
         const swapped = pairCross(w.out, v.out) + pairCross(w.in, v.in);
         if (swapped < cur || (reverse && swapped === cur && swapped > 0)) {

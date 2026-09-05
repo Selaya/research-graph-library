@@ -57,6 +57,15 @@ export function layout(view, opts = {}) {
   // child before we ever get here (D5). Back edges are withheld entirely: we route them
   // ourselves as consistent-side arcs, and feeding them (even flipped) would let the
   // solver pull ranks around as the graph grows, jiggling the loop's shape.
+
+  // componentOrder groups a drawing by CONNECTED COMPONENT, and the edge set handed down is
+  // the acyclic one — every cycle-broken edge is withheld, which would tear a cyclic
+  // pipeline into two components the solver then orders independently. Hand the withheld
+  // pairs down separately so connectivity is judged on the real graph. `o` is this
+  // function's own merged copy of the opts, so writing to it cannot leak into the caller's.
+  if (Array.isArray(o.componentOrder)) {
+    o.backLinks = realEdges.filter((e) => reversed.has(e.id)).map((e) => [e.source, e.target]);
+  }
   const solved = solver(
     {
       nodes: nodes.map((n) => (hasParents ? { id: n.id, w: n.w, h: n.h, parent: n.parent } : { id: n.id, w: n.w, h: n.h })),
