@@ -401,6 +401,33 @@ the real nodes alone do not determine a drawing) and feeds both back as `prevOrd
 graph reproduces it exactly, appending a node does not reshuffle the ranks around it, and
 storyboard snapshots carry both so a backward scrub restores the drawing it is replaying.
 
+That channel holds a *connected* drawing together, but it cannot hold apart what was never
+joined: draw four parallel pipelines in one graph and there are no edges between them, so
+nothing decides which sits above which — remove a node from the second and it can slide to
+the bottom, taking every later addition with it. **`componentOrder`** pins that down. Each
+entry is one slot, in order: an id, or an array of ids that are aliases for the same slot
+(list a few, and the slot survives losing one). Unknown ids are ignored, a container and
+its children count as one component (list either), and every component nobody listed shares
+one slot after the listed ones — so naming the two that matter is enough.
+
+```js
+mount(el, spec, { layout: { componentOrder: ["ingest0", ["enrich0", "enrich1"], "export0"] } });
+g.layout({ componentOrder: ["export0", "ingest0"] });  // re-slot at runtime; it persists
+g.layout({ componentOrder: null });                    // back to whatever the solver likes
+```
+
+Slots are **sticky**: `mount()` remembers which component landed in which slot, so a
+pipeline keeps its band even after every id you listed for it has been removed — name its
+head and stop worrying about whether that head survives, and a `condense()` or `split()`
+hands the slot on to the nodes it mints. The list always outranks that memory, which only
+places components no listed id claims; handing `g.layout()` a different list (or `null`)
+drops the memory entirely and re-resolves from what you just passed. One consequence: if a
+remembered component and a listed one end up with the same slot (re-add a deleted head as a
+fresh, unconnected node, say), they share that band rather than splitting it.
+
+It is an engine-only option — the dagre adapter ignores it — and it costs nothing when it
+is absent: with no list there are no slots and the drawing is the one you already had.
+
 *Want dagre back?* It lives on as an optional adapter behind the same solver seam —
 install the optional peer and pass a solver:
 

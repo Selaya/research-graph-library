@@ -681,6 +681,28 @@ engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},
   as `prevLayers`. **Contract: `engineSolve(g, {prevOrder, prevLayers})` fed its own
   output is a fixed point in `order`, `layers`, `nodes` AND `edges`.** A solver that
   cannot produce `layers` (the dagre adapter) omits it, and the shell degrades to `[]`.
+- **`componentOrder` (opts) — `slot`, the primary in-rank ordering key, AHEAD of `pref`.**
+  Disconnected components have no edges between them, so crossing minimization has nothing
+  to say about their relative order and only `pref` (the previous drawing, read rank-major)
+  holds them apart — which a rank shift in one component defeats: the whole component then
+  carries keys smaller than its new rank-mates' and falls to the bottom, taking every id
+  added afterwards with it. `opts.componentOrder` is an array of slots, each entry a node id
+  or an array of alias ids; `assignSlots` (engine.js, straight after `indexInput`) does
+  union-find over every id — every edge, every containment link, plus `opts.backLinks` —
+  and hands each component the lowest entry index it holds an id for, `spec.length` if it
+  holds none. Unknown ids are ignored. `g.slot` is the id→slot map, and every layout node
+  carries a `slot`: a leaf its own, an edge dummy its source's, a border dummy its
+  cluster's. It is enforced in exactly two places — `sortRank` (both the item sort and the
+  sibling-block reassignment lead with `a.slot - b.slot`) and `transpose` (never swaps
+  across two slots) — and it is a PRIMARY key, so no median, no crossing count and no
+  previous order can move an item out of its band. **Inert when absent**: no
+  `componentOrder` means `g.slot === null`, every slot is 0, every comparison above is a
+  no-op, and the drawing is identical to one built without the feature. It is engine-only;
+  the dagre adapter reads the opts it knows and ignores this one.
+  The solve also EMITS `slots` (`{id: slotIndex}` over the real leaf/cluster ids) — just
+  `g.slot` serialized — and only when the option was active, so a result built without it
+  keeps exactly the shape it had. The engine stays pure: it remembers nothing between
+  calls, it only hands the caller what it decided.
 - `chromePad` is how much padding the CALLER will add around a container rect after the
   solve (layout.js passes its `CONTAINER_PAD`). The solver reserves it in the rank axis;
   without that the padded rect eats the neighbouring rank whenever `ranksep` is small.
@@ -730,7 +752,33 @@ engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},
 `engineSolve`), `opts.prevOrder` and `opts.prevLayers`; the result gains `order` and
 `layers` (alongside `reversedEdgeIds`) for the caller to persist — both, together.
 The shell also derives `opts.chromePad` from its own `CONTAINER_PAD` so the solver can
-reserve the padding `padContainers` is about to add. Everything else in the shell (breakCycles
+reserve the padding `padContainers` is about to add. It likewise derives `opts.backLinks`
+(source/target pairs) whenever `opts.componentOrder` is an array: the edge set handed to the
+solver is the ACYCLIC one, every cycle-broken edge withheld, so a solver judging
+connectivity on it alone would tear a cyclic pipeline — or any component whose only link is
+a `loop:true` edge — into two components and slot them independently. `backLinks` names the
+withheld pairs so connectivity is judged on the real graph; the solver uses them for nothing
+else. Both are written onto the shell's own merged copy of the opts, never the caller's. The
+result passes the solver's `slots` straight through, key and all, or omits it.
+
+**Sticky slots live in `src/index.js`, not the engine.** A spec entry can only name ids, and
+the user who removes a pipeline's head has removed the id that named its slot — the
+component would drop into the trailing unlisted band, which is the reordering the option
+exists to prevent. So `relayout()` persists each result's `slots` (beside `prevOrder` /
+`prevLayers`, snapshotted and restored with them for the same G2 reason) and hands it back
+down as **`opts.componentOrderMemory`** (`{id: slot}`), filtered to ids the store still has,
+resolved through any collapse, and never naming the trailing unlisted slot. `assignSlots`
+applies it strictly AFTER the list and only to components no listed id claimed — memory is
+a fallback, never a rival. It is deliberately NOT merged into the entries: a remembered id
+folded into entry `i` would be seen first and silently beat the same id listed explicitly
+in entry `j > i`, so an explicit re-slot after two components split apart would not take.
+`reseat()` (the condense/split hook that already remaps `order`/`layers` through an id
+change) remaps the memory too, so a condense that consumes every remembered id of a
+component hands the merged node the lowest slot its sources held. The memory belongs to ONE
+list: `relayout()` compares a JSON of the raw `componentOrder` against the one it memorised
+and drops the memory whenever it changes (a non-array included).
+
+Everything else in the shell (breakCycles
 + pinning, back-edge/self-loop arcs, `padContainers`, bounds) is UNCHANGED. The dagre
 import is REMOVED from this file.
 

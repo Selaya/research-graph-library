@@ -55,7 +55,7 @@ const spec: GraphSpec = {
 
 const opts: MountOpts = {
   theme: "auto",
-  layout: { dir: "LR", nodesep: 24 },
+  layout: { dir: "LR", nodesep: 24, componentOrder: ["ingest", ["clean", "clean.dedupe"], "deploy"] },
   animation: { duration: 350, easing: "cubic-out" },
   controls: true,
   preset: "pipeline",
@@ -115,6 +115,10 @@ g.layout({ dir: "TB" });
 // ---- M3: the layout solver seam + the optional dagre adapter --------------------------
 const solver: LayoutSolver = dagreSolver;
 g.layout({ dir: "LR", solver, prevOrder: [["ingest"], ["clean"]], prevLayers: [["ingest"], ["clean"]] });
+
+// ---- componentOrder: one slot per entry, aliases in an array, null to clear ------------
+g.layout({ componentOrder: ["deploy", "ingest"] });
+g.layout({ componentOrder: null });
 
 const solved: SolverResult = solver(
   { nodes: [{ id: "a", w: 100, h: 36 }], edges: [] } satisfies SolverInput,

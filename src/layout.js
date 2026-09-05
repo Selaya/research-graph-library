@@ -8,6 +8,7 @@
 //     reversedEdgeIds: Set<string>            // persist -> opts.pinnedReversals (D3)
 //     order:  string[][]                      // persist -> opts.prevOrder (order stability)
 //     layers: string[][]                      // persist -> opts.prevLayers (bend stability)
+//     slots?: { [id]: number }                // componentOrder only — the slot each id landed in
 //   }
 //
 // This file is the SHELL around a pluggable solver: `opts.solver` (default `engineSolve`)
@@ -57,6 +58,17 @@ export function layout(view, opts = {}) {
   // child before we ever get here (D5). Back edges are withheld entirely: we route them
   // ourselves as consistent-side arcs, and feeding them (even flipped) would let the
   // solver pull ranks around as the graph grows, jiggling the loop's shape.
+
+  // componentOrder groups a drawing by CONNECTED COMPONENT, and the edge set handed down is
+  // the acyclic one — every cycle-broken edge is withheld, which would tear a cyclic
+  // pipeline into two components the solver then orders independently. Hand the withheld
+  // pairs down separately so connectivity is judged on the real graph. `o` is this
+  // function's own merged copy of the opts, so writing to it cannot leak into the caller's.
+  // (`componentOrderMemory`, the other companion option, needs no derivation here — it
+  // comes straight from the caller and rides the opts spread down to the solver.)
+  if (Array.isArray(o.componentOrder)) {
+    o.backLinks = realEdges.filter((e) => reversed.has(e.id)).map((e) => [e.source, e.target]);
+  }
   const solved = solver(
     {
       nodes: nodes.map((n) => (hasParents ? { id: n.id, w: n.w, h: n.h, parent: n.parent } : { id: n.id, w: n.w, h: n.h })),
@@ -113,6 +125,11 @@ export function layout(view, opts = {}) {
     // arrangement differently, and reshuffling ranks nobody touched. Solvers that do not
     // produce it (the dagre adapter) simply return nothing here.
     layers: Array.isArray(solved.layers) ? solved.layers : [],
+    // componentOrder only: which slot each id's component landed in, for the caller to
+    // remember (index.js keeps a component's slot alive after every id the spec named for
+    // it is gone). The key is absent whenever the solver did not produce one, so a result
+    // built without the option has exactly the shape it always had.
+    ...(solved.slots && typeof solved.slots === "object" ? { slots: solved.slots } : null),
   };
 }
 

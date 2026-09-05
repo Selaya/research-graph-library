@@ -180,6 +180,10 @@ export interface LayoutResult {
    *  back as `LayoutOpts.prevLayers` — together they make a re-layout of an unchanged graph
    *  reproduce the identical picture. Empty for a solver that does not produce it. */
   layers: string[][];
+  /** `componentOrder` only: which slot each real id's component landed in. mount() persists
+   *  it to keep a component's slot alive after every id the option named for it is gone.
+   *  Absent when the option was not in play (or the solver does not produce it). */
+  slots?: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +219,8 @@ export interface SolverResult {
   order: string[][];
   /** Optional: `order` with each edge bend interleaved, for full re-layout stability. */
   layers?: string[][];
+  /** Optional: per-id component slot, produced only when `LayoutOpts.componentOrder` was set. */
+  slots?: Record<string, number>;
 }
 
 export type LayoutSolver = (input: SolverInput, opts: LayoutOpts) => SolverResult;
@@ -240,6 +246,35 @@ export interface LayoutOpts {
   prevOrder?: string[][];
   /** The bend half of the same channel (LayoutResult.layers). Persist and pass both. */
   prevLayers?: string[][];
+  /**
+   * Pin the order of the drawing's DISCONNECTED components (e.g. several parallel
+   * pipelines), which nothing else holds in place: with no edges between them, adding or
+   * removing a node in one can slide the whole component past the others.
+   *
+   * Each entry is ONE slot, in order: a node id, or an array of ids that are aliases for
+   * the same slot (list a few, so the slot survives losing one). The component containing
+   * any listed id takes that entry's index — the lowest one, if it holds ids from several.
+   * Unknown ids are ignored. A container and its children are one component, so listing
+   * either the container or any child places the whole thing. Every component nobody
+   * listed shares one slot after all the listed ones.
+   *
+   * Through `mount()` the slots are STICKY: each drawing's slot assignment is remembered,
+   * so a component keeps its slot even once every id listed for it has been removed (a
+   * `condense()`/`split()` passes it to the nodes it mints) — you do not have to guess
+   * which ids will survive. The list always outranks that memory, which only places
+   * components no listed id claims. Handing `g.layout()` a different list (or switching
+   * the option off) drops the memory and re-resolves from the new list.
+   *
+   * Engine-only: the dagre adapter ignores it. `null` (or anything that is not an array)
+   * turns it off.
+   */
+  componentOrder?: Array<string | string[]> | null;
+  /**
+   * Solver-seam only: the previous drawing's `slots`, applied to components that no
+   * `componentOrder` entry claims. `mount()` derives and overwrites this on every relayout,
+   * so set it only when driving `layout()` directly. Ignored without `componentOrder`.
+   */
+  componentOrderMemory?: Record<string, number> | null;
   [key: string]: unknown;
 }
 

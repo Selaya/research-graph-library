@@ -97,3 +97,21 @@ test("dagreSolver produces no `layers`, and the shell degrades to an empty one",
   const again = dagreLayout(fixtureLoop(), { ...OPTS, prevOrder: r.order, prevLayers: r.layers });
   assert.deepEqual(toComparable(again), toComparable(r));
 });
+
+test("dagreSolver ignores componentOrder: it neither throws nor changes the drawing", () => {
+  // `componentOrder` is engine-only — the adapter reads the known opts and nothing else, so
+  // a caller who sets it and then swaps in dagre gets the same picture, not a crash.
+  const spec = ["N7", ["N1", "N2"], "nope"];
+  for (const [, fixture] of FIXTURES) {
+    assert.deepEqual(
+      toComparable(dagreLayout(fixture(), { ...OPTS, componentOrder: spec })),
+      toComparable(dagreLayout(fixture(), OPTS))
+    );
+  }
+  const input = {
+    nodes: ["a", "b", "c", "d"].map((id) => ({ id, w: 100, h: 36 })),
+    edges: [{ id: "e1", source: "a", target: "b" }, { id: "e2", source: "c", target: "d" }],
+  };
+  const o = { dir: "LR", nodesep: 28, ranksep: 56, marginx: 20, marginy: 20 };
+  assert.deepEqual(dagreSolver(input, { ...o, componentOrder: ["c", "a"] }), dagreSolver(input, o));
+});
