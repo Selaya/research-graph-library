@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — sequential vs. parallel</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --good: #1f8a53;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --good: #46c07f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1180px; margin: 0 auto; }
+  header { margin-bottom: 0; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 5px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 104ch; }
+
+  /* The headline comparison — every number below is computed from run.sim().duration. */
+  .verdict {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    margin: 13px 0 0; padding: 11px 16px;
+    border: 1px solid var(--line); border-radius: 12px; background: var(--card);
+  }
+  .fig i {
+    display: block; font-style: normal; font-size: 11px; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .fig span {
+    display: block; font-size: 26px; font-weight: 700; letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums; line-height: 1.15;
+  }
+  .fig em { display: block; font-style: normal; font-size: 11.5px; color: var(--muted); }
+  .fig.alt span { color: var(--accent); }
+  .vs { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+  .save {
+    margin-left: auto; font: 600 12.5px/1.3 inherit; padding: 8px 12px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  .save[data-on] { color: #fff; background: var(--good); border-color: var(--good); }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 12px 0 8px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .rail { display: flex; gap: 6px; margin: 0 0 12px; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .pane h2 { font-size: 14px; margin: 0 0 1px; }
+  .pane p { margin: 0 0 7px; color: var(--muted); font-size: 12.5px; min-height: 20px; }
+  .mount {
+    height: 420px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+  .readout { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
+  .tile span.good { color: var(--good); }
+
+  .cols { display: grid; grid-template-columns: 1.25fr 1fr; gap: 22px; margin-top: 22px; }
+  ul.watch { margin: 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+  ul.watch li { margin: 4px 0; }
+  ul.watch code, table.steps code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  table.steps { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.steps caption { text-align: left; color: var(--muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding-bottom: 6px; }
+  table.steps th, table.steps td { text-align: left; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line); }
+  table.steps th { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  table.steps td.n { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  table.steps tr[data-crit] td { color: var(--warm); font-weight: 600; }
+
+  #report { margin-top: 16px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+
+  @media (max-width: 900px) {
+    .panes { grid-template-columns: 1fr; }
+    .cols { grid-template-columns: 1fr; }
+    .mount { height: 440px; }
+    .fig span { font-size: 25px; }
+    .save { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Sequential vs. parallel <small>— the same seven-step release, wired two ways</small></h1>
+  <p class="lede">
+    Two mounts, one page, one story: the same seven release steps with the same declared
+    durations — 3h&nbsp;20m of work either way — wired as a strict chain on the left and as a
+    fan-out into an AND-join on the right. Both runs <code>play()</code> on the same beat, then
+    two manual steps on the right condense into one automated gate and everything replays.
+  </p>
+</header>
+
+<div class="verdict">
+  <div class="fig">
+    <i>left · strict sequence</i>
+    <span id="v-seq">—</span>
+    <em>wall clock, critical path</em>
+  </div>
+  <div class="vs">vs</div>
+  <div class="fig alt">
+    <i>right · fan-out + join</i>
+    <span id="v-par">—</span>
+    <em id="v-par-note">wall clock, critical path</em>
+  </div>
+  <div class="save" id="v-save">start the run</div>
+</div>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play both runs</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div class="rail" id="rail"></div>
+
+<div class="panes">
+  <section class="pane">
+    <h2>Strict sequence</h2>
+    <p>One chain, seven links — the wall clock is the sum of every step.</p>
+    <div class="mount" id="left"></div>
+    <div class="readout">
+      <div class="tile"><i>wall clock</i><span id="c-left">—</span></div>
+      <div class="tile"><i>steps finished</i><span id="d-left">0/7</span></div>
+      <div class="tile"><i>outcome</i><span id="f-left">idle</span></div>
+    </div>
+  </section>
+
+  <section class="pane">
+    <h2>Fanned out &amp; joined</h2>
+    <p>Four steps leave <em>Build</em> together; <em>Deploy</em> AND-joins all of them.</p>
+    <div class="mount" id="right"></div>
+    <div class="readout">
+      <div class="tile"><i>wall clock</i><span id="c-right">—</span></div>
+      <div class="tile"><i>steps finished</i><span id="d-right">0/7</span></div>
+      <div class="tile"><i>outcome</i><span id="f-right">idle</span></div>
+    </div>
+  </section>
+</div>
+
+<div class="cols">
+  <ul class="watch">
+    <li><b>Lockstep.</b> Both <code>run.play()</code> calls start on the same beat and both
+      clocks tick in declared minutes, so "the right one finished first" is readable off the
+      two transport bars, not just the captions.</li>
+    <li><b>The total bar disagrees with the headline — on purpose.</b> The pipeline preset's
+      bar along the bottom of each pane sums <em>declared work</em>, and it reads 3h 20m on
+      both sides until beat 3: re-wiring never removes work, only automation does (the right
+      bar drops to 1.8h once the gate lands). The big numbers up top are
+      <code>run.sim().duration</code> — the compiled schedule's <em>wall clock</em>, i.e. the
+      critical path.</li>
+    <li><b>The critical path is the point.</b> Beat 2 highlights it: on the left it is all
+      seven steps; on the right it is <code>Build → Rel. notes → Sign-off → Deploy</code> —
+      the two ✋ manual steps dominate, and adding more parallel branches would not shave a
+      minute off it.</li>
+    <li><b>Condense the bottleneck.</b> Beat 3 merges <em>Rel. notes</em> + <em>Sign-off</em>
+      into one ⚡ automated gate with <code>g.condense()</code>; the chip odometers
+      1h&nbsp;40m&nbsp;→&nbsp;6m with a delta badge, the graph gets one rank shorter, and the
+      replay lands the right-hand run at 1h 05m.</li>
+    <li><b>Honest clocks.</b> Both runs compile with <code>hopMs: 0</code> and a linear
+      <code>dwell</code>, so every millisecond on the timeline is declared step time and
+      nothing else. Scrub either transport bar when the story ends.</li>
+  </ul>
+
+  <table class="steps">
+    <caption>the seven steps — identical ids and durations on both sides</caption>
+    <thead><tr><th>step</th><th>node</th><th class="n">declared</th></tr></thead>
+    <tbody id="steps-body"></tbody>
+    <tfoot><tr><th>total work</th><th></th><th class="n" id="steps-total">—</th></tr></tfoot>
+  </table>
+</div>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The release task. Seven steps, same ids and same declared durations in both mounts —
+  // only the WIRING differs, which is the whole argument the page makes.
+  // ---------------------------------------------------------------------------
+
+  var W = 170, H = 40;
+
+  var STEPS = [
+    { id: "build",   label: "Build",       full: "Build & package",       duration: "20m", mode: "automated" },
+    { id: "unit",    label: "Unit tests",  full: "Unit test suite",       duration: "15m", mode: "automated" },
+    { id: "integ",   label: "Integ tests", full: "Integration tests",     duration: "30m", mode: "automated" },
+    { id: "scan",    label: "Sec. scan",   full: "Security scan (SCA)",   duration: "20m", mode: "automated" },
+    { id: "notes",   label: "Rel. notes",  full: "Draft release notes",   duration: "45m", mode: "manual" },
+    { id: "signoff", label: "Sign-off",    full: "Change-board sign-off", duration: "55m", mode: "manual" },
+    { id: "deploy",  label: "Deploy",      full: "Deploy to production",  duration: "15m", mode: "automated" },
+  ];
+
+  function nodeSpec(s, extra) {
+    var n = { id: s.id, label: s.label, w: W, h: H, data: { duration: s.duration, mode: s.mode } };
+    if (extra) for (var k in extra) n[k] = extra[k];
+    return n;
+  }
+
+  // Left: one chain, seven links.
+  var SEQ = {
+    nodes: STEPS.map(function (s) { return nodeSpec(s); }),
+    edges: STEPS.slice(1).map(function (s, i) {
+      return { id: "s" + (i + 1), source: STEPS[i].id, target: s.id };
+    }),
+  };
+
+  // Right: four out-edges off `build` IS the fan-out (no gateway syntax), and four
+  // in-edges on `deploy` IS the AND-join (unannotated fan-in = join "all").
+  var PAR = {
+    nodes: STEPS.map(function (s) { return nodeSpec(s); }),
+    edges: [
+      { id: "p1", source: "build", target: "unit" },
+      { id: "p2", source: "build", target: "integ" },
+      { id: "p3", source: "build", target: "scan" },
+      { id: "p4", source: "build", target: "notes" },
+      { id: "p5", source: "notes", target: "signoff" },
+      { id: "p6", source: "unit", target: "deploy" },
+      { id: "p7", source: "integ", target: "deploy" },
+      { id: "p8", source: "scan", target: "deploy" },
+      { id: "p9", source: "signoff", target: "deploy" },
+    ],
+  };
+
+  var CRIT_NODES = ["build", "notes", "signoff", "deploy"];
+  var CRIT_EDGES = ["p4", "p5", "p9"];
+  var ALL_NODES = STEPS.map(function (s) { return s.id; });
+  var ALL_EDGES = SEQ.edges.map(function (e) { return e.id; });
+
+  var MERGED = {
+    id: "autogate", label: "Auto gate", w: W, h: H,
+    data: { duration: "6m", mode: "automated" },
+  };
+
+  // ---------------------------------------------------------------------------
+  // The clock. One declared MINUTE of the release maps to MS_PER_MIN of animation, and
+  // edge hops cost nothing (hopMs: 0) — so run.sim().duration IS the critical path,
+  // exactly, and the headline numbers are a division rather than a guess.
+  // ---------------------------------------------------------------------------
+
+  var MS_PER_MIN = AUTO ? 26 : 62;
+  var RUN_OPTS = {
+    hopMs: 0,
+    dwell: function (sec) {
+      return Number.isFinite(sec) && sec >= 0 ? (sec / 60) * MS_PER_MIN : MS_PER_MIN;
+    },
+  };
+  var minutesOf = function (ms) { return (Number.isFinite(ms) ? ms : 0) / MS_PER_MIN; };
+
+  function fmtClock(min) {
+    var m = Math.round(min);
+    var h = Math.floor(m / 60);
+    var r = m % 60;
+    return h ? h + "h " + (r < 10 ? "0" : "") + r + "m" : r + "m";
+  }
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var vSeq = $("#v-seq"), vPar = $("#v-par"), vParNote = $("#v-par-note"), vSave = $("#v-save");
+
+  // The step table is rendered from the same array the graphs are built from.
+  (function fillTable() {
+    var body = $("#steps-body"), total = 0;
+    STEPS.forEach(function (s) {
+      total += parseInt(s.duration, 10);
+      var tr = document.createElement("tr");
+      if (CRIT_NODES.indexOf(s.id) !== -1) tr.setAttribute("data-crit", "");
+      tr.innerHTML = "<td>" + s.full + (s.mode === "manual" ? " ✋" : " ⚡") +
+        "</td><td><code>" + s.id + "</code></td><td class=\"n\">" + s.duration + "</td>";
+      body.appendChild(tr);
+    });
+    $("#steps-total").textContent = fmtClock(total);
+  })();
+
+  var BEATS = ["lockstep run", "critical path", "automate + replay", "done"];
+  BEATS.forEach(function (label, i) {
+    var b = document.createElement("b");
+    b.textContent = label;
+    b.setAttribute("data-index", String(i));
+    railEl.appendChild(b);
+  });
+  var beatIndex = -1;
+  function beat(i, phase) {
+    beatIndex = i;
+    for (var k = 0; k < railEl.children.length; k++) {
+      var b = railEl.children[k];
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (k === i) b.setAttribute("data-on", "");
+      else if (k < i) b.setAttribute("data-past", "");
+    }
+    if (phase) phaseEl.textContent = phase;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Two mounts, two handles. Everything after this is symmetric.
+  // ---------------------------------------------------------------------------
+
+  function makeSide(sel, spec, layout, ids) {
+    var g = SparkleMotion.mount(sel, spec, {
+      theme: "auto",
+      layout: layout,
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+    });
+    var side = {
+      g: g,
+      run: g.run(RUN_OPTS),
+      clock: $(ids.clock), donesEl: $(ids.dones), flagEl: $(ids.flag),
+      finishedAt: null,
+    };
+    side.g.ticker.add(function () {
+      var run = side.g.run();
+      if (!run) return;
+      var st = run.state();
+      var nodeIds = Object.keys(st.nodes);
+      var done = 0;
+      for (var i = 0; i < nodeIds.length; i++) {
+        var n = st.nodes[nodeIds[i]];
+        if (n && (n.status === "done" || n.status === "failed")) done++;
+      }
+      side.donesEl.textContent = done + "/" + nodeIds.length;
+      side.clock.textContent = fmtClock(minutesOf(run.time())) + " / " + fmtClock(minutesOf(run.duration));
+    });
+    return side;
+  }
+
+  var L, R;
+  try {
+    L = makeSide("#left", SEQ, { dir: "TB", nodesep: 20, ranksep: 26 },
+      { clock: "#c-left", dones: "#d-left", flag: "#f-left" });
+    R = makeSide("#right", PAR, { dir: "TB", nodesep: 16, ranksep: 44 },
+      { clock: "#c-right", dones: "#d-right", flag: "#f-right" });
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var checks = {};
+
+  /** The headline, straight off each compiled schedule. */
+  function paintVerdict() {
+    var seq = minutesOf(L.run.sim().duration);
+    var par = minutesOf(R.run.sim().duration);
+    vSeq.textContent = fmtClock(seq);
+    vPar.textContent = fmtClock(par);
+    if (seq > 0 && par > 0) {
+      var pct = ((seq - par) / seq) * 100;
+      vSave.textContent = "−" + pct.toFixed(1) + "% wall clock · " + fmtClock(seq - par) + " saved";
+      vSave.setAttribute("data-on", "");
+    }
+    return { seq: seq, par: par };
+  }
+
+  // The transport bar (34px), the preset's total bar (22px) and the caption strip all
+  // overlay the bottom of each pane, and fitView() centres on the WHOLE pane — so every fit
+  // is followed by a small camera nudge that lifts the drawing clear of that chrome.
+  var BAR_LIFT = 34;
+  function fitSide(side, dur) {
+    side.g.fitView({ pad: 50, animate: true, duration: dur });
+    side.g.camera({ by: { dy: -BAR_LIFT }, dur: dur == null ? 420 : dur });
+  }
+  function fitBoth(dur) { fitSide(L, dur); fitSide(R, dur); }
+
+  function cap(side, text, o) {
+    if (text == null) return side.g.caption(null);
+    return side.g.caption(text, o || { place: "bottom" });
+  }
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  var HOLD = AUTO ? 0.55 : 1;
+  function hold(ms) { return sleep(Math.round(ms * HOLD)); }
+
+  function markFinished(side, other, label) {
+    side.finishedAt = minutesOf(side.run.time());
+    side.flagEl.textContent = "✓ " + fmtClock(side.finishedAt);
+    side.flagEl.className = "good";
+    if (label) cap(side, label, { place: "bottom" });
+    return { at: side.finishedAt, otherAt: minutesOf(other.run.time()) };
+  }
+
+  // ---------------------------------------------------------------------------
+  // The story. Three beats, both sides driven together.
+  // ---------------------------------------------------------------------------
+
+  var running = false;
+
+  async function story() {
+    if (running) return;
+    running = true;
+    playBtn.disabled = true;
+
+    // ---- beat 1: the lockstep run ------------------------------------------------
+    beat(0, "beat 1 · both runs playing");
+    L.flagEl.textContent = R.flagEl.textContent = "running";
+    L.flagEl.className = R.flagEl.className = "";
+    cap(L, "One chain: " + fmtClock(minutesOf(L.run.sim().duration)) + " of waiting.");
+    cap(R, "Four steps start together.");
+
+    var pL = L.run.play();
+    var pR = R.run.play();
+    pR.then(function () {
+      checks.parallelFinish = markFinished(R, L, "Shipped at " + fmtClock(minutesOf(R.run.time())) + ".");
+      phaseEl.textContent = "right finished — left still running";
+    });
+    pL.then(function () { markFinished(L, R, "Shipped at " + fmtClock(minutesOf(L.run.time())) + "."); });
+    await Promise.all([pL, pR]);
+    checks.afterBeat1 = paintVerdict();
+    await hold(1400);
+
+    // ---- beat 2: what the critical path actually is -------------------------------
+    beat(1, "beat 2 · the critical path");
+    L.g.highlight({ nodes: ALL_NODES, edges: ALL_EDGES, variant: "warn" });
+    cap(L, "All seven are the critical path.");
+    R.g.camera({ nodes: CRIT_NODES, pad: 46, dur: 650 });
+    R.g.highlight({ nodes: CRIT_NODES, edges: CRIT_EDGES, variant: "warn", dim: true, pulse: true });
+    cap(R, "20m + 45m + 55m + 15m = 2h 15m.");
+    await hold(2800);
+
+    // ---- beat 3: condense the manual pair, then replay ----------------------------
+    beat(2, "beat 3 · automating the manual pair");
+    L.g.clearHighlight();
+    R.g.clearHighlight();
+    cap(L, "Nothing changes over here.");
+    cap(R, "Two manual steps → one auto gate.");
+    var merge = await R.g.condense(["notes", "signoff"], MERGED);
+    checks.condense = { applied: !!merge.applied, created: (merge.ids && merge.ids.created) || null };
+    R.run.reload();                       // recompile against the merged graph
+    fitSide(R, 500);
+    checks.afterCondense = paintVerdict();
+    vParNote.textContent = "wall clock after automating the gate";
+    await hold(1600);
+
+    L.run.seek(0);
+    R.run.seek(0);
+    L.flagEl.textContent = R.flagEl.textContent = "replaying";
+    L.flagEl.className = R.flagEl.className = "";
+    L.finishedAt = R.finishedAt = null;
+    cap(L, "Same graph, same " + fmtClock(minutesOf(L.run.sim().duration)) + ".");
+    cap(R, "Replay: a 6m gate, not 1h 40m.");
+    phaseEl.textContent = "beat 3 · replaying both runs";
+
+    var pL2 = L.run.play();
+    var pR2 = R.run.play();
+    pR2.then(function () {
+      checks.replayFinish = markFinished(R, L, "Shipped at " + fmtClock(minutesOf(R.run.time())) + ".");
+    });
+    await pR2;
+    await hold(1500);
+    if (L.run.playing) {
+      cap(L, fmtClock(minutesOf(L.run.duration - L.run.time())) + " to go — fast-forward.");
+      L.run.seek(L.run.duration);         // a seek past the target settles play()'s promise
+    }
+    await pL2;
+    markFinished(L, R, "Shipped at " + fmtClock(minutesOf(L.run.time())) + ".");
+    await hold(900);
+
+    // ---- coda --------------------------------------------------------------------
+    beat(3, "story complete — scrub either transport bar");
+    var v = paintVerdict();
+    cap(L, null);                         // a clean final frame: the numbers above say it
+    cap(R, null);
+    fitBoth();
+    checks.final = v;
+    checks.totalBarsAgree = totalBarText("#left") + " | " + totalBarText("#right");
+    writeReport();
+    running = false;
+  }
+
+  function totalBarText(sel) {
+    var el = document.querySelector(sel + " .smv-totalbar-label");
+    return el ? el.textContent : "(none)";
+  }
+
+  function writeReport() {
+    reportEl.textContent =
+      "sequential wall clock     " + fmtClock(checks.final ? checks.final.seq : 0) + "\n" +
+      "parallel, first run       " + fmtClock(checks.afterBeat1 ? checks.afterBeat1.par : 0) + "\n" +
+      "parallel, after condense  " + fmtClock(checks.final ? checks.final.par : 0) + "\n" +
+      "parallel run finished at  " + (checks.parallelFinish ? fmtClock(checks.parallelFinish.at) +
+        " (sequential run was at " + fmtClock(checks.parallelFinish.otherAt) + ")" : "—") + "\n" +
+      "replay finished at        " + (checks.replayFinish ? fmtClock(checks.replayFinish.at) : "—") + "\n" +
+      "condense                  " + JSON.stringify(checks.condense) + "\n" +
+      "preset total bars (work)  " + checks.totalBarsAgree + "\n" +
+      "errors                    " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  // ---------------------------------------------------------------------------
+
+  playBtn.addEventListener("click", function () { story().catch(onStoryError); });
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  var resizeT = null;
+  window.addEventListener("resize", function () {
+    clearTimeout(resizeT);
+    resizeT = setTimeout(function () { fitBoth(); }, 160);
+  });
+
+  function onStoryError(err) {
+    errors.push("story: " + String((err && err.message) || err));
+    phaseEl.textContent = "story failed — see report";
+    writeReport();
+    window.__smvExit = { done: true, errors: errors, checks: checks };
+  }
+
+  // Idle state: both graphs already mounted, fitted, and the headline already computed
+  // from the two compiled schedules — the page is worth looking at before anything runs.
+  checks.idle = paintVerdict();
+  beat(-1);
+  setTimeout(function () { fitBoth(); }, 60);
+
+  if (AUTO) {
+    (async function () {
+      await sleep(260);
+      await story();
+      await sleep(200);
+      window.__smvExit = { done: true, errors: errors, checks: checks };
+    })().catch(onStoryError);
+  }
+})();
+</script>
+
+</body>
+</html>

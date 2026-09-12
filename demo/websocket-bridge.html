@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — Live WebSocket bridge</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --bad: #c23b3b;
+    --good: #2e7d52;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a;
+      --bad: #ef6b6b; --good: #6fcf97;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 76ch; }
+  code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #pipe {
+    height: 312px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .scrubrow { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+  .scrubrow input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .scrubrow span { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; white-space: nowrap; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 14px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+  .tile span.bad { color: var(--bad); }
+  .tile span.good { color: var(--good); }
+  .tile span.warm { color: var(--warm); }
+
+  .cols { display: grid; grid-template-columns: 1.35fr 1fr; gap: 14px; margin-top: 14px; }
+  @media (max-width: 780px) { .cols { grid-template-columns: 1fr; } }
+  .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 12px 14px; }
+  .panel h2 { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted);
+              margin: 0 0 8px; font-weight: 600; }
+  .log { height: 208px; overflow: auto; font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .log div { white-space: pre; }
+  .log b { font-weight: 600; color: var(--muted); }
+  .log .in { color: var(--ink); }
+  .log .out { color: var(--accent); }
+  .log .note { color: var(--warm); }
+  .log .err { color: var(--bad); }
+  .log .ok { color: var(--good); }
+
+  ul.watch { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
+  ul.watch li { margin: 5px 0; }
+  ul.watch code { color: var(--ink); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Live WebSocket bridge <small>— Mode B, fed by a socket that drops mid-run</small></h1>
+  <p class="lede">
+    Nothing here is simulated from declared durations. A tiny in-page <code>MockSocket</code>
+    — the same surface a browser <code>WebSocket</code> gives you (<code>onopen</code>,
+    <code>onmessage</code>, <code>onclose</code>, <code>send</code>, <code>close</code>) —
+    streams JSON frames from a fictional CI server, and each frame is forwarded straight into
+    <code>g.run({mode:"live"})</code> as <code>run.start/finish/fail/spawn</code>, exactly like
+    the wiring example in <code>docs/LIVE.md</code>. Halfway through the deploy the socket is
+    reset; the build keeps going without us; the client reconnects, asks for everything it
+    missed, re-seeds the run with <code>run.reset({log})</code> and fast-forwards back to live.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="connect" class="primary" type="button">Connect &amp; stream</button>
+  <button id="dropBtn" type="button" disabled>Force a drop</button>
+  <button id="toFail" type="button" disabled>Scrub to the failure</button>
+  <button id="stepBtn" type="button" disabled>Step ▸</button>
+  <button id="followBtn" type="button" disabled>Follow live</button>
+  <span id="phase">idle — socket closed</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="scrubrow">
+  <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="scrub the live run" disabled>
+  <span id="scrublabel">view 0.0s / live 0.0s</span>
+</div>
+
+<div class="grid">
+  <div class="tile"><i>live frontier</i><span id="m-clock">0.0s <em>view 0.0s</em></span></div>
+  <div class="tile"><i>socket</i><span id="m-sock">closed</span></div>
+  <div class="tile"><i>event log</i><span id="m-log">0 <em>events</em></span></div>
+  <div class="tile"><i>retry loop</i><span id="m-loop">iter 0/3</span></div>
+</div>
+
+<div class="cols">
+  <section class="panel">
+    <h2>Socket frames <span style="text-transform:none;letter-spacing:0">— ◂ received · ▸ sent · ⟳ replayed</span></h2>
+    <div id="log" class="log"></div>
+  </section>
+  <section class="panel">
+    <h2>What to look for</h2>
+    <ul class="watch">
+      <li><b>Real events, not a schedule.</b> Every status change on screen is one JSON frame
+        in the panel on the left. The duration chips are the <em>declared estimate</em>
+        (<code>data.duration</code>); the live feed is what actually happened, compressed.</li>
+      <li><b>The socket dies during <code>DB migrate</code>.</b> The graph freezes on its last
+        known state (warn highlight, everything else dimmed) while the server keeps building.</li>
+      <li><b>Resume, then catch up.</b> The client sends <code>{"type":"resume","since":…}</code>,
+        the server replays the frames it missed, <code>run.reset({log})</code> re-seeds the
+        <em>same</em> run object, and <code>speed(8)</code>&nbsp;+&nbsp;<code>play()</code>
+        fast-forwards the view back to the frontier.</li>
+      <li><b>A failure the log carries.</b> <code>Smoke test</code> fails with
+        <code>reason: "readiness probe: 503 …"</code> — the branch simply stops; nothing fans
+        out to <code>Promote to prod</code>.</li>
+      <li><b>The retry ticks the loop edge.</b> Restarting <code>Deploy canary</code> over the
+        dashed <code>loop:true, maxIterations:3</code> back edge is the live iteration —
+        watch the badge go <code>1/3</code>.</li>
+      <li><b>Runtime fan-out.</b> <code>spawn("warm", 3)</code> puts four tokens on
+        <em>Warm CDN cache</em> (one per PoP) — the <code>×4</code> occupancy badge.</li>
+      <li><b>Two clocks.</b> Scrub backward and the view detaches from the frontier; live time
+        keeps flowing underneath and you can never scrub past it. <em>Follow live</em> snaps
+        back.</li>
+    </ul>
+  </section>
+</div>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // Everything scripted below is expressed at 1x wall clock; auto mode compresses it so the
+  // whole story (connect -> run -> drop -> resume -> catch-up -> finish -> scrub) fits well
+  // inside the smoke check's budget. Live time is REAL time (docs/LIVE.md: the frontier
+  // cannot be sped up), so the script itself is what has to shrink.
+  var PACE = AUTO ? 0.62 : 1;
+  var ms = function (x) { return Math.round(x * PACE); };
+  var HOP = ms(260);            // edge-crossing time for hop fills
+  var CATCHUP = 8;              // view-clock speed used to replay the restored log
+  var BACKOFF = [1200, 2400, 4000];   // reconnect delays, doubled per failed attempt
+
+  // The graph: one deploy of a small service — a mid-graph fan-out (image -> migrate +
+  // cache warm), a three-region fan-out at the end, one bounded retry edge. The durations
+  // are the team's declared estimates: in Mode B they only feed the chips and the progress
+  // fill, the run itself is driven entirely by the socket.
+  var SPEC = {
+    nodes: [
+      { id: "checkout", label: "Checkout",           data: { duration: "12s" } },
+      { id: "deps",     label: "Install deps",       data: { duration: "48s" } },
+      { id: "test",     label: "Test suite",         data: { duration: "2m" } },
+      { id: "image",    label: "Build & push image", data: { duration: "3m" } },
+      { id: "migrate",  label: "DB migrate",         data: { duration: "25s" } },
+      { id: "warm",     label: "Warm CDN cache",     data: { duration: "40s" } },
+      { id: "canary",   label: "Deploy canary",      data: { duration: "1m" } },
+      { id: "smoke",    label: "Smoke test",         data: { duration: "30s" } },
+      { id: "promote",  label: "Promote to prod",    data: { duration: "45s" } },
+      { id: "us-east",  label: "us-east-1",          data: { duration: "35s" } },
+      { id: "eu-west",  label: "eu-west-1",          data: { duration: "35s" } },
+      { id: "ap-south", label: "ap-south-1",         data: { duration: "35s" } },
+    ],
+    edges: [
+      { id: "e1",  source: "checkout", target: "deps" },
+      { id: "e2",  source: "deps",     target: "test" },
+      { id: "e3",  source: "test",     target: "image" },
+      { id: "e4",  source: "image",    target: "migrate" },
+      { id: "e5",  source: "image",    target: "warm" },
+      { id: "e6",  source: "migrate",  target: "canary" },
+      { id: "e7",  source: "canary",   target: "smoke" },
+      { id: "e8",  source: "smoke",    target: "promote" },
+      { id: "e9",  source: "promote",  target: "us-east" },
+      { id: "e10", source: "promote",  target: "eu-west" },
+      { id: "e11", source: "promote",  target: "ap-south" },
+      // A loop edge MUST declare maxIterations > 0. Restarting its target is the live
+      // iteration (docs/LIVE.md, "Retrying a failed node").
+      { id: "retry", source: "smoke", target: "canary", loop: true, maxIterations: 3 },
+    ],
+  };
+
+  // The scripted build, as the server emits it. `d` is ms after the server's own time zero
+  // (the instant the stream opened); the frame's `t` goes out as a real timestamp.
+  var FRAMES = [
+    { d: 400,   type: "start",  id: "checkout" },
+    { d: 1150,  type: "finish", id: "checkout" },
+    { d: 1500,  type: "start",  id: "deps" },
+    { d: 2900,  type: "finish", id: "deps" },
+    { d: 3250,  type: "start",  id: "test" },
+    { d: 4700,  type: "finish", id: "test" },
+    { d: 5050,  type: "start",  id: "image" },
+    { d: 6600,  type: "finish", id: "image" },
+    { d: 6950,  type: "start",  id: "migrate" },
+    { d: 7100,  type: "start",  id: "warm" },
+    { d: 7250,  type: "spawn",  id: "warm", n: 3 },     // one token per extra CDN PoP
+    // ---- the socket is reset at 7500; the build does not care ----
+    { d: 7900,  type: "finish", id: "migrate" },
+    { d: 8100,  type: "finish", id: "warm" },
+    { d: 8500,  type: "start",  id: "canary" },
+    { d: 9900,  type: "finish", id: "canary" },
+    { d: 10250, type: "start",  id: "smoke" },
+    { d: 11200, type: "fail",   id: "smoke", reason: "readiness probe: 503 from /healthz" },
+    // ---- client is back around 11700 and asks for the six frames above ----
+    { d: 12600, type: "start",  id: "canary" },          // the retry: loop edge ticks 1/3
+    { d: 13900, type: "finish", id: "canary" },
+    { d: 14250, type: "start",  id: "smoke" },
+    { d: 15400, type: "finish", id: "smoke" },
+    { d: 15750, type: "start",  id: "promote" },
+    { d: 17100, type: "finish", id: "promote" },         // fans out to all three regions
+    { d: 17450, type: "start",  id: "us-east" },
+    { d: 17500, type: "start",  id: "eu-west" },
+    { d: 17550, type: "start",  id: "ap-south" },
+    { d: 18700, type: "finish", id: "eu-west" },
+    { d: 18800, type: "finish", id: "us-east" },
+    { d: 18900, type: "finish", id: "ap-south" },
+  ];
+  // The socket is reset at DROP_AT and the endpoint refuses connections until BACK_AT, so the
+  // first reconnect attempt bounces and the client backs off — the gap the resume has to heal.
+  var DROP_AT = 7500, BACK_AT = 10900, END_AT = 19500;
+
+  // MockSocket — a stand-in for `new WebSocket(url)`. Same surface the docs/LIVE.md wiring
+  // touches: readyState + the four on* handlers + send()/close(). The second argument is the
+  // scripted server on the other end; in a real page that is the network.
+  function MockSocket(url, backend) {
+    var self = this;
+    this.url = url;
+    this.readyState = MockSocket.CONNECTING;
+    this.onopen = this.onmessage = this.onclose = this.onerror = null;
+    this._backend = backend;
+    setTimeout(function () {
+      if (self.readyState !== MockSocket.CONNECTING) return;
+      if (!backend.accept()) {          // endpoint still down: the dial itself fails
+        self.readyState = MockSocket.CLOSED;
+        if (self.onerror) self.onerror({ type: "error", target: self });
+        if (self.onclose) self.onclose({ type: "close", code: 1006, reason: "connection refused", wasClean: false });
+        return;
+      }
+      self.readyState = MockSocket.OPEN;
+      backend.attach(self);
+      if (self.onopen) self.onopen({ type: "open", target: self });
+    }, ms(320));
+  }
+  MockSocket.CONNECTING = 0; MockSocket.OPEN = 1; MockSocket.CLOSING = 2; MockSocket.CLOSED = 3;
+  MockSocket.prototype.send = function (data) {
+    if (this.readyState !== MockSocket.OPEN) throw new Error("InvalidStateError: socket is not open");
+    this._backend.receive(this, data);
+  };
+  MockSocket.prototype.close = function (code, reason) {
+    this._shutdown(code || 1000, reason || "client closed", true);
+  };
+  /** The server (or the network) hanging up — a real page only ever sees this as onclose. */
+  MockSocket.prototype._shutdown = function (code, reason, clean) {
+    if (this.readyState === MockSocket.CLOSED) return;
+    this.readyState = MockSocket.CLOSED;
+    this._backend.detach(this);
+    if (this.onclose) this.onclose({ type: "close", code: code, reason: reason, wasClean: !!clean });
+  };
+  MockSocket.prototype._deliver = function (obj) {
+    if (this.readyState !== MockSocket.OPEN) return false;
+    if (this.onmessage) this.onmessage({ type: "message", data: JSON.stringify(obj) });
+    return true;
+  };
+
+  /** The build server. Owns the schedule and an append-only history; a frame emitted while
+   *  no socket is attached simply waits there for the next `resume` request. */
+  var SERVER = {
+    t0: 0, started: false, offline: false, sock: null, history: [], missed: 0,
+    accept: function () { return !this.offline; },
+    attach: function (sock) { this.sock = sock; if (!this.started) this.begin(); },
+    detach: function (sock) { if (this.sock === sock) this.sock = null; },
+    begin: function () {
+      var self = this;
+      this.started = true;
+      this.t0 = Date.now();
+      FRAMES.forEach(function (f) { setTimeout(function () { self.emit(f); }, ms(f.d)); });
+      setTimeout(function () { self.offline = true; self.hangup(1006, "connection reset by peer", false); }, ms(DROP_AT));
+      setTimeout(function () { self.offline = false; }, ms(BACK_AT));
+      setTimeout(function () { self.hangup(1000, "build finished", true); }, ms(END_AT));
+    },
+    emit: function (f) {
+      var msg = { type: f.type, id: f.id, t: this.t0 + ms(f.d) };
+      if (f.n != null) msg.n = f.n;
+      if (f.reason) msg.reason = f.reason;
+      this.history.push(msg);
+      if (!(this.sock && this.sock._deliver(msg))) {
+        this.missed++;
+        setBuffered(this.missed);
+      }
+    },
+    /** The client's resume request: replay everything stamped after its cursor, then say so. */
+    receive: function (sock, data) {
+      var self = this, req = JSON.parse(data);
+      if (!req || req.type !== "resume") return;
+      var back = this.history.filter(function (m) { return m.t > req.since; });
+      var i = 0;
+      (function next() {
+        if (self.sock !== sock) return;
+        if (i < back.length) { sock._deliver(back[i++]); setTimeout(next, ms(70)); return; }
+        sock._deliver({ type: "sync", t: Date.now(), count: back.length });
+      })();
+    },
+    hangup: function (code, reason, clean) {
+      if (this.sock) this.sock._shutdown(code, reason, clean);
+    },
+  };
+
+  // ---- page wiring ----------------------------------------------------------
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), logEl = $("#log"), reportEl = $("#report");
+  var scrubEl = $("#scrub"), scrubLabel = $("#scrublabel");
+  var mClock = $("#m-clock"), mSock = $("#m-sock"), mLog = $("#m-log"), mLoop = $("#m-loop");
+  var btnConnect = $("#connect"), btnDrop = $("#dropBtn"), btnFail = $("#toFail"),
+      btnStep = $("#stepBtn"), btnFollow = $("#followBtn");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 46, ranksep: 44 },
+      animation: { duration: 320, easing: "cubic-out" },
+      preset: "pipeline",
+    });
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var fmt = function (msv) { return (Math.max(0, msv || 0) / 1000).toFixed(1) + "s"; };
+  var sleep = function (t) { return new Promise(function (r) { setTimeout(r, t); }); };
+  function waitFor(fn, limit) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (limit || 40000)) return reject(new Error("timeout"));
+        setTimeout(poll, 40);
+      })();
+    });
+  }
+
+  var LOG_MAX = 220;
+  function logLine(cls, glyph, text) {
+    var row = document.createElement("div");
+    row.setAttribute("class", cls);
+    var stamp = document.createElement("b");
+    stamp.textContent = (run ? fmt(run.now()) : "0.0s").padStart(7, " ") + " ";
+    row.appendChild(stamp);
+    row.appendChild(document.createTextNode(glyph + " " + text));
+    logEl.appendChild(row);
+    while (logEl.children.length > LOG_MAX) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  var buffered = 0;
+  function setBuffered(n) {
+    buffered = n;
+    if (n === 1) logLine("note", "⏳", "socket down — the server is buffering frames for us");
+  }
+
+  var connState = "closed", connDetail = "";
+  function setConn(state, detail) {
+    connState = state;
+    connDetail = detail || "";
+    phaseEl.textContent = state + (detail ? " — " + detail : "");
+  }
+
+  // ---- the live run + the socket client --------------------------------------
+  var run = null;
+  var sock = null;
+  var t0 = 0;            // this run's own time zero, agreed with the server out of band
+  var lastT = 0;         // newest server stamp we have actually seen (the resume cursor)
+  var resuming = false, burst = [];
+  var savedLog = [];     // docs/LIVE.md: "the whole state is the log — persist it"
+  var stats = { frames: 0, replayed: 0, resets: 0, drops: 0, refused: 0 };
+  var failSeen = false, storyEnded = false, closedForGood = false, attempt = 0;
+
+  function wireRun() {
+    // g.run(anyOpts) tears down whatever transport is attached and builds a fresh one, so
+    // this is also what pins the frontier's zero to "the instant the stream opened".
+    var r = g.run({ mode: "live", hopMs: HOP });
+    r.on("fail", function (ev) {
+      logLine("err", "✗", ev.id + " failed" + (ev.reason ? " — " + ev.reason : ""));
+    });
+    return r;
+  }
+
+  function entryOf(m) {
+    // The log entry shape run.log() itself uses: run-clock ms, never the wire's epoch.
+    var e = { t: Math.max(0, m.t - t0), type: m.type, id: m.id };
+    if (m.n != null) e.n = m.n;
+    if (m.reason) e.reason = m.reason;
+    return e;
+  }
+
+  /** The docs/LIVE.md wiring, verbatim in shape: server timestamp -> the run's own clock. */
+  function applyFrame(m) {
+    var at = m.t - t0;
+    if (m.type === "start") run.start(m.id, { at: at });
+    else if (m.type === "finish") run.finish(m.id, { at: at, n: m.n });
+    else if (m.type === "fail") run.fail(m.id, { at: at, reason: m.reason });
+    else if (m.type === "spawn") run.spawn(m.id, m.n, { at: at });
+  }
+
+  function handleMessage(raw) {
+    var m = JSON.parse(raw);
+    if (m.type === "sync") {
+      logLine("ok", "◂", JSON.stringify(m));
+      finishResume(m.count);
+      return;
+    }
+    stats.frames++;
+    lastT = Math.max(lastT, m.t);
+    logLine(resuming ? "note" : "in", resuming ? "⟳" : "◂", JSON.stringify(m));
+    if (resuming) { burst.push(entryOf(m)); return; }
+    applyFrame(m);
+    refreshButtons();
+  }
+
+  function finishResume(count) {
+    resuming = false;
+    stats.replayed += count;
+    stats.resets++;
+    // Saved history + the frames we were away for = the server's log, verbatim. reset()
+    // re-seats the SAME run object (same identity, same listeners) on it, then the view
+    // starts detached at 0 and plays forward to the frontier.
+    var restored = savedLog.concat(burst);
+    run.reset({ mode: "live", log: restored });
+    buffered = 0;
+    g.clearHighlight();
+    logLine("ok", "⟳", "run.reset({ log }) — " + restored.length + " events seeded (" +
+      count + " replayed), catching up at " + CATCHUP + "×");
+    g.caption(count + " missed events replayed — fast-forwarding to live", { place: "top" });
+    run.speed(CATCHUP);
+    run.play().then(function () {
+      run.speed(1);
+      run.follow();
+      if (!storyEnded) g.caption("Caught up — following the frontier again", { place: "top" });
+      logLine("ok", "✓", "view clock caught the frontier; following = " + run.following);
+    });
+    refreshButtons();
+  }
+
+  function connect(isResume) {
+    setConn(isResume ? "reconnecting" : "connecting", isResume ? "re-dialling" : "opening socket");
+    logLine("out", "▸", (isResume ? "re-open" : "open") + " wss://ci.internal/builds/4127/stream");
+    sock = new MockSocket("wss://ci.internal/builds/4127/stream", SERVER);
+    sock.onopen = function () {
+      if (!run) { run = wireRun(); t0 = Date.now(); }
+      attempt = 0;
+      setConn("open", isResume ? "resumed" : "streaming build #4127");
+      if (isResume) {
+        resuming = true;
+        burst = [];
+        var req = { type: "resume", since: lastT };
+        logLine("out", "▸", JSON.stringify(req));
+        sock.send(JSON.stringify(req));
+      } else {
+        g.caption("Socket open — streaming build #4127 live", { place: "top" });
+      }
+      refreshButtons();
+    };
+    sock.onmessage = function (ev) { handleMessage(ev.data); };
+    sock.onerror = function () { stats.refused++; };
+    sock.onclose = function (ev) {
+      savedLog = run ? run.log() : [];   // docs/LIVE.md: persist the log, reset() replays it
+      var refused = ev.reason === "connection refused";
+      logLine(ev.wasClean ? "ok" : "err", "✗",
+        "close " + ev.code + " " + ev.reason +
+        (refused ? "" : " — " + savedLog.length + " events held locally"));
+      if (ev.wasClean) {
+        closedForGood = true;
+        setConn("closed", "build finished, stream closed");
+        onStoryEnd();
+        return;
+      }
+      if (!refused) {
+        stats.drops++;
+        g.caption("Socket dropped — the build keeps running; this view is now stale", { place: "top" });
+        g.highlight({ nodes: ["migrate", "warm"], variant: "warn", dim: true, pulse: true });
+      }
+      var wait = ms(BACKOFF[Math.min(attempt, BACKOFF.length - 1)]);
+      attempt++;
+      setConn("dropped", "code " + ev.code + " · retry #" + attempt + " in " + fmt(wait));
+      logLine("note", "↻", "reconnect attempt " + attempt + " in " + fmt(wait) + " (backoff)");
+      setTimeout(function () { if (!closedForGood) connect(true); }, wait);
+      refreshButtons();
+    };
+  }
+
+  function onStoryEnd() {
+    if (storyEnded) return;
+    storyEnded = true;
+    g.caption("Build #4127 green in three regions — 1 retry, 1 reconnect", { place: "top" });
+    g.highlight({ nodes: ["us-east", "eu-west", "ap-south"], variant: "ok" });
+    refreshButtons();
+    writeReport();
+  }
+
+  // The rendered run status is the honest hook for beats that land during a REPLAY: a
+  // reset()-seeded failure never re-fires run.on('fail'), but the node still visibly flips.
+  g.on("runstatus", function (ev) {
+    if (!ev || ev.id !== "smoke") return;
+    if (ev.status === "failed") {
+      if (!failSeen) {
+        failSeen = true;
+        // A lean-in, not a close-up: an explicit k keeps the upstream half of the
+        // pipeline in frame instead of fitting three nodes to a short pane.
+        g.camera({ nodes: ["migrate", "canary", "smoke", "promote"], k: 1.3, dur: 700 });
+      }
+      g.caption("Smoke test failed — the branch stops here, nothing reaches Promote", { place: "top" });
+      g.highlight({ nodes: ["smoke"], edges: ["retry"], variant: "warn", pulse: true });
+      refreshButtons();
+    } else if (ev.status === "done" && failSeen) {
+      g.caption("Green on the retry — the loop edge counted the restart", { place: "top" });
+      g.highlight({ nodes: ["canary", "smoke"], variant: "ok" });
+      g.camera({ fit: true, dur: 700 });
+    }
+  });
+
+  // ---- controls + per-frame readouts ------------------------------------------
+  var scrubbing = false;
+  scrubEl.addEventListener("pointerdown", function () { scrubbing = true; });
+  window.addEventListener("pointerup", function () { scrubbing = false; });
+  scrubEl.addEventListener("input", function () {
+    if (!run) return;
+    run.seek((Number(scrubEl.value) / 1000) * run.now());
+  });
+
+  btnConnect.addEventListener("click", function () { btnConnect.disabled = true; connect(false); });
+  btnDrop.addEventListener("click", function () { SERVER.hangup(1006, "connection reset by peer", false); });
+  btnFail.addEventListener("click", function () { if (run) run.seek(run.timeOf("smoke") + ms(140)); });
+  btnStep.addEventListener("click", function () { if (run) run.step(); });
+  btnFollow.addEventListener("click", function () { if (run) run.follow(); });
+
+  function refreshButtons() {
+    var live = !!run;
+    btnDrop.disabled = !(sock && sock.readyState === MockSocket.OPEN) || closedForGood;
+    btnFail.disabled = !(live && failSeen);
+    btnStep.disabled = !live;
+    btnFollow.disabled = !live;
+    scrubEl.disabled = !live;
+  }
+
+  function sampleFrame() {
+    if (!run) return;
+    var st = run.state();
+    var now = run.now(), view = run.time();
+    mClock.textContent = fmt(now);
+    var em = document.createElement("em");
+    em.textContent = " view " + fmt(view) + (run.following ? " · following" : " · detached");
+    mClock.appendChild(em);
+    mClock.setAttribute("class", run.following ? "" : "warm");
+
+    mSock.textContent = connState;
+    mSock.setAttribute("class", connState === "open" ? "good" : connState === "dropped" ? "bad" : "warm");
+
+    var n = run.log().length;
+    mLog.textContent = String(n);
+    var em2 = document.createElement("em");
+    em2.textContent = buffered ? " events · " + buffered + " buffered on the server" : " events";
+    mLog.appendChild(em2);
+
+    var lp = st.loops && st.loops.retry;
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/3";
+    mLoop.setAttribute("class", lp && lp.iteration > 0 ? "warm" : "");
+
+    scrubLabel.textContent = "view " + fmt(view) + " / live " + fmt(now);
+    if (!scrubbing) scrubEl.value = String(now > 0 ? Math.round((view / now) * 1000) : 0);
+  }
+  g.ticker.add(sampleFrame);
+
+  function writeReport() {
+    var st = run ? run.state() : { nodes: {}, loops: {} };
+    var done = 0, failed = 0;
+    for (var k in st.nodes) {
+      if (st.nodes[k].status === "done") done++;
+      else if (st.nodes[k].status === "failed") failed++;
+    }
+    reportEl.textContent =
+      "frames received      " + stats.frames + "\n" +
+      "socket drops         " + stats.drops + "  (refused dials: " + stats.refused +
+        ", frames replayed on resume: " + stats.replayed + ")\n" +
+      "run.reset() calls    " + stats.resets + "\n" +
+      "log events           " + (run ? run.log().length : 0) + "\n" +
+      "loop iterations      " + ((st.loops && st.loops.retry) ? st.loops.retry.iteration + "/" + st.loops.retry.max : "0/3") + "\n" +
+      "nodes done / failed  " + done + " / " + failed + "\n" +
+      "errors               " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  // ---- ?auto=1: the whole story with no clicks, ending on the time-travel beat --
+  function exit() {
+    writeReport();
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  async function auto() {
+    await sleep(ms(200));
+    btnConnect.disabled = true;
+    connect(false);
+    await waitFor(function () { return storyEnded; }, 40000);
+    await sleep(ms(600));
+
+    // Time travel: the log is the whole state, so the failed instant is still right there.
+    g.caption("Scrubbing back to the failure — the log still holds it", { place: "top" });
+    g.camera({ nodes: ["migrate", "canary", "smoke", "promote"], k: 1.3, dur: 600 });
+    run.seek(run.timeOf("smoke") + ms(140));
+    logLine("note", "⏱", "seek(" + fmt(run.time()) + ") — following = " + run.following +
+      ", frontier still at " + fmt(run.now()));
+    await sleep(ms(1500));
+
+    run.follow();
+    g.caption("follow() — back to the frontier, green in three regions", { place: "top" });
+    g.highlight({ nodes: ["us-east", "eu-west", "ap-south"], variant: "ok" });
+    logLine("ok", "⏱", "follow() — following = " + run.following);
+    await g.camera({ fit: true, dur: 600 });
+    await sleep(ms(500));
+    setConn("done", "1 drop, 1 resume, 1 retry — build green");
+    exit();
+  }
+
+  refreshButtons();
+  writeReport();
+  if (AUTO) {
+    // Belt and braces: the smoke check waits on __smvExit.done, so it must always arrive.
+    setTimeout(function () {
+      if (!window.__smvExit.done) { errors.push("auto: watchdog fired before the story ended"); exit(); }
+    }, 42000);
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      exit();
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

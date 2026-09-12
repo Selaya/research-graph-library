@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — Git branching strategy</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --good: #1f8f5f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --good: #46c48b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+  p.lede strong { color: var(--ink); font-weight: 600; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #pipe {
+    height: 480px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+
+  .legend { margin-top: 16px; color: var(--muted); font-size: 12.5px; max-width: 90ch; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  footer { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+  footer a { color: var(--accent); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Git branching strategy <small>— trunk-based, with a release hotfix</small></h1>
+  <p class="lede">
+    Two feature branches, <strong>feat/auth</strong> and <strong>feat/search</strong>, split off
+    <code>main</code>, gather commits, and pass CI at their own pace. Both branches
+    <em>condense</em> into single merge commits, <code>release/1.4</code> is cut and tagged, and
+    a hotfix branches off it — a bounded retry loop stands in for cherry-pick attempts landing
+    back on the release. Watch the loop's iteration badge, and the merge choreography collapse
+    three commits into one node. Zoom is ctrl/⌘&nbsp;+&nbsp;wheel; plain scroll pans.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>chapter</i><span id="m-chapter">—</span></div>
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>live tokens</i><span id="m-tokens">0</span></div>
+  <div class="tile"><i>cherry-pick loop</i><span id="m-loop">iter 0/2</span></div>
+</div>
+
+<p class="legend">
+  Legend — chip = duration (<code>data.duration</code>, drives the simulated CI timing),
+  dashed arc = the <code>cherry-pick</code> loop edge (<code>loop:true, maxIterations:2</code>),
+  the gold ring = a tag, condense's staged highlight → converge → reveal turns three commits
+  into one <em>merge commit</em> node, and the transport bar under the graph scrubs the whole
+  history — backward jumps restore a snapshot instantly, forward ones replay the ops between.
+</p>
+
+<div id="report"></div>
+
+<footer>
+  ← back to the <a href="index.html">demo index</a> · built with
+  <code>sparkle-motion-visualizer</code>
+</footer>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ===========================================================================
+  // 1. The graph — assembled incrementally by the storyboard, not handed to mount whole,
+  // so commits visibly land one at a time (§ addNode waves below).
+  // ===========================================================================
+
+  function add(node) { return { op: "addNode", args: [node] }; }
+  function edge(e) { return { op: "addEdge", args: [e] }; }
+  function cam(target) { return { op: "camera", args: [target] }; }
+  function hi(nodes, variant, opts) {
+    var o = { nodes: nodes, variant: variant };
+    if (opts) for (var k in opts) o[k] = opts[k];
+    return { op: "highlight", args: [o] };
+  }
+  function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
+  function hold(ms) { return { op: "wait", ms: ms }; }
+  function grow(steps, ms) { return { op: "batch", steps: steps, dur: ms }; }
+
+  var SEED = { nodes: [{ id: "main.init", label: "Init commit" }], edges: [] };
+
+  var WAVE_TRUNK = [
+    add({ id: "main.setup", label: "Project scaffold", data: { duration: "30m" } }),
+    edge({ id: "e-init-setup", source: "main.init", target: "main.setup" }),
+  ];
+
+  var WAVE_BRANCH = [
+    add({ id: "auth.1", label: "auth: add login form", data: { duration: "20m" } }),
+    edge({ id: "e-setup-auth1", source: "main.setup", target: "auth.1" }),
+    add({ id: "search.1", label: "search: index schema", data: { duration: "25m" } }),
+    edge({ id: "e-setup-search1", source: "main.setup", target: "search.1" }),
+  ];
+
+  var WAVE_AUTH_COMMITS = [
+    add({ id: "auth.2", label: "auth: session tokens", data: { duration: "35m" } }),
+    edge({ id: "e-auth1-auth2", source: "auth.1", target: "auth.2" }),
+    add({ id: "auth.3", label: "auth: tests + docs", data: { duration: "15m" } }),
+    edge({ id: "e-auth2-auth3", source: "auth.2", target: "auth.3" }),
+  ];
+
+  var WAVE_SEARCH_COMMITS = [
+    add({ id: "search.2", label: "search: ranking tweak", data: { duration: "20m" } }),
+    edge({ id: "e-search1-search2", source: "search.1", target: "search.2" }),
+  ];
+
+  var WAVE_MERGE_PREP = [
+    add({ id: "main.release", label: "release/1.4 cut", join: "all", data: { duration: "5m" } }),
+    edge({ id: "e-auth3-release", source: "auth.3", target: "main.release" }),
+    edge({ id: "e-search2-release", source: "search.2", target: "main.release" }),
+  ];
+
+  var AUTH_SET = ["auth.1", "auth.2", "auth.3"];
+  var SEARCH_SET = ["search.1", "search.2"];
+  var MERGE_AUTH = { id: "merge.auth", label: "Merge commit: feat/auth", data: { duration: "8s" } };
+  var MERGE_SEARCH = { id: "merge.search", label: "Merge commit: feat/search", data: { duration: "8s" } };
+
+  var WAVE_TAG = [
+    add({ id: "tag.v14", label: "tag v1.4.0", data: { duration: "1s" } }),
+    edge({ id: "e-release-tag14", source: "main.release", target: "tag.v14" }),
+  ];
+
+  var WAVE_HOTFIX = [
+    add({ id: "hotfix.1", label: "hotfix: null-check patch", data: { duration: "15m" } }),
+    edge({ id: "e-tag14-hotfix1", source: "tag.v14", target: "hotfix.1" }),
+    add({ id: "hotfix.ci", label: "CI: hotfix suite", data: { duration: "12s" } }),
+    edge({ id: "e-hotfix1-ci", source: "hotfix.1", target: "hotfix.ci" }),
+    // The bounded retry loop stands in for cherry-pick attempts: source dwells, checks the
+    // loop edge, and either flies the arc (iteration 1) or ticks in place (2+).
+    edge({ id: "cherrypick", source: "hotfix.ci", target: "hotfix.1", loop: true, maxIterations: 2 }),
+    add({ id: "release.patch", label: "cherry-pick onto release/1.4", data: { duration: "6s" } }),
+    edge({ id: "e-ci-patch", source: "hotfix.ci", target: "release.patch" }),
+    add({ id: "tag.v141", label: "tag v1.4.1", data: { duration: "1s" } }),
+    edge({ id: "e-patch-tag141", source: "release.patch", target: "tag.v141" }),
+  ];
+
+  var STEPS = [
+    { label: "main" },
+    grow(WAVE_TRUNK, 500),
+    cam({ fit: true, pad: 60, dur: 700 }),
+    cap("Everything starts on main."),
+    hold(300),
+
+    { label: "branch" },
+    grow(WAVE_BRANCH, 700),
+    cam({ fit: true, pad: 60, dur: 800 }),
+    cap("Two feature branches split off main: feat/auth and feat/search."),
+    hold(400),
+
+    grow(WAVE_AUTH_COMMITS, 700),
+    cam({ node: "auth.3", k: 1.3, pad: 70, dur: 700 }),
+    cap("Commits land on feat/auth."),
+    hold(300),
+
+    grow(WAVE_SEARCH_COMMITS, 500),
+    cam({ nodes: ["search.1", "search.2"], pad: 60, dur: 700 }),
+    cap("…and on feat/search, in parallel."),
+    hold(300),
+
+    { label: "ci" },
+    cam({ fit: true, pad: 50, dur: 800 }),
+    cap("CI runs on every branch head — at its own pace."),
+    { op: "run.play" },
+    cap("Both branches pass — ready to merge."),
+    hold(400),
+
+    { label: "merge" },
+    grow(WAVE_MERGE_PREP, 700),
+    cam({ nodes: ["auth.3", "search.2", "main.release"], pad: 60, dur: 800 }),
+    cap("Both branches merge into release/1.4."),
+    hi(AUTH_SET, "focus", { dim: true }),
+    hold(500),
+    { op: "condense", args: [AUTH_SET, MERGE_AUTH], dur: 900 },
+    hi(["merge.auth"], "ok", { pulse: true }),
+    hold(300),
+    hi(SEARCH_SET, "focus", { dim: true }),
+    hold(500),
+    { op: "condense", args: [SEARCH_SET, MERGE_SEARCH], dur: 900 },
+    hi(["merge.search"], "ok", { pulse: true }),
+    cap("Three commits condense into one merge commit — per branch."),
+    hold(400),
+    { op: "clearHighlight" },
+    { op: "run.play", until: "main.release" },
+
+    { label: "tag" },
+    grow(WAVE_TAG, 500),
+    cam({ node: "tag.v14", k: 1.6, pad: 60, dur: 700 }),
+    { op: "props", args: [{ "tag.v14": { "--smv-fill": "#c9971f" } }] },
+    cap("release/1.4 is cut and tagged v1.4.0."),
+    { op: "run.play", until: "tag.v14" },
+    hold(400),
+
+    { label: "hotfix" },
+    grow(WAVE_HOTFIX, 800),
+    cam({ nodes: ["hotfix.1", "hotfix.ci"], pad: 60, dur: 800 }),
+    cap("A critical bug needs a hotfix off release/1.4 — cherry-picked back, up to 2 tries."),
+    hold(400),
+    { op: "run.play" },
+    { op: "props", args: [{ "tag.v141": { "--smv-fill": "#1f8f5f" } }] },
+    hi(["tag.v141"], "ok", { pulse: true }),
+    cam({ fit: true, pad: 50, dur: 800 }),
+    cap("v1.4.1 ships with the hotfix cherry-picked in."),
+  ];
+
+  // ===========================================================================
+  // 2. Wiring
+  // ===========================================================================
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mChapter = $("#m-chapter"), mTime = $("#m-time"), mTokens = $("#m-tokens"), mLoop = $("#m-loop");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 30, ranksep: 60 },
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run({ hopMs: 220 }); // compile up front so the transport bar has a timeline from step 0
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+    mChapter.textContent = pos.label || "—";
+  }
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  function sampleFrame() {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+    mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
+    mTokens.textContent = String(st.tokens.length);
+    var lp = st.loops.cherrypick;
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/2";
+  }
+  g.ticker.add(sampleFrame);
+
+  var storyDone = false;
+  sb.on("step", function (ev) {
+    paintRail();
+    g.fitView({ animate: true });
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    sb.play();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "story steps         " + STEPS.length + "\n" +
+      "final chapter        " + (sb.position().label || "(none)") + "\n" +
+      "errors               " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  async function auto() {
+    if (g.run()) g.run().speed(3); // keep the whole story comfortably under the check's budget
+    await sleep(200);
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(300);
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      writeReport();
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

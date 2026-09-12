@@ -527,6 +527,15 @@ IIFE's 50KB budget held.
 - `demo/m2.html` — the M2 surface: a live event feed with time-travel scrub, split,
   edge labels, expand/collapse-all, keyboard navigation, SVG/PNG export.
 - `demo/m0.html` — mutation/animation stress check (overlapping appends onto a cyclic graph).
+- `demo/index.html` — the gallery that GitHub Pages serves, with eighteen use-case demos
+  on top of those: CI matrix builds, Terraform applies, git branching, incident replays,
+  multi-agent swarms, tool-use loops, LLM evals, prompt-chain debugging, human-in-the-loop
+  approval, Kafka streaming, A/B experiments, onboarding, a kitchen ticket, an assembly
+  line, a recipe, sequential-vs-parallel, a WebSocket bridge, and a live spec editor. Each
+  is one self-contained page over `dist/smv.iife.min.js`, and each supports `?auto=1`, which
+  runs the whole story unattended and sets `window.__smvExit.done` at the end so
+  `npm run check-demos` can drive every page in headless chromium and fail on any console
+  error, `[smv:` misuse warning, or empty render.
 
 ## Development
 
@@ -536,6 +545,7 @@ npm test          # node --test unit suite + golden-file layout snapshots
 npm run size      # build ESM + IIFE, verify no dagre leaked in, enforce the size budget
 npm run check-doc-versions  # every sparkle-motion-visualizer@ pin in README/docs must match package.json
 npm run check     # test + build + size + check-doc-versions — the CI gate
+npm run check-demos  # every demo/*.html in headless chromium: no errors, no [smv:] warnings, graph rendered
 npm run types     # tsc over types/check.ts (the hand-written .d.ts surface)
 node test/e2e-m0.mjs && node test/e2e-m1.mjs && node test/e2e-m2.mjs   # headless chromium
 node test/e2e-m3.mjs && node test/e2e-m4.mjs                          # engine gates, frame-render determinism

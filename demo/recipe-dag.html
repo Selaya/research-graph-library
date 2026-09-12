@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — the recipe as a DAG</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --good: #2f8f5b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --good: #5cc98c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #pipe {
+    height: 460px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+  .tile span.good { color: var(--good); }
+
+  .legend { margin-top: 16px; color: var(--muted); font-size: 12.5px; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>The recipe as a DAG <small>— lasagne, sequenced honestly</small></h1>
+  <p class="lede">
+    A recipe card reads top to bottom, but most of it doesn't have to happen that way.
+    <em>Make ragù</em> (a collapsed sub-assembly with a summed duration chip), <em>béchamel</em>,
+    <em>pasta</em>, <em>cheese</em>, and the <em>oven</em> are independent — they only meet at
+    <em>assemble</em> (<code>join:"all"</code>), then <em>bake</em>, then <em>rest</em>.
+    Watch the total-duration bar as the graph goes from one long line, to a parallel DAG, to a
+    jarred-sauce shortcut (<code>g.condense</code>, odometer and all), to assembly itself
+    splitting into its real layers (<code>g.split</code>).
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s</span></div>
+  <div class="tile"><i>ragù chip</i><span id="m-ragu">2h</span></div>
+  <div class="tile"><i>assemble · join</i><span id="m-join">0/1</span></div>
+  <div class="tile"><i>nodes on screen</i><span id="m-nodes">0</span></div>
+</div>
+
+<p class="legend">
+  Legend — chip = duration (<code>durationAgg:'sum'</code> rolls the collapsed ragù
+  sub-assembly up), pips under <em>Assemble</em> = join slots, slim bar under the graph =
+  total recipe duration (watch it change as the graph does), odometer = the chip flip when
+  <code>condense</code> lands.
+</p>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The spec starts as a naive, one-line-at-a-time recipe card: ragù -> béchamel -> pasta
+  // -> cheese -> oven -> assemble -> bake -> rest, every step waiting on the last even
+  // though most of them don't depend on each other. The storyboard relayouts it into the
+  // real DAG. `ragu` carries NO duration of its own — its 2h chip is a durationAgg:'sum'
+  // rollup of 10m + 15m + 1h35m, the number the later condense odometer has to honor.
+  // ---------------------------------------------------------------------------
+
+  var SEED = {
+    nodes: [
+      { id: "ragu", label: "Make ragù", collapsed: true, durationAgg: "sum" },
+      { id: "ragu.saute", parent: "ragu", label: "Sauté onion & garlic", data: { duration: "10m" } },
+      { id: "ragu.brown", parent: "ragu", label: "Brown the beef", data: { duration: "15m" } },
+      { id: "ragu.simmer", parent: "ragu", label: "Simmer the sauce", data: { duration: "1h35m" } },
+      { id: "bechamel", label: "Make béchamel", data: { duration: "15m" } },
+      { id: "pasta", label: "Boil pasta sheets", data: { duration: "10m" } },
+      { id: "cheese", label: "Grate cheese", data: { duration: "5m" } },
+      { id: "oven", label: "Preheat oven", data: { duration: "15m" } },
+      { id: "assemble", label: "Assemble the lasagne", join: "all", data: { duration: "20m" } },
+      { id: "bake", label: "Bake", data: { duration: "45m" } },
+      { id: "rest", label: "Rest before slicing", data: { duration: "15m" } },
+    ],
+    edges: [
+      { id: "rs1", source: "ragu.saute", target: "ragu.brown" },
+      { id: "rs2", source: "ragu.brown", target: "ragu.simmer" },
+      { id: "n1", source: "ragu.simmer", target: "bechamel" },
+      { id: "n2", source: "bechamel", target: "pasta" },
+      { id: "n3", source: "pasta", target: "cheese" },
+      { id: "n4", source: "cheese", target: "oven" },
+      { id: "n5", source: "oven", target: "assemble" },
+      { id: "n6", source: "assemble", target: "bake" },
+      { id: "n7", source: "bake", target: "rest" },
+    ],
+  };
+
+  var PARALLEL_EDGES = [
+    { id: "p1", source: "ragu.simmer", target: "assemble" },
+    { id: "p2", source: "bechamel", target: "assemble" },
+    { id: "p3", source: "pasta", target: "assemble" },
+    { id: "p4", source: "cheese", target: "assemble" },
+    { id: "p5", source: "oven", target: "assemble" },
+  ];
+  var CHAIN_EDGES = ["n1", "n2", "n3", "n4", "n5"];
+
+  var RAGU_JARRED = { id: "ragu.jarred", label: "Use jarred sauce", data: { duration: "2m" } };
+
+  var LAYERS = [
+    { id: "assemble.layer1", label: "Sauce & noodles", join: "all", data: { duration: "8m" } },
+    { id: "assemble.layer2", label: "Béchamel & cheese", data: { duration: "7m" } },
+    { id: "assemble.layer3", label: "Repeat & top", data: { duration: "5m" } },
+  ];
+  var LAYER_EDGES = [
+    { id: "a1", source: "assemble.layer1", target: "assemble.layer2" },
+    { id: "a2", source: "assemble.layer2", target: "assemble.layer3" },
+  ];
+
+  var RUN_OPTS = {
+    hopMs: 180,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 360;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 160 + 700 * f;
+    },
+  };
+
+  function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
+  function cam(target) { return { op: "camera", args: [target] }; }
+  function playUntil(id) { return { op: "run.play", args: [{ until: id }] }; }
+
+  var STEPS = [
+    { label: "the recipe card" },
+    cap("Follow the card top to bottom, one step after the last — the whole afternoon in a single line."),
+    playUntil("assemble"),
+    cap("That slim bar under the graph is the naive total: everything waits on everything before it.", { place: "bottom" }),
+
+    { label: "cooks in parallel" },
+    { op: "run.seek", ms: 0 },
+    { op: "batch", steps: CHAIN_EDGES.map(function (id) { return { op: "removeEdge", args: [id] }; }).concat(
+        PARALLEL_EDGES.map(function (e) { return { op: "addEdge", args: [e] }; })) },
+    cam({ fit: true }),
+    cap("Really, only assembly needs everything else finished. Ragù, béchamel, pasta, cheese, and the oven can all happen at once."),
+    playUntil("assemble"),
+    cap("Same bar, though — a 2-hour simmer is still the long pole no relayout fixes.", { place: "bottom" }),
+
+    { label: "or a shortcut" },
+    { op: "run.seek", ms: 0 },
+    cam({ node: "ragu", k: 1.7, pad: 60 }),
+    { op: "condense", args: [["ragu"], RAGU_JARRED] },
+    cap("Or skip the simmer — a good jarred sauce lands in 2 minutes, not 2 hours."),
+    cam({ fit: true }),
+    playUntil("assemble"),
+    cap("Watch the bar: béchamel's 15 minutes is the new long pole. Everything else finishes early.", { place: "bottom" }),
+
+    { label: "layer as you go" },
+    { op: "run.seek", ms: 0 },
+    cam({ node: "assemble", k: 1.8, pad: 50 }),
+    { op: "split", args: ["assemble", { nodes: LAYERS, edges: LAYER_EDGES }] },
+    cap("And assembly isn't one step either — sauce and noodles, then béchamel and cheese, then repeat and top."),
+    cam({ fit: true }),
+    { op: "run.play", args: [{}] },
+    cap("Dinner in under two hours, and every step is honestly ordered."),
+
+    { label: "done" },
+    { op: "caption", args: [null] },
+  ];
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mTime = $("#m-time"), mRagu = $("#m-ragu"), mJoin = $("#m-join"), mNodes = $("#m-nodes");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 24, ranksep: 48 },
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Observations — sampled from the public run state and rendered DOM.
+  // ---------------------------------------------------------------------------
+
+  var obs = { firstDuration: null, parallelDuration: null, condensedDuration: null, finalDuration: null, raguChipBefore: null, raguChipAfter: null };
+
+  var nodeEls = function () { return document.querySelectorAll("#pipe .smv-node"); };
+  var chipOf = function (id) {
+    var el = document.querySelector('#pipe .smv-node[data-id="' + id + '"] text.smv-chip');
+    return el ? el.textContent : null;
+  };
+
+  function scanNaN() {
+    var bad = [];
+    var all = document.querySelectorAll("#pipe *");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      for (var a = 0; a < el.attributes.length; a++) {
+        var at = el.attributes[a];
+        if (/NaN|Infinity/.test(at.value)) bad.push((el.getAttribute("class") || el.nodeName) + "@" + at.name + "=" + at.value);
+      }
+      if (el.children.length === 0 && /NaN|Infinity/.test(el.textContent || "")) {
+        bad.push((el.getAttribute("class") || el.nodeName) + "#text=" + el.textContent);
+      }
+    }
+    return bad;
+  }
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  function sampleFrame() {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+    mTime.textContent = fmt(run.time());
+    var ragu = chipOf("ragu") || chipOf("ragu.jarred");
+    if (ragu) mRagu.textContent = ragu;
+    var jId = st.joins.assemble ? "assemble" : (st.joins["assemble.layer1"] ? "assemble.layer1" : null);
+    var j = jId ? st.joins[jId] : null;
+    mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "0/1";
+    mNodes.textContent = String(nodeEls().length);
+  }
+  g.ticker.add(sampleFrame);
+
+  var checks = {};
+  var storyDone = false;
+
+  sb.on("step", function (ev) {
+    paintRail();
+    g.fitView({ animate: true });
+    var label = sb.position().label;
+    if (label === "cooks in parallel" && obs.firstDuration == null) obs.firstDuration = g.run().duration;
+    if (label === "or a shortcut" && obs.parallelDuration == null) obs.parallelDuration = g.run().duration;
+    if (label === "layer as you go" && obs.condensedDuration == null) obs.condensedDuration = g.run().duration;
+    phaseEl.textContent = "step " + ev.index + " · " + (label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+
+  // ---------------------------------------------------------------------------
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  function transportPlay() {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    transportPlay();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "naive (serial) duration     " + JSON.stringify(obs.firstDuration) + "ms\n" +
+      "parallel duration           " + JSON.stringify(obs.parallelDuration) + "ms\n" +
+      "after condense (jarred)     " + JSON.stringify(obs.condensedDuration) + "ms\n" +
+      "final nodes on screen       " + nodeEls().length + "\n" +
+      "ragù chip now               " + chipOf("ragu.jarred") + "\n" +
+      "NaN in DOM                  " + (checks.nan && checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
+      "errors                      " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  async function auto() {
+    if (AUTO) g.run().speed(1.8);
+    await sleep(200);
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(400);
+    checks.nan = scanNaN();
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      checks.nan = checks.nan || scanNaN();
+      writeReport();
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

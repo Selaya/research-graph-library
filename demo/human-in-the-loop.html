@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — Human-in-the-loop approval</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --good: #1f8f5f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --good: #46c48b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 76ch; }
+  p.lede strong { color: var(--ink); font-weight: 600; }
+
+  .lookfor { margin: 12px 0 0; padding: 10px 14px; border: 1px solid var(--line);
+             border-radius: 10px; background: var(--card); max-width: 76ch; }
+  .lookfor b { display: block; font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+               color: var(--muted); margin-bottom: 6px; }
+  .lookfor ul { margin: 0; padding-left: 18px; color: var(--ink); }
+  .lookfor li { margin: 2px 0; }
+  .lookfor code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #pipe {
+    height: 480px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+  .tile[data-hot] span { color: var(--good); }
+
+  .legend { margin-top: 16px; color: var(--muted); font-size: 12.5px; max-width: 90ch; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  footer { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+  footer a { color: var(--accent); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Human-in-the-loop approval <small>— every draft reviewed, then a 10% sample</small></h1>
+  <p class="lede">
+    An AI drafts a customer-support reply. Today, <strong>every</strong> draft waits on a human
+    reviewer before it can send, and a rejection sends it back for changes — up to three
+    times. Watch that cost (<strong>≈4h</strong> per reply, mostly queue time) get replaced by
+    an automated approver that clears most drafts in <strong>12 seconds</strong> and routes
+    only a sample to a person. Zoom is ctrl/⌘ + wheel; plain scroll is never hijacked.
+  </p>
+  <div class="lookfor">
+    <b>What to look for</b>
+    <ul>
+      <li>The dashed <em>needs changes</em> arc ticking an iteration badge, capped at
+        <code>maxIterations: 3</code>.</li>
+      <li><em>Policy check</em> + <em>Human review</em> folding into one node — the duration
+        chip odometers <code>4h → 12s</code>, with a “faster” badge over the merge.</li>
+      <li>A new fan-out after automation: most drafts go straight to <em>Send to customer</em>,
+        a sample peels off to <em>Human spot-check</em>.</li>
+      <li>The total-duration bar under the graph shrink to match.</li>
+    </ul>
+  </div>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>chapter</i><span id="m-chapter">—</span></div>
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>review loop</i><span id="m-loop">iter 0/3</span></div>
+  <div class="tile" id="t-total"><i>hands-on total</i><span id="m-total">—</span></div>
+</div>
+
+<p class="legend">
+  Legend — chip = duration, ✋ manual / ⚡ automated, dashed arc = the retry loop
+  (<code>loop:true, maxIterations:3</code>), thickened edge after automation = a redirected
+  edge condense re-pointed, slim bar under the graph = total hands-on duration across every
+  node currently on screen.
+</p>
+
+<div id="report"></div>
+
+<footer>
+  ← back to the <a href="index.html">demo index</a> · built with
+  <code>sparkle-motion-visualizer</code>
+</footer>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ===========================================================================
+  // 1. The graph
+  //
+  // draft -> policy -> review -> publish, with a bounded "needs changes" loop from
+  // review back to draft. Automation later condenses [policy, review] into one
+  // "auto-approver" node and adds a small spot-check side node fed by a fan-out.
+  // ===========================================================================
+
+  function manual(id, label, duration, extra) {
+    var n = { id: id, label: label, data: { duration: duration, mode: "manual" } };
+    if (extra) for (var k in extra) n[k] = extra[k];
+    return n;
+  }
+  function automated(id, label, duration, extra) {
+    var n = { id: id, label: label, data: { duration: duration, mode: "automated" } };
+    if (extra) for (var k in extra) n[k] = extra[k];
+    return n;
+  }
+  function add(node) { return { op: "addNode", args: [node] }; }
+  function link(id, s, t, extra) {
+    var e = { id: id, source: s, target: t };
+    if (extra) for (var k in extra) e[k] = extra[k];
+    return { op: "addEdge", args: [e] };
+  }
+
+  // Mount holds only the seed node; the storyboard grows the rest, so the pipeline is
+  // SEEN assembling (§6.1).
+  var SEED = { nodes: [automated("draft", "Draft reply", "3m")], edges: [] };
+
+  var WAVE_POLICY = [add(automated("policy", "Policy check", "8s")), link("e1", "draft", "policy")];
+  var WAVE_REVIEW = [add(manual("review", "Human review", "4h")), link("e2", "policy", "review")];
+  var WAVE_PUBLISH = [
+    add(automated("publish", "Send to customer", "2m")),
+    link("e3", "review", "publish"),
+    link("reject", "review", "draft", { loop: true, maxIterations: 3, label: "needs changes" }),
+  ];
+
+  // The two automation moments (Act 2). [policy, review] is convex only once the reject
+  // loop is gone — that loop is exactly what makes {policy, review} non-convex (draft is
+  // reachable from review and draft flows straight back into policy), so retiring the loop
+  // is not just narrative color, it is what makes the condense legal.
+  var CONDENSE_SET = ["policy", "review"];
+  var AUTO_APPROVER = automated("auto-approver", "Auto-approver", "12s");
+  var SPOTCHECK = manual("spotcheck", "Human spot-check", "10m");
+
+  // ===========================================================================
+  // 2. The storyboard — two acts, one serializable op array
+  // ===========================================================================
+
+  var PACE = AUTO ? 0.6 : 1;
+  var P = function (ms) { return Math.round(ms * PACE); };
+
+  function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
+  function cam(target) {
+    var t = {};
+    for (var k in target) t[k] = target[k];
+    t.dur = P(target.dur == null ? 700 : target.dur);
+    return { op: "camera", args: [t] };
+  }
+  function hold(ms) { return { op: "wait", ms: P(ms) }; }
+  function grow(steps, ms) { return { op: "batch", steps: steps, dur: P(ms) }; }
+  function spot(ids, variant, dim) {
+    return { op: "highlight", args: [{ nodes: ids, variant: variant, dim: !!dim, pulse: true }] };
+  }
+
+  var STEPS = [
+    // ---- ACT 1 — every draft goes through a human -------------------------
+    { label: "assemble" },
+    cap("An AI drafts a reply. Watch what has to happen before it reaches the customer."),
+    cam({ node: "draft", k: 1.4, pad: 56 }),
+    hold(700),
+    grow(WAVE_POLICY, 500),
+    hold(500),
+    cam({ nodes: ["draft", "policy"], pad: 72 }),
+    grow(WAVE_REVIEW, 550),
+    hold(500),
+    grow(WAVE_PUBLISH, 550),
+    cam({ fit: true, pad: 56 }),
+    hold(800),
+
+    { label: "human review" },
+    cap("Every draft is read by a person before it can send — a rejection sends it back for changes, up to 3 times."),
+    cam({ node: "review", k: 1.5, pad: 56 }),
+    spot(["review"], "focus"),
+    hold(600),
+    { op: "run.play", until: "publish" },
+    { op: "clearHighlight" },
+    cam({ fit: true, pad: 56 }),
+    cap("Three reject cycles later, this reply finally sent — about 4 hours of hands-on time, almost all of it waiting on review."),
+    hold(1800),
+
+    // ---- ACT 2 — automation lands, review becomes a sample -----------------
+    { label: "automate" },
+    cap("Automate the check-and-review step."),
+    cam({ nodes: ["policy", "review"], k: 1.35, pad: 72 }),
+    spot(CONDENSE_SET, "warn", true),
+    hold(900),
+    cap("The reject loop won’t be needed — the new approver either clears a draft outright or hands it to a person."),
+    { op: "removeEdge", args: ["reject"] },
+    hold(400),
+    { op: "condense", args: [CONDENSE_SET, AUTO_APPROVER] },
+    { op: "highlight", args: [{ nodes: [AUTO_APPROVER.id], variant: "ok" }] },
+    cap("Policy check + human review, merged into one automated approver: 4h → 12s."),
+    hold(1700),
+    { op: "clearHighlight" },
+
+    { label: "spot-check" },
+    cap("A model shouldn’t clear every reply blind — route a sample of them to a person instead."),
+    grow([add(SPOTCHECK), link("f1", "auto-approver", "spotcheck", { label: "10% sample" })], 550),
+    cam({ nodes: ["auto-approver", "spotcheck", "publish"], pad: 72 }),
+    hold(600),
+    { op: "run.seek", ms: 0 },
+    hold(400),
+    { op: "run.play" },
+    cap("Same pipeline, same policy — what took 4 hours and up to 3 rounds now takes about 12 seconds."),
+    hold(1800),
+
+    { label: "wrap-up" },
+    cam({ fit: true, pad: 56 }),
+    { op: "highlight", args: [{ nodes: ["auto-approver", "spotcheck"], variant: "ok" }] },
+    cap("Human-in-the-loop, redesigned: full review became a 10% spot-check."),
+    hold(2200),
+    { op: "clearHighlight" },
+  ];
+
+  // ===========================================================================
+  // 3. Run pacing (D4 opts, not engine internals) — a log curve over declared
+  //    durations so 8s / 4h / 10m read as visibly different beats, and a flat
+  //    blink for whatever is already automated.
+  // ===========================================================================
+
+  var RUN_OPTS = {
+    iterations: { reject: 3 },      // capped to the edge's own max
+    hopMs: P(180),
+    dwell: function (sec, ctx) {
+      var mode = ctx.node && ctx.node.data && ctx.node.data.mode;
+      if (mode === "automated" || mode === "auto") return P(160);
+      if (sec == null) return P(320);
+      var f = Math.pow(sec / Math.max(ctx.maxSec, 1), 0.5);
+      return P(220 + 900 * f);
+    },
+  };
+
+  // ===========================================================================
+  // 4. Mount
+  // ===========================================================================
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mChapter = $("#m-chapter"), mTime = $("#m-time"), mLoop = $("#m-loop");
+  var mTotal = $("#m-total"), tTotal = $("#t-total");
+
+  var g, run;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 30, ranksep: 60 },
+      animation: { duration: 420, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    run = g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+    if (AUTO) run.speed(0.8); // extra headroom so ?auto=1 finishes well under the 45s budget
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+    mChapter.textContent = (pos.label || "—") + " ";
+    var em = document.createElement("em");
+    em.textContent = pos.index + "/" + pos.total;
+    mChapter.appendChild(em);
+  }
+
+  // ---- readouts, sampled on the SHARED ticker (D1) ---------------------------
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+  var obs = { loopIteration: 0, loopMax: 0, loopBadge: "", totalSeen: [] };
+
+  var totalLabel = function () {
+    var el = document.querySelector("#pipe .smv-totalbar-label");
+    return el ? el.textContent : "";
+  };
+  var loopBadgeText = function () {
+    var el = document.querySelector("#pipe .smv-loop-badge");
+    return el ? el.textContent : "";
+  };
+  var chipOf = function (id) {
+    var el = document.querySelector('#pipe .smv-node[data-id="' + id + '"] text.smv-chip');
+    return el ? el.textContent : null;
+  };
+  var nodeEls = function () { return document.querySelectorAll("#pipe .smv-node"); };
+
+  function sampleFrame() {
+    var r = g.run();
+    if (!r) return;
+    var st = r.state();
+    var lp = st.loops.reject;
+    if (lp) {
+      if (lp.max > obs.loopMax) obs.loopMax = lp.max;
+      if (lp.iteration > obs.loopIteration) {
+        obs.loopIteration = lp.iteration;
+        obs.loopBadge = loopBadgeText() || obs.loopBadge;
+      }
+    }
+    mTime.textContent = fmt(r.time()) + " / " + fmt(r.duration);
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/3";
+    var t = totalLabel();
+    if (t && mTotal.textContent !== t) {
+      mTotal.textContent = t;
+      if (obs.totalSeen[obs.totalSeen.length - 1] !== t) obs.totalSeen.push(t);
+    }
+  }
+  g.ticker.add(sampleFrame);
+
+  // ---- story wiring ------------------------------------------------------------
+
+  var checks = {};
+  var storyDone = false;
+
+  sb.on("step", function (ev) {
+    paintRail();
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+    var step = STEPS[ev.index];
+    if (step && step.op === "condense") {
+      var merged = step.args[1].id;
+      checks[merged] = { chip: chipOf(merged), nodes: nodeEls().length, total: totalLabel() };
+    }
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () {
+    storyDone = true;
+    paintRail();
+    phaseEl.textContent = "story complete";
+    tTotal.setAttribute("data-hot", "");
+  });
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 40000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  function transportPlay() {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    transportPlay();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "review loop              " + checks_loopIteration() + "\n" +
+      "condense · auto-approver  " + JSON.stringify(checks["auto-approver"]) + "\n" +
+      "total-duration bar        " + JSON.stringify(obs.totalSeen) + "\n" +
+      "errors                    " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+  function checks_loopIteration() {
+    return obs.loopIteration + " of max " + obs.loopMax + "  (" + (obs.loopBadge || loopBadgeText()) + ")";
+  }
+
+  async function auto() {
+    await sleep(300);              // mount's initial fit gets one beat
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(400);              // the last commit settles
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      writeReport();
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

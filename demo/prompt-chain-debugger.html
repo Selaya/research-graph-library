@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — Prompt chain debugger</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --good: #2e8f5b;
+    --warm: #b97400;
+    --bad: #c23b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --good: #4fbe85;
+      --warm: #e0a53a; --bad: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1180px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 82ch; }
+  p.lede code, ul.watch code, .legend code {
+    font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink);
+  }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .stage { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; align-items: stretch; }
+  @media (max-width: 900px) { .stage { grid-template-columns: minmax(0, 1fr); } }
+
+  #pipe {
+    height: 400px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  #inspect {
+    height: 400px; overflow: auto; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); padding: 14px 15px;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+  #inspect h2 { font-size: 13px; margin: 0; letter-spacing: -.01em; }
+  #inspect .sub { color: var(--muted); font-size: 11.5px; margin: 2px 0 10px; }
+  .pill {
+    float: right; font: 600 10.5px/1 inherit; letter-spacing: .05em; text-transform: uppercase;
+    padding: 5px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+  }
+  .pill[data-s="running"] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .pill[data-s="ok"] { color: var(--good); border-color: var(--good); }
+  .pill[data-s="blocked"] { color: #fff; background: var(--bad); border-color: var(--bad); }
+  dl.rows { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0 0 12px; }
+  dl.rows dt { color: var(--muted); font-size: 11.5px; }
+  dl.rows dd {
+    margin: 0; font-size: 11.5px; font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-word;
+  }
+  .blk { margin: 0 0 12px; }
+  .blk i {
+    display: block; font-style: normal; font-size: 10.5px; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 4px;
+  }
+  .blk pre {
+    margin: 0; padding: 8px 9px; border-radius: 8px; border: 1px solid var(--line);
+    background: rgba(128,138,160,.09); white-space: pre-wrap; word-break: break-word;
+    font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .blk pre.bad { border-color: var(--bad); color: var(--bad); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 10px; margin-top: 14px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+  .tile span.bad { color: var(--bad); }
+  .tile span.good { color: var(--good); }
+
+  ul.watch { margin: 16px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; max-width: 92ch; }
+  ul.watch li { margin: 3px 0; }
+  .legend { margin: 10px 0 0; color: var(--muted); font-size: 12.5px; }
+
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Prompt chain debugger <small>— live mode, replaying one LLM request</small></h1>
+  <p class="lede">
+    A single customer turn walks through a six-step LLM chain: <em>classify intent</em>
+    fans out to <em>retrieve docs</em> (one embedding query spawning four chunk reads) and
+    <em>load user profile</em>, both AND-join into <em>compose answer</em>, then
+    <em>safety filter</em> and <em>respond</em>. The trace is fed in as it happens with
+    <code>g.run({mode:"live"})</code> — <code>start</code> / <code>finish</code> /
+    <code>spawn</code> / <code>fail</code> — and every step carries the payload a debugger
+    would want: prompt, model, tokens in/out, latency. The safety filter <b>blocks</b> the
+    first draft, so the chain takes its bounded retry edge back to <em>compose answer</em>.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the trace</button>
+  <button id="next" type="button">Next step ▸</button>
+  <button id="live" type="button" disabled>Back to live</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready — press play, or step through and click any node</span>
+</div>
+
+<div class="stage">
+  <div id="pipe"></div>
+  <aside id="inspect">
+    <span class="pill" id="ins-status" data-s="idle">idle</span>
+    <h2 id="ins-title">No step selected</h2>
+    <p class="sub" id="ins-sub">Play the trace, or click a node once it has run, to inspect
+      the payload that step logged.</p>
+    <dl class="rows" id="ins-rows"></dl>
+    <div class="blk"><i id="ins-in-label">prompt</i><pre id="ins-prompt">—</pre></div>
+    <div class="blk"><i>output</i><pre id="ins-output">—</pre></div>
+  </aside>
+</div>
+
+<div class="grid">
+  <div class="tile"><i>step</i><span id="m-step">0/8 <em>· idle</em></span></div>
+  <div class="tile"><i>chain latency</i><span id="m-lat">0 ms</span></div>
+  <div class="tile"><i>tokens in / out</i><span id="m-tok">0 / 0</span></div>
+  <div class="tile"><i>compose join</i><span id="m-join">0/2</span></div>
+  <div class="tile"><i>retry loop</i><span id="m-loop">0/2</span></div>
+  <div class="tile"><i>view clock</i><span id="m-clock">0.0s <em>· live</em></span></div>
+</div>
+
+<ul class="watch">
+  <li><b>Runtime fan-out:</b> <em>retrieve docs</em> gets <code>run.spawn(id, 3)</code> on
+    top of its own token — the <code>×4</code> occupancy badge is four chunk reads sharing
+    one node.</li>
+  <li><b>join:"all":</b> <em>compose answer</em> has two non-loop in-edges, so it waits for
+    both branches; the join tile counts arrivals, and all five context tokens (4 chunks +
+    the profile) sit on the node before it starts.</li>
+  <li><b>The block:</b> <code>run.fail("safety", {reason})</code> is
+    <code>finish()</code>'s terminal sibling — it consumes <em>every</em> occupant and fans
+    nothing out, so <em>respond</em> stays dark. Watch the node turn red and the caption
+    name the rule.</li>
+  <li><b>The retry:</b> the dashed arc back to <em>compose answer</em> is
+    <code>loop:true, maxIterations:2</code>. Restarting the failed branch with an explicit
+    <code>start()</code> is what ticks it — the badge reads <code>1/2</code>.</li>
+  <li><b>Time travel:</b> once the trace ends, clicking a node scrubs the live run back to
+    that step (<code>run.seek</code>) and shows its payload; <b>Back to live</b> is
+    <code>run.follow()</code>. The transport bar under the graph scrubs the same log.</li>
+</ul>
+
+<p class="legend">
+  Chips under each node are <code>data.duration</code> — the latency that step actually
+  took. Dashed pips are live occupancy; the highlighted node is
+  <code>g.highlight({variant:"focus", dim:true})</code>, the spotlight the inspector is
+  pointed at.
+</p>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The chain. Durations are the real per-step latencies the trace reports, so the
+  // pipeline preset's chips double as the latency readout.
+  // ---------------------------------------------------------------------------
+  var SPEC = {
+    nodes: [
+      { id: "classify", label: "Classify intent", data: { duration: "0.31s" } },
+      { id: "retrieve", label: "Retrieve docs", data: { duration: "0.48s" } },
+      { id: "profile", label: "Load user profile", data: { duration: "0.09s" } },
+      { id: "compose", label: "Compose answer", join: "all", data: { duration: "2.4s" } },
+      { id: "safety", label: "Safety filter", data: { duration: "0.22s" } },
+      { id: "respond", label: "Respond", data: { duration: "0.35s" } },
+    ],
+    edges: [
+      { id: "e1", source: "classify", target: "retrieve" },
+      { id: "e2", source: "classify", target: "profile" },
+      { id: "e3", source: "retrieve", target: "compose", label: "4 chunks" },
+      { id: "e4", source: "profile", target: "compose" },
+      { id: "e5", source: "compose", target: "safety", label: "draft" },
+      { id: "e6", source: "safety", target: "respond" },
+      // The retry edge. loop:true MUST carry maxIterations > 0 or addEdge throws
+      // [smv:unbounded-loop] at mount time.
+      { id: "retry", source: "safety", target: "compose", loop: true, maxIterations: 2 },
+    ],
+  };
+
+  // Each entry is one inspector step: the live-mode calls it makes, plus the payload that
+  // step logged. `spawn` adds runtime fan-out on top of the node's own token.
+  var TRACE = [
+    {
+      node: "classify", title: "Classify intent", dwell: 760, result: "ok",
+      caption: "1 · classify intent — haiku routes the turn in 310 ms, then fans out.",
+      pay: {
+        kind: "model", who: "claude-haiku-4.5", tin: 412, tout: 18, ms: 310,
+        rows: [["temperature", "0"], ["max_tokens", "64"], ["cache", "read 380 · write 0"]],
+        inLabel: "prompt",
+        prompt: 'system: Route the customer turn to exactly one intent in intents.yaml.\nuser: "my card got charged twice for the Pro plan this morning —\n       can you refund one of them?"',
+        output: '{ "intent": "billing.duplicate_charge",\n  "confidence": 0.94,\n  "needs_docs": true,\n  "needs_profile": true }',
+      },
+    },
+    {
+      node: "retrieve", title: "Retrieve docs", dwell: 820, result: "ok", spawn: 3,
+      caption: "2 · retrieve docs — one embedding query spawns 4 parallel chunk reads (×4).",
+      pay: {
+        kind: "tool", who: "voyage-3 · pgvector", tin: 18, tout: 0, ms: 480,
+        rows: [["index", "help-center@2026-08-30"], ["top_k", "4"], ["min_score", "0.72"]],
+        inLabel: "query",
+        prompt: 'embed("duplicate charge refund window pro plan") → 1024d\nsearch(index=help-center, top_k=4, filter=lang:en)',
+        output: '#1 0.86  billing/refunds.md#L40-72\n#2 0.83  billing/duplicate-charges.md#L1-28\n#3 0.79  billing/refunds-internal.md#L12-40   ← internal only\n#4 0.74  pricing/pro-plan.md#L88-104',
+      },
+    },
+    {
+      node: "profile", title: "Load user profile", dwell: 620, result: "ok",
+      caption: "3 · load user profile — a plain tool call on the sibling branch, 90 ms.",
+      pay: {
+        kind: "tool", who: "accounts.getCustomer (postgres)", tin: 0, tout: 0, ms: 90,
+        rows: [["statement", "SELECT … FROM customers WHERE id = $1"], ["rows", "1"], ["cache", "miss"]],
+        inLabel: "arguments",
+        prompt: '{ "customer_id": "cus_8Q31ZtA", "fields": ["plan","seats","card_last4","mrr"] }',
+        output: '{ "plan": "pro", "seats": 12, "card_last4": "4242",\n  "mrr_usd": 588, "since": "2023-04-11", "region": "eu-west" }',
+      },
+    },
+    {
+      node: "compose", title: "Compose answer", dwell: 1320, result: "ok",
+      caption: "4 · compose answer — join:\"all\" held it until both branches arrived (5 tokens).",
+      pay: {
+        kind: "model", who: "claude-sonnet-4.5", tin: 4318, tout: 402, ms: 2400,
+        rows: [["context", "4 chunks + profile"], ["temperature", "0.3"], ["stream", "on"]],
+        inLabel: "prompt",
+        prompt: 'system: Answer only from the retrieved context. Cite doc ids.\ncontext: [#1 refunds.md] [#2 duplicate-charges.md]\n         [#3 refunds-internal.md] [#4 pro-plan.md]\nprofile: plan=pro seats=12 card_last4=4242',
+        output: 'Both charges landed on 12 Mar. I can refund the duplicate — Pro\nplan refunds clear in 3–5 business days [#1]. Heads up: from\n1 Oct the duplicate-charge fee drops to 0% [#3] …',
+      },
+    },
+    {
+      node: "safety", title: "Safety filter", dwell: 760, result: "blocked",
+      reason: "disclosure.internal_only — draft quotes billing/refunds-internal.md",
+      caption: "5 · safety filter BLOCKS — run.fail() eats every occupant; nothing reaches respond.",
+      pay: {
+        kind: "model", who: "claude-haiku-4.5 · policy", tin: 447, tout: 31, ms: 220,
+        rows: [["policy", "support-v7"], ["checked", "4 spans"], ["action", "block"]],
+        inLabel: "prompt",
+        prompt: 'system: Score the draft against support-v7. Return JSON only.\ndraft: "… from 1 Oct the duplicate-charge fee drops to 0% [#3] …"',
+        output: '{ "action": "block",\n  "rule": "disclosure.internal_only",\n  "span": "chunk #3 · billing/refunds-internal.md",\n  "note": "unreleased fee change quoted to a customer" }',
+      },
+    },
+    {
+      node: "compose", title: "Compose answer · retry 1/2", dwell: 1180, result: "ok",
+      edges: ["retry"],
+      caption: "6 · the loop edge ticks 1/2 — compose re-runs with chunk #3 struck out.",
+      pay: {
+        kind: "model", who: "claude-sonnet-4.5", tin: 4102, tout: 318, ms: 1900,
+        rows: [["context", "3 chunks + profile"], ["dropped", "#3 internal"], ["attempt", "2 of 2"]],
+        inLabel: "prompt",
+        prompt: 'system: Answer only from the retrieved context. Cite doc ids.\n        Never cite internal-only documents. Chunk #3 is withheld.\ncontext: [#1 refunds.md] [#2 duplicate-charges.md] [#4 pro-plan.md]',
+        output: 'Both charges landed on 12 Mar — I have refunded the duplicate.\nIt clears back to the card ending 4242 in 3–5 business days [#1].\nNothing else on the account was affected [#2].',
+      },
+    },
+    {
+      node: "safety", title: "Safety filter · pass 2", dwell: 700, result: "ok",
+      caption: "7 · safety filter passes — an explicit start() is what clears a sticky 'failed'.",
+      pay: {
+        kind: "model", who: "claude-haiku-4.5 · policy", tin: 389, tout: 12, ms: 180,
+        rows: [["policy", "support-v7"], ["checked", "3 spans"], ["action", "allow"]],
+        inLabel: "prompt",
+        prompt: 'system: Score the draft against support-v7. Return JSON only.\ndraft: "… refunded the duplicate. It clears back to the card …"',
+        output: '{ "action": "allow", "rule": null, "checked": 3 }',
+      },
+    },
+    {
+      node: "respond", title: "Respond", dwell: 680, result: "ok",
+      caption: "8 · respond — chain complete: 3 model calls, one retry, 5.9 s end to end.",
+      pay: {
+        kind: "tool", who: "stream to client (SSE)", tin: 0, tout: 318, ms: 350,
+        rows: [["ttft", "240 ms"], ["chunks", "37"], ["finish_reason", "end_turn"]],
+        inLabel: "envelope",
+        prompt: '{ "conversation": "cnv_41f9", "turn": 12, "transport": "sse" }',
+        output: 'HTTP 200 · 37 chunks · 318 tokens · end_turn\ntrace: 3 model calls · 1 retry · 5 930 ms total',
+      },
+    },
+  ];
+
+  var HOP = 300;      // edge-crossing time for the live run's hop fills
+  var GAP = 260;      // breathing room after each step, so the hop is visible
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), reportEl = $("#report");
+  var playBtn = $("#play"), nextBtn = $("#next"), liveBtn = $("#live"), resetBtn = $("#reset");
+  var insTitle = $("#ins-title"), insSub = $("#ins-sub"), insStatus = $("#ins-status");
+  var insRows = $("#ins-rows"), insPrompt = $("#ins-prompt"), insOutput = $("#ins-output");
+  var insInLabel = $("#ins-in-label");
+  var mStep = $("#m-step"), mLat = $("#m-lat"), mTok = $("#m-tok"),
+      mJoin = $("#m-join"), mLoop = $("#m-loop"), mClock = $("#m-clock");
+
+  var g, run;
+  try {
+    g = SparkleMotion.mount("#pipe", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 30, ranksep: 62 },
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+    });
+    // Mode B: no compiled schedule at all — the graph animates off the log below.
+    run = g.run({ mode: "live", hopMs: HOP });
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var cursor = 0;            // next TRACE index to play
+  var played = [];           // indices already played, in order
+  var busy = false;
+  var storyDone = false;
+  var totals = { tin: 0, tout: 0, ms: 0 };
+  var observed = { failReason: null, loopAt: 0, spawnOcc: 0 };
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function fmtS(ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; }
+  function num(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
+
+  // ---------------------------------------------------------------------------
+  // The inspector panel.
+  // ---------------------------------------------------------------------------
+  function paintPayload(step, status) {
+    var p = step.pay;
+    insTitle.textContent = step.title;
+    insSub.textContent = (p.kind === "model" ? "model call · " : "tool call · ") + p.who;
+    insStatus.textContent = status;
+    insStatus.setAttribute("data-s", status);
+    insRows.textContent = "";
+    var rows = [
+      ["latency", p.ms + " ms"],
+      ["tokens in", p.tin ? num(p.tin) : "—"],
+      ["tokens out", p.tout ? num(p.tout) : "—"],
+    ].concat(p.rows);
+    rows.forEach(function (r) {
+      var dt = document.createElement("dt"); dt.textContent = r[0];
+      var dd = document.createElement("dd"); dd.textContent = r[1];
+      insRows.appendChild(dt); insRows.appendChild(dd);
+    });
+    insInLabel.textContent = p.inLabel;
+    insPrompt.textContent = p.prompt;
+    insOutput.textContent = p.output;
+    insOutput.className = status === "blocked" ? "bad" : "";
+  }
+
+  function spotlight(step, variant) {
+    g.highlight({
+      nodes: [step.node],
+      edges: step.edges || [],
+      variant: variant || "focus",
+      dim: true,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // One trace step: the live-mode calls, the spotlight, the caption, the payload.
+  // ---------------------------------------------------------------------------
+  async function playStep(i) {
+    var s = TRACE[i];
+    busy = true;
+    syncButtons();
+    if (!run.following) run.follow();
+
+    spotlight(s, s.result === "blocked" ? "warn" : "focus");
+    g.caption(s.caption, { place: "bottom" });
+    paintPayload(s, "running");
+    phaseEl.textContent = "step " + (i + 1) + "/" + TRACE.length + " · " + s.title;
+
+    if (s.node === "safety" && s.result === "blocked") {
+      g.camera({ node: "safety", k: 1.5, pad: 70, dur: 520 });
+    }
+
+    s.at = run.start(s.node);           // the stamped time — what a later seek() aims at
+    if (s.spawn) {
+      await sleep(200);
+      run.spawn(s.node, s.spawn);       // runtime fan-out: the ×4 occupancy badge
+      observed.spawnOcc = Math.max(observed.spawnOcc, run.state().nodes[s.node].occupancy);
+    }
+    await sleep(s.dwell);
+
+    if (s.result === "blocked") {
+      run.fail(s.node, { reason: s.reason });
+      observed.failReason = s.reason;
+    } else {
+      run.finish(s.node);
+    }
+    totals.tin += s.pay.tin; totals.tout += s.pay.tout; totals.ms += s.pay.ms;
+    paintPayload(s, s.result);
+    played.push(i);
+    cursor = i + 1;
+
+    if (i === 4) await sleep(700);                       // hold on the block
+    if (i === 5) g.camera({ fit: true, pad: 34, dur: 520 });
+    await sleep(GAP);
+    busy = false;
+    syncButtons();
+    if (cursor >= TRACE.length) finishStory();
+  }
+
+  function finishStory() {
+    storyDone = true;
+    g.clearHighlight();
+    g.highlight({ nodes: ["respond"], variant: "ok" });
+    paintPayload(TRACE[TRACE.length - 1], "ok");
+    g.caption("Chain complete — " + TRACE.length + " steps, " + run.log().length +
+      " logged events, one blocked draft, one retry. Click any node to scrub back to it.",
+      { place: "bottom" });
+    g.camera({ fit: true, pad: 34, dur: 460 });
+    phaseEl.textContent = "trace complete — click a node to time-travel";
+    writeReport();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Click a node -> its last logged payload, and (once the trace is done) a live-mode
+  // time-travel seek back to the instant that step ran.
+  // ---------------------------------------------------------------------------
+  function inspectNode(id) {
+    var idx = -1;
+    for (var k = played.length - 1; k >= 0; k--) {
+      if (TRACE[played[k]].node === id) { idx = played[k]; break; }
+    }
+    if (idx < 0) {
+      var spec = g.node(id);
+      insStatus.textContent = "pending";
+      insStatus.setAttribute("data-s", "idle");
+      insTitle.textContent = (spec && spec.label) || id;
+      insSub.textContent = "no events logged for this node yet";
+      insRows.textContent = "";
+      insPrompt.textContent = "—";
+      insOutput.textContent = "—";
+      insOutput.className = "";
+      g.highlight({ nodes: [id], variant: "mute", dim: true });
+      return;
+    }
+    inspectStep(idx);
+  }
+
+  function inspectStep(idx) {
+    var s = TRACE[idx];
+    paintPayload(s, s.result);
+    spotlight(s, s.result === "blocked" ? "warn" : "focus");
+    if (storyDone && s.at != null) {
+      run.seek(s.at + Math.round(s.dwell / 2));          // clamped to [0, now()]
+      phaseEl.textContent = "time-travelled to " + fmtS(run.time()) + " · " + s.title;
+      syncButtons();
+    }
+  }
+
+  // The viewport takes pointer capture on pointerdown, so every later event in the gesture
+  // (the click included) is retargeted to the <svg> — the node under the cursor has to be
+  // resolved at pointerdown, exactly like the library's own tap-to-toggle does.
+  var pipeEl = $("#pipe");
+  var tapDown = null;
+
+  function nodeIdFrom(target) {
+    var el = target && target.closest ? target.closest(".smv-node") : null;
+    return el ? el.getAttribute("data-id") : null;
+  }
+
+  pipeEl.addEventListener("pointerdown", function (ev) {
+    tapDown = { id: nodeIdFrom(ev.target), x: ev.clientX || 0, y: ev.clientY || 0 };
+  });
+  pipeEl.addEventListener("pointerup", function (ev) {
+    var d = tapDown;
+    tapDown = null;
+    if (!d || !d.id) return;
+    var dx = (ev.clientX || 0) - d.x, dy = (ev.clientY || 0) - d.y;
+    if (dx * dx + dy * dy > 36) return;   // travelled: that was a pan, not a tap
+    inspectNode(d.id);
+  });
+  pipeEl.addEventListener("pointercancel", function () { tapDown = null; });
+
+  // Keyboard parity with the ARIA tree: arrow to a step, Enter to inspect it.
+  pipeEl.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Enter") return;
+    var id = nodeIdFrom(ev.target);
+    if (id) inspectNode(id);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Per-frame readouts, straight off run.state() (docs/PRESETS.md's "draw off the run").
+  // ---------------------------------------------------------------------------
+  function sampleFrame() {
+    var st = run.state();
+    var j = st.joins.compose;
+    if (j) {
+      mJoin.textContent = j.arrived + "/" + j.needed + (j.fired ? " ✓" : "");
+      mJoin.className = j.fired ? "good" : "";
+    }
+    var lp = st.loops.retry;
+    if (lp) {
+      mLoop.textContent = lp.iteration + "/" + lp.max;
+      mLoop.className = lp.iteration > 0 ? "good" : "";
+      observed.loopAt = Math.max(observed.loopAt, lp.iteration);
+    }
+    var blocked = st.nodes.safety && st.nodes.safety.status === "failed";
+    mStep.textContent = played.length + "/" + TRACE.length;
+    var em = document.createElement("em");
+    em.textContent = " · " + (blocked ? "blocked" : storyDone ? "complete" : played.length ? "running" : "idle");
+    mStep.appendChild(em);
+    mStep.className = blocked ? "bad" : storyDone ? "good" : "";
+    mLat.textContent = num(totals.ms) + " ms";
+    mTok.textContent = num(totals.tin) + " / " + num(totals.tout);
+    mClock.textContent = "";
+    mClock.appendChild(document.createTextNode(fmtS(run.time())));
+    var em2 = document.createElement("em");
+    em2.textContent = run.following ? " · live" : " · scrubbed";
+    mClock.appendChild(em2);
+  }
+  g.ticker.add(sampleFrame);
+
+  // ---------------------------------------------------------------------------
+  // Transport buttons.
+  // ---------------------------------------------------------------------------
+  function syncButtons() {
+    nextBtn.disabled = busy || cursor >= TRACE.length;
+    playBtn.disabled = busy || autoRunning || cursor >= TRACE.length;
+    liveBtn.disabled = run.following;
+  }
+
+  var autoRunning = false;
+  async function playAll() {
+    if (autoRunning) return;
+    autoRunning = true;
+    syncButtons();
+    while (cursor < TRACE.length) {
+      await playStep(cursor);
+    }
+    autoRunning = false;
+    syncButtons();
+  }
+
+  playBtn.addEventListener("click", function () { playAll(); });
+  nextBtn.addEventListener("click", function () {
+    if (busy || cursor >= TRACE.length) return;
+    playStep(cursor);
+  });
+  liveBtn.addEventListener("click", function () {
+    run.follow();
+    phaseEl.textContent = storyDone ? "back to live — " + fmtS(run.time()) : phaseEl.textContent;
+    syncButtons();
+  });
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "logged events                    " + run.log().length + "\n" +
+      "retrieve occupancy after spawn   ×" + observed.spawnOcc + "\n" +
+      "compose join arrivals            " + JSON.stringify(run.state().joins.compose) + "\n" +
+      "retry loop iterations            " + observed.loopAt + " of 2\n" +
+      "safety block reason              " + observed.failReason + "\n" +
+      "chain latency / tokens           " + totals.ms + " ms · " + totals.tin + " in / " + totals.tout + " out\n" +
+      "errors                           " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  // ---------------------------------------------------------------------------
+  // ?auto=1 — the whole story, no clicks, then one time-travel round trip.
+  // ---------------------------------------------------------------------------
+  async function auto() {
+    await sleep(350);
+    await playAll();
+    await sleep(300);
+    // Time travel: scrub back to the blocked draft, show its payload, then follow() live.
+    inspectStep(4);
+    await sleep(1000);
+    run.follow();
+    finishStory();
+    await sleep(900);
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors, checks: {
+      events: run.log().length,
+      spawnOcc: observed.spawnOcc,
+      loop: observed.loopAt,
+      failReason: observed.failReason,
+    } };
+  }
+
+  syncButtons();
+  g.caption("Press play — the trace replays as a live event log, one step at a time.", { place: "bottom" });
+
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      writeReport();
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

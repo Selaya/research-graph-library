@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — CI/CD matrix build</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --bad: #c23b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --bad: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 76ch; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #pipe {
+    height: 440px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span.bad { color: var(--bad); }
+
+  ul.watch { margin: 16px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+  ul.watch li { margin: 3px 0; }
+  ul.watch code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>CI/CD matrix build <small>— a pull-request run, one failing leg</small></h1>
+  <p class="lede">
+    A PR triggers checkout → a cached install → a 6-way build matrix (5 OS/runtime combos
+    plus lint) fanning out inside one collapsible container, all AND-joining into a
+    required <em>gate</em> check. <code>windows/node20</code> fails partway through with a
+    real symlink error, so the gate never sees all six arrivals and the run stalls there —
+    exactly what a red PR check looks like. Integration tests (with a bounded flaky-retry
+    loop) and the preview publish sit downstream, wired up but unreached this run.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the run</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>matrix jobs</i><span id="m-jobs">0/6 done</span></div>
+  <div class="tile"><i>gate join</i><span id="m-gate">0/6</span></div>
+  <div class="tile"><i>failing leg</i><span id="m-fail">—</span></div>
+</div>
+
+<ul class="watch">
+  <li>The <b>Build matrix</b> box starts collapsed with a <code>durationAgg:"max"</code>
+    chip (the slowest job, not the sum) — it expands mid-story so you can watch all 6 jobs
+    run in parallel at different rates.</li>
+  <li><code>windows/node20</code> turns red and carries a <code>data.fail</code> reason —
+    watch for the warn highlight + caption calling it out.</li>
+  <li><code>gate</code> is an implicit <b>AND-join</b> of all 6 legs; because one leg
+    failed it never fires, so <em>integration tests</em> and <em>publish preview</em>
+    never light up this run.</li>
+  <li>The dashed arc on <em>integration tests</em> is a bounded <code>loop:true,
+    maxIterations:3</code> retry edge for flaky reruns — part of the wired-up topology.</li>
+  <li>Scrub the transport bar under the graph once the story finishes; every beat replays
+    from a snapshot.</li>
+</ul>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The spec. Mount holds only checkout; the storyboard assembles the rest in waves so
+  // the run reads as three commits: setup, the matrix + gate, and the wired-up downstream
+  // (integration tests with its retry loop, then publish) which this particular run never
+  // reaches because windows/node20 fails.
+  // ---------------------------------------------------------------------------
+
+  var SEED = {
+    nodes: [{ id: "checkout", label: "Checkout", data: { duration: "6s" } }],
+    edges: [],
+  };
+
+  var WAVE_SETUP = [
+    { op: "addNode", args: [{ id: "install", label: "Install deps (cached)", data: { duration: "18s", cached: true } }] },
+    { op: "addEdge", args: [{ id: "e1", source: "checkout", target: "install" }] },
+  ];
+
+  var MATRIX_JOBS = [
+    { id: "matrix.ubuntu18", label: "ubuntu · node18", duration: "95s" },
+    { id: "matrix.ubuntu20", label: "ubuntu · node20", duration: "100s" },
+    { id: "matrix.ubuntu22", label: "ubuntu · node22", duration: "112s" },
+    { id: "matrix.macos20", label: "macos · node20", duration: "134s" },
+    { id: "matrix.windows20", label: "windows · node20", duration: "70s", fail: "EPERM: symlink 'node_modules/.bin/tsc' -> 'tsc' (no admin privilege)" },
+    { id: "matrix.lint", label: "lint", duration: "22s" },
+  ];
+
+  var WAVE_MATRIX = [
+    { op: "addNode", args: [{ id: "matrix", label: "Build matrix", collapsed: true, durationAgg: "max" }] },
+  ].concat(MATRIX_JOBS.map(function (j) {
+    var data = { duration: j.duration };
+    if (j.fail) data.fail = j.fail;
+    return { op: "addNode", args: [{ id: j.id, parent: "matrix", label: j.label, data: data }] };
+  })).concat(MATRIX_JOBS.map(function (j) {
+    return { op: "addEdge", args: [{ id: "m-in:" + j.id, source: "install", target: j.id }] };
+  })).concat([
+    { op: "addNode", args: [{ id: "gate", label: "Gate (required checks)" }] },
+  ]).concat(MATRIX_JOBS.map(function (j) {
+    return { op: "addEdge", args: [{ id: "m-out:" + j.id, source: j.id, target: "gate" }] };
+  }));
+
+  var WAVE_DOWNSTREAM = [
+    { op: "addNode", args: [{ id: "integration", label: "Integration tests", data: { duration: "30s" } }] },
+    { op: "addEdge", args: [{ id: "e2", source: "gate", target: "integration" }] },
+    { op: "addEdge", args: [{ id: "retry", source: "integration", target: "integration", loop: true, maxIterations: 3 }] },
+    { op: "addNode", args: [{ id: "publish", label: "Publish preview", data: { duration: "12s" } }] },
+    { op: "addEdge", args: [{ id: "e3", source: "integration", target: "publish" }] },
+  ];
+
+  var STEPS = [
+    { label: "assemble" },
+    { op: "batch", steps: WAVE_SETUP, dur: 500 },
+    { op: "batch", steps: WAVE_MATRIX, dur: 700 },
+    { op: "batch", steps: WAVE_DOWNSTREAM, dur: 500 },
+    { label: "run" },
+    { op: "run.play", until: "gate" },
+    { label: "inspect matrix" },
+    { op: "expand", args: ["matrix"], dur: 700 },
+    { op: "camera", args: [{ node: "matrix.windows20", pad: 70, dur: 650 }] },
+    { op: "highlight", args: [{ nodes: ["matrix.windows20"], edges: ["m-out:matrix.windows20"], variant: "warn", pulse: true }] },
+    { op: "caption", args: ["windows/node20 failed: EPERM on a symlink. Gate needs all 6 legs — it never fires.", { place: "bottom" }] },
+    { op: "wait", ms: 1600 },
+    { label: "gate blocked" },
+    { op: "caption", args: [null] },
+    { op: "clearHighlight" },
+    { op: "camera", args: [{ node: "gate", pad: 80, dur: 650 }] },
+    { op: "highlight", args: [{ nodes: ["gate"], variant: "mute", dim: true }] },
+    { op: "caption", args: ["Integration tests and publish preview never run this build.", { place: "bottom", variant: "note" }] },
+    { op: "wait", ms: 1400 },
+    { op: "caption", args: [null] },
+    { op: "clearHighlight" },
+    { op: "collapse", args: ["matrix"], dur: 700 },
+    { op: "camera", args: [{ fit: true, pad: 32, dur: 600 }] },
+    { op: "run.play" },
+    { label: "done" },
+  ];
+
+  var RUN_AT = 5, EXPAND_AT = 7, COLLAPSE_AT = 20;
+
+  // Pacing: a log curve over the graph's own declared durations, same trick as
+  // demo/pipeline.html, so 12s / 70s / 134s read as visibly different speeds instead of
+  // one near-uniform dwell — and stays comfortably inside the 45s auto-mode budget.
+  var RUN_OPTS = {
+    hopMs: 200,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 380;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 260 + 1000 * f;
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mTime = $("#m-time"), mJobs = $("#m-jobs"), mGate = $("#m-gate"), mFail = $("#m-fail");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 26, ranksep: 50 },
+      animation: { duration: 420, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+  }
+
+  var MATRIX_IDS = MATRIX_JOBS.map(function (j) { return j.id; });
+  var obs = { failReason: null, failedAt: null, gateArrived: 0, gateNeeded: 6 };
+
+  function sampleFrame() {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+
+    var done = 0;
+    for (var i = 0; i < MATRIX_IDS.length; i++) {
+      var n = st.nodes[MATRIX_IDS[i]];
+      if (n && (n.status === "done" || n.status === "failed")) done++;
+    }
+    mJobs.textContent = done + "/6 done";
+
+    var j = st.joins.gate;
+    if (j) {
+      obs.gateArrived = j.arrived;
+      obs.gateNeeded = j.needed;
+      mGate.textContent = j.arrived + "/" + j.needed + (j.fired ? " ✓" : "");
+    }
+
+    var w = st.nodes["matrix.windows20"];
+    if (w && w.status === "failed") {
+      mFail.textContent = "windows/node20 ✗";
+      mFail.className = "bad";
+    }
+
+    mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
+  }
+  g.ticker.add(sampleFrame);
+
+  g.run().on("fail", function (ev) {
+    if (ev && ev.nodeId === "matrix.windows20") {
+      obs.failReason = ev.reason || null;
+      obs.failedAt = ev.t;
+    }
+  });
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  var checks = {};
+  var storyDone = false;
+
+  sb.on("step", function (ev) {
+    paintRail();
+    g.fitView({ animate: true });
+    if (ev.index === RUN_AT) {
+      checks.gateAfterRun = { arrived: obs.gateArrived, needed: obs.gateNeeded };
+      checks.failReasonAfterRun = obs.failReason;
+    }
+    if (ev.index === EXPAND_AT) {
+      checks.matrixExpanded = !g.viewstate.collapsed.has("matrix");
+    }
+    if (ev.index === COLLAPSE_AT) {
+      checks.matrixCollapsedAgain = g.viewstate.collapsed.has("matrix");
+    }
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  function transportPlay() {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    transportPlay();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "gate arrivals when run reached   " + JSON.stringify(checks.gateAfterRun) + "\n" +
+      "windows/node20 fail reason       " + checks.failReasonAfterRun + "\n" +
+      "matrix expanded on cue           " + checks.matrixExpanded + "\n" +
+      "matrix collapsed again           " + checks.matrixCollapsedAgain + "\n" +
+      "errors                           " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  async function auto() {
+    g.run().speed(3); // stay well inside the 45s auto budget
+    await sleep(200);
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(300);
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors, checks: checks };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      writeReport();
+      window.__smvExit = { done: true, errors: errors, checks: checks };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

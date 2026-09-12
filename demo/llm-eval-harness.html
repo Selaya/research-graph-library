@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — LLM evaluation harness</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --good: #1a8a5e;
+    --bad: #c23b3b;
+    --bad-fill: #fbe8e8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a;
+      --good: #3ecb92; --bad: #ef6b6b; --bad-fill: #3a1620;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1100px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 78ch; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #pipe {
+    height: 520px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span.bad { color: var(--bad); }
+  .tile span.good { color: var(--good); }
+
+  ul.watch { margin: 16px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+  ul.watch li { margin: 3px 0; }
+  ul.watch code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  table.results {
+    margin-top: 16px; width: 100%; border-collapse: collapse; font-size: 12.5px;
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--card);
+  }
+  table.results caption {
+    text-align: left; caption-side: top; padding: 10px 12px 8px; font-weight: 600; font-size: 13px;
+  }
+  table.results th, table.results td { padding: 7px 12px; text-align: left; border-top: 1px solid var(--line); }
+  table.results th {
+    font: 600 11px/1 inherit; letter-spacing: .03em; text-transform: uppercase; color: var(--muted);
+  }
+  table.results td.c-score, table.results td.c-verdict { font-variant-numeric: tabular-nums; }
+  .c-verdict.good { color: var(--good); font-weight: 600; }
+  .c-verdict.bad { color: var(--bad); font-weight: 600; }
+
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>LLM evaluation harness <small>— a prompt eval run that fails, retries, and passes</small></h1>
+  <p class="lede">
+    A candidate <em>prompt set</em> fans out to 6 held-out test cases; each case's model
+    output is scored by its own LLM judge; the six verdicts <code>join:"all"</code> into a
+    <em>score aggregation</em> step feeding a <em>threshold gate</em>. The first run's gate
+    fails — two cases score badly, and <code>pass@1</code> lands under the 0.80 bar — so it
+    loops back to <em>Revise prompt</em> (a bounded retry, <code>maxIterations:3</code>). A
+    revised prompt v2 re-runs the same harness and clears the bar; the gate turns green.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the eval run</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>pass@1 / target</i><span id="m-score">— / 0.80</span></div>
+  <div class="tile"><i>gate verdict</i><span id="m-verdict">—</span></div>
+  <div class="tile"><i>retry loop</i><span id="m-loop">iter 0/3</span></div>
+</div>
+
+<ul class="watch">
+  <li>6 test cases fan out from <b>Prompt set</b> into the <code>cases</code> container, each
+    at its own generation latency; each case feeds its own child judge inside the
+    <code>judges</code> container.</li>
+  <li><b>Score aggregation</b> is an implicit <b>AND-join</b> of all 6 judges;
+    <b>Threshold gate</b> reads the aggregate and declares <code>data.fail</code> with the
+    exact reason (<code>"pass@1 = 0.62 &lt; 0.80"</code>) — watch for the warn highlight.</li>
+  <li>The two weak cases get a <b>warn highlight + a red <code>--smv-fill</code> props
+    tint</b> so you can spot exactly what dragged the average down.</li>
+  <li>The dashed arc on <b>Revise prompt</b> is a bounded <code>loop:true,
+    maxIterations:3</code> retry edge — watch its iteration badge tick as the gate loops
+    back to it.</li>
+  <li>After the prompt is revised, a fresh run clears the bar: <b>Threshold gate</b> gets an
+    <code>ok</code>-variant highlight and a camera close-up as it turns green.</li>
+  <li>The results table below updates live from <code>run.on("finish"/"fail")</code> as each
+    case and judge completes.</li>
+</ul>
+
+<table class="results" id="results">
+  <caption>Per-case results</caption>
+  <thead>
+    <tr><th>Case</th><th>Case run</th><th>Judge score</th><th>Verdict</th></tr>
+  </thead>
+  <tbody id="results-body"></tbody>
+</table>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The spec. Six held-out cases, each with its own judge, one AND-join aggregate, a
+  // threshold gate, and a bounded retry loop back to "revise prompt". The whole graph is
+  // mounted at once (no assembly waves) — the story lives entirely in the run/retry/pass
+  // cycle, not in the topology appearing.
+  // ---------------------------------------------------------------------------
+
+  var CASE_META = [
+    { n: 1, label: "arithmetic word problem", caseDur: "1.1s", judgeDur: "0.5s" },
+    { n: 2, label: "SQL join synthesis",       caseDur: "1.4s", judgeDur: "0.6s" },
+    { n: 3, label: "regex extraction",         caseDur: "0.9s", judgeDur: "0.4s" },
+    { n: 4, label: "multi-hop QA",             caseDur: "1.6s", judgeDur: "0.7s" },
+    { n: 5, label: "code review",              caseDur: "1.2s", judgeDur: "0.6s" },
+    { n: 6, label: "summarization",            caseDur: "1.0s", judgeDur: "0.5s" },
+  ];
+  // Weak spots: regex extraction (#3) and code review (#5) — both plausible places an
+  // LLM judge marks a real model down. Chosen so the six LOW_SCORES average to exactly
+  // 0.62, matching the gate's declared fail reason verbatim.
+  var LOW_SCORES  = [0.78, 0.80, 0.22, 0.83, 0.28, 0.81];
+  var HIGH_SCORES = [0.85, 0.84, 0.88, 0.90, 0.86, 0.89]; // prompt v2, revised
+  var WEAK_NS = [3, 5];
+  var TARGET = 0.80;
+  var CASE_BAR = 0.50; // per-case pass/fail line for the results table
+
+  function avg(arr) { return arr.reduce(function (a, b) { return a + b; }, 0) / arr.length; }
+  var LOW_AVG = avg(LOW_SCORES), HIGH_AVG = avg(HIGH_SCORES);
+  var LOW_REASON = "pass@1 = " + LOW_AVG.toFixed(2) + " < " + TARGET.toFixed(2);
+  var HIGH_REASON = "pass@1 = " + HIGH_AVG.toFixed(2) + " ≥ " + TARGET.toFixed(2);
+
+  var JUDGE_IDS = CASE_META.map(function (c) { return "judges.j" + c.n; });
+  var WEAK_NODES = WEAK_NS.map(function (n) { return "cases.c" + n; })
+    .concat(WEAK_NS.map(function (n) { return "judges.j" + n; }));
+  var WEAK_EDGES = WEAK_NS.map(function (n) { return "toj" + n; });
+  var WEAK_PROPS = {};
+  WEAK_NODES.forEach(function (id) {
+    WEAK_PROPS[id] = { "--smv-fill": "var(--bad-fill)", "--smv-stroke": "var(--bad)" };
+  });
+
+  var CASES = CASE_META.map(function (c) {
+    return { id: "cases.c" + c.n, parent: "cases", label: "Case " + c.n + " · " + c.label, data: { duration: c.caseDur } };
+  });
+  var JUDGES = CASE_META.map(function (c, i) {
+    return { id: "judges.j" + c.n, parent: "judges", label: "Judge · " + c.label, data: { duration: c.judgeDur, score: LOW_SCORES[i] } };
+  });
+
+  var NODES = [
+    { id: "prompt_set", label: "Prompt set v1", data: { duration: "0.6s" } },
+    { id: "cases", label: "Test cases (6)", durationAgg: "max" },
+  ].concat(CASES).concat([
+    { id: "judges", label: "LLM judges (6)", durationAgg: "max" },
+  ]).concat(JUDGES).concat([
+    { id: "score_agg", label: "Score aggregation", join: "all", data: { duration: "0.5s" } },
+    { id: "gate", label: "Threshold gate", data: { duration: "0.4s", fail: LOW_REASON } },
+    { id: "revise", label: "Revise prompt", data: { duration: "1.3s" } },
+  ]);
+
+  var EDGES = [];
+  CASE_META.forEach(function (c) {
+    EDGES.push({ id: "p" + c.n, source: "prompt_set", target: "cases.c" + c.n });
+    EDGES.push({ id: "toj" + c.n, source: "cases.c" + c.n, target: "judges.j" + c.n });
+    EDGES.push({ id: "j" + c.n + "s", source: "judges.j" + c.n, target: "score_agg" });
+  });
+  EDGES.push({ id: "sg", source: "score_agg", target: "gate" });
+  EDGES.push({ id: "retry", source: "gate", target: "revise", loop: true, maxIterations: 3 });
+
+  var SEED = { nodes: NODES, edges: EDGES };
+
+  // Pacing: default dwell (300-1500ms, linear over declared duration) is already tame
+  // across this spec's 0.4s-1.6s range, so no custom dwell fn is needed — just a modest
+  // hop time. `iterations` caps how far the "retry" loop edge iterates for a given
+  // compile: RETRY_OPTS plays iteration 1 (the real arc-cross) plus one in-place tick
+  // (iteration 2 of the edge's maxIterations 3); RUN2_OPTS caps it to 0 so the passing
+  // run doesn't loop.
+  var HOP = 170;
+  var RUN1_OPTS  = { hopMs: HOP };
+  var RETRY_OPTS = { hopMs: HOP, iterations: { retry: 2 } };
+  var RUN2_OPTS  = { hopMs: HOP, iterations: { retry: 0 } };
+  var SPEED = AUTO ? 2.2 : 1;
+  var WAIT_GATE_FAIL = AUTO ? 700 : 1500;
+  var WAIT_WEAK      = AUTO ? 800 : 1800;
+  var WAIT_LOOP      = AUTO ? 400 : 900;
+  var WAIT_GATE_PASS = AUTO ? 800 : 1800;
+
+  // ---------------------------------------------------------------------------
+
+  var STEPS = [
+    { label: "run 1" },
+    { op: "run.play", until: "gate" },
+
+    { label: "gate failed" },
+    { op: "camera", args: [{ node: "gate", pad: 90, dur: 600 }] },
+    { op: "highlight", args: [{ nodes: ["gate"], variant: "warn", pulse: true }] },
+    { op: "caption", args: [LOW_REASON + " — threshold gate failed.", { place: "bottom" }] },
+    { op: "wait", ms: WAIT_GATE_FAIL },
+    { op: "caption", args: [null] },
+    { op: "clearHighlight" },
+
+    { label: "weak cases" },
+    { op: "camera", args: [{ nodes: WEAK_NODES, pad: 70, dur: 600 }] },
+    { op: "highlight", args: [{ nodes: WEAK_NODES, edges: WEAK_EDGES, variant: "warn", dim: true }] },
+    { op: "props", args: [WEAK_PROPS] },
+    { op: "caption", args: ["Cases 3 and 5 scored below bar — dragging pass@1 down to " + LOW_AVG.toFixed(2) + ".", { place: "bottom" }] },
+    { op: "wait", ms: WAIT_WEAK },
+    { op: "caption", args: [null] },
+    { op: "clearHighlight" },
+    { op: "update", args: ["gate", { data: { fail: null } }] },
+
+    { label: "retry" },
+    { op: "camera", args: [{ nodes: ["gate", "revise"], pad: 60, dur: 550 }] },
+    { op: "highlight", args: [{ nodes: ["revise"], edges: ["retry"], variant: "focus", pulse: true }] },
+    { op: "caption", args: ["Gate loops back to Revise prompt — iteration 2 of 3.", { place: "bottom" }] },
+    { op: "run.play" },
+    { op: "wait", ms: WAIT_LOOP },
+    { op: "caption", args: [null] },
+    { op: "clearHighlight" },
+    { op: "props", args: [null] },
+    { op: "batch", steps: CASE_META.map(function (c, i) {
+        return { op: "update", args: ["judges.j" + c.n, { data: { score: HIGH_SCORES[i] } }] };
+      }).concat([{ op: "update", args: ["prompt_set", { label: "Prompt set v2" }] }]) },
+    { op: "camera", args: [{ fit: true, pad: 40, dur: 550 }] },
+
+    { label: "run 2" },
+    { op: "run.play", until: "gate" },
+
+    { label: "gate passed" },
+    { op: "camera", args: [{ node: "gate", pad: 90, dur: 600 }] },
+    { op: "highlight", args: [{ nodes: ["gate"], variant: "ok", pulse: true }] },
+    { op: "caption", args: [HIGH_REASON + " — gate cleared, prompt v2 merged.", { place: "bottom" }] },
+    { op: "wait", ms: WAIT_GATE_PASS },
+    { op: "caption", args: [null] },
+    { op: "clearHighlight" },
+    { op: "camera", args: [{ fit: true, pad: 32, dur: 600 }] },
+    { label: "done" },
+  ];
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report"), resultsBody = $("#results-body");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mTime = $("#m-time"), mScore = $("#m-score"), mVerdict = $("#m-verdict"), mLoop = $("#m-loop");
+
+  CASE_META.forEach(function (c) {
+    var tr = document.createElement("tr");
+    tr.id = "row" + c.n;
+    tr.innerHTML =
+      "<td>Case " + c.n + " · " + c.label + "</td>" +
+      '<td class="c-dur">pending…</td>' +
+      '<td class="c-score">—</td>' +
+      '<td class="c-verdict">—</td>';
+    resultsBody.appendChild(tr);
+  });
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 20, ranksep: 46 },
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN1_OPTS); // compile up front so the transport bar has a timeline from step 0
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  function fmt(ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; }
+
+  function currentPassAt1() {
+    var sum = 0, n = 0;
+    JUDGE_IDS.forEach(function (id) {
+      var node = g.node(id);
+      if (node && node.data && typeof node.data.score === "number") { sum += node.data.score; n++; }
+    });
+    return n ? sum / n : 0;
+  }
+
+  function attachRunListeners() {
+    var run = g.run();
+    if (!run) return;
+    run.speed(SPEED);
+    run.on("tick", function () {
+      mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
+    });
+    run.on("finish", function (ev) {
+      var m = /^cases\.c(\d+)$/.exec(ev.nodeId);
+      if (m) {
+        var row = document.getElementById("row" + m[1]);
+        if (row) row.querySelector(".c-dur").textContent = "done ✓";
+      }
+      var jm = /^judges\.j(\d+)$/.exec(ev.nodeId);
+      if (jm) {
+        var node = g.node(ev.nodeId);
+        var score = node && node.data && typeof node.data.score === "number" ? node.data.score : null;
+        var row2 = document.getElementById("row" + jm[1]);
+        if (row2 && score != null) {
+          row2.querySelector(".c-score").textContent = score.toFixed(2);
+          var pass = score >= CASE_BAR;
+          var vcell = row2.querySelector(".c-verdict");
+          vcell.textContent = pass ? "pass" : "fail";
+          vcell.className = "c-verdict " + (pass ? "good" : "bad");
+        }
+      }
+      if (ev.nodeId === "gate") {
+        mVerdict.textContent = "PASS";
+        mVerdict.className = "good";
+        var s = currentPassAt1();
+        mScore.textContent = s.toFixed(2) + " / " + TARGET.toFixed(2);
+        mScore.className = s >= TARGET ? "good" : "bad";
+      }
+    });
+    run.on("fail", function (ev) {
+      if (ev.nodeId === "gate") {
+        mVerdict.textContent = "FAIL";
+        mVerdict.className = "bad";
+        var s = currentPassAt1();
+        mScore.textContent = s.toFixed(2) + " / " + TARGET.toFixed(2);
+        mScore.className = "bad";
+        checks.gateFailReason = ev.reason || null;
+      }
+    });
+    run.on("loop", function (ev) {
+      if (ev.edgeId === "retry") {
+        mLoop.textContent = "iter " + ev.iteration + "/" + ev.max;
+        checks.loopIteration = ev.iteration;
+        checks.loopMax = ev.max;
+      }
+    });
+  }
+  attachRunListeners();
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+  function indexOfLabel(text) {
+    for (var i = 0; i < LABELS.length; i++) if (LABELS[i].label === text) return LABELS[i].index;
+    return -1;
+  }
+  var RETRY_AT = indexOfLabel("retry");
+  var RUN2_AT = indexOfLabel("run 2");
+  var GATE_FAILED_AT = indexOfLabel("gate failed");
+  var GATE_PASSED_AT = indexOfLabel("gate passed");
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+  }
+
+  var checks = {};
+  var storyDone = false;
+
+  sb.on("step", function (ev) {
+    paintRail();
+    g.fitView({ animate: true, pad: 40 });
+    // Neither storyboard nor `update` steps can create a fresh run — that has to happen
+    // as a side effect right when we reach the label just before the next run.play step
+    // (same pattern demo/terraform-plan.html uses for its "replay" phase).
+    if (ev.index === RETRY_AT) { g.run(RETRY_OPTS); attachRunListeners(); }
+    if (ev.index === RUN2_AT) { g.run(RUN2_OPTS); attachRunListeners(); }
+    if (ev.index === GATE_FAILED_AT) checks.gate1Failed = g.run().state().nodes.gate && g.run().state().nodes.gate.status === "failed";
+    if (ev.index === GATE_PASSED_AT) checks.gate2Passed = g.run().state().nodes.gate && g.run().state().nodes.gate.status === "done";
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  function transportPlay() {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    transportPlay();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "run 1 gate fail reason   " + checks.gateFailReason + "\n" +
+      "run 1 gate failed        " + checks.gate1Failed + "\n" +
+      "retry loop iteration     " + checks.loopIteration + " of " + checks.loopMax + "\n" +
+      "run 2 gate passed        " + checks.gate2Passed + "\n" +
+      "final pass@1             " + currentPassAt1().toFixed(2) + " (target " + TARGET.toFixed(2) + ")\n" +
+      "errors                   " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  async function auto() {
+    await sleep(200);
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(300);
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors, checks: checks };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      writeReport();
+      window.__smvExit = { done: true, errors: errors, checks: checks };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — Incident postmortem timeline</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --bad: #c23b3b;
+    --good: #2f855a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a;
+      --bad: #ef6b6b; --good: #5fc08a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 26px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1120px; margin: 0 auto; }
+  header { margin-bottom: 14px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 88ch; }
+  p.lede code, ul.watch code, .legend code {
+    font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink);
+  }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .stagewrap { display: grid; grid-template-columns: minmax(0,1fr) 330px; gap: 14px; }
+  @media (max-width: 900px) { .stagewrap { grid-template-columns: 1fr; } }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #pipe {
+    height: 580px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .feed {
+    height: 580px; border: 1px solid var(--line); border-radius: 12px; background: var(--card);
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+  .feed h2 {
+    margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--line);
+    font-size: 11px; font-weight: 600; line-height: 1; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--muted);
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .feed h2 em { font-style: normal; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+  #log { margin: 0; padding: 8px 10px 14px; list-style: none; overflow-y: auto; flex: 1; }
+  #log li {
+    display: none; padding: 5px 6px; border-radius: 6px; margin-bottom: 1px;
+    font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    border-left: 2px solid transparent;
+  }
+  #log li.on { display: block; }
+  #log li b { color: var(--muted); font-weight: 500; }
+  #log li i {
+    font-style: normal; margin-left: 7px; font-size: 10px; letter-spacing: .03em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  #log li span { display: block; color: var(--ink); opacity: .88; word-break: break-word; }
+  #log li[data-kind="fail"] i, #log li[data-kind="fail"] span { color: var(--bad); }
+  #log li[data-kind="ok"] i { color: var(--good); }
+  #log li.future { opacity: .26; }
+  #log li.mark { background: color-mix(in srgb, var(--bad) 16%, transparent); border-left-color: var(--bad); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 14px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+  .tile span.bad { color: var(--bad); }
+  .tile span.good { color: var(--good); }
+
+  ul.watch { margin: 16px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+  ul.watch li { margin: 4px 0; }
+  .legend { margin-top: 12px; color: var(--muted); font-size: 12.5px; }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Incident postmortem timeline <small>— SEV-2 <code>payments-api</code>, replayed in live mode</small></h1>
+  <p class="lede">
+    A real-shaped outage log — Datadog, PagerDuty, Spinnaker, kubectl, Slack — replayed against the
+    response runbook with <code>g.run({mode:"live"})</code>. 87 incident minutes (T+0 = 14:02&nbsp;UTC)
+    are fed in as <code>run.start/finish/fail/spawn</code> on a compressed clock, the feed on the
+    right stays in step, and at the end the view clock scrubs back to the aborted rollback before
+    <code>run.follow()</code> returns it to live.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the incident</button>
+  <button id="rewind" type="button" disabled>Rewind to the failed rollback</button>
+  <button id="live" type="button" disabled>Back to live</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div class="stagewrap">
+  <div id="pipe"></div>
+  <div class="feed">
+    <h2><span>incident feed · #4471</span><em id="feed-count">0 lines</em></h2>
+    <ol id="log"></ol>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="tile"><i>incident clock</i><span id="m-inc">T+00:00</span></div>
+  <div class="tile"><i>view clock <em>/ frontier</em></i><span id="m-clock">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>view</i><span id="m-follow">live</span></div>
+  <div class="tile"><i>rollback</i><span id="m-rollback">pending</span></div>
+</div>
+
+<ul class="watch">
+  <li>Nothing is simulated. Every node lights up because a log line called
+    <code>run.start(id)</code> / <code>run.finish(id)</code> — the same calls a WebSocket
+    handler would make (<code>docs/LIVE.md</code>).</li>
+  <li><b>Triage</b> starts collapsed and expands into three parallel investigations; two of them
+    dead-end, and the deploy diff is the leg that actually finds the culprit.</li>
+  <li><b>Customer comms</b> gets a <code>run.spawn(id, 2)</code> on top of its arriving token —
+    an <code>×3</code> occupancy badge for three notifications in flight.</li>
+  <li>At T+00:44 <code>run.fail("rollback")</code> fires: the step turns red, nothing fans out,
+    the branch dies. The retry is just <code>run.start()</code> again — which is what ticks the
+    self-loop's <code>iter 1/3</code> badge.</li>
+  <li>Afterwards the view clock <code>seek()</code>s back to that instant while the frontier keeps
+    running underneath (watch the two clocks diverge), then <code>follow()</code> snaps to live.
+    Drag the scrubber under the graph to do it yourself.</li>
+</ul>
+
+<p class="legend">
+  Legend — chip = how long the step really took (<code>durationAgg:"max"</code> rolls the triage box up),
+  ⚡ automated / ✋ human, ● active · ✓ done, dashed pips under <em>All clear</em> = the 2-way
+  AND-join, <code>×N</code> = tokens sharing a node, dashed self-arc on the rollback =
+  <code>loop:true, maxIterations:3</code>, slim bar at the bottom = total incident time.
+</p>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // One incident minute, in real milliseconds. 87 minutes plays in ~21s (~13s under
+  // ?auto=1, which has a 45s wall-clock budget for the whole page).
+  var MS_PER_MIN = AUTO ? 150 : 240;
+  var PREROLL = AUTO ? 400 : 800;      // mount's fit gets a beat before T+0
+  var HOP_MS = AUTO ? 170 : 260;       // edge-crossing time; events are >= 1 incident minute apart
+
+  // ---------------------------------------------------------------------------
+  // The runbook. Durations are what each step ACTUALLY took in the incident, so the
+  // preset's chips and the total bar read as a postmortem table, not as estimates.
+  // `triage` is the only container: durationAgg "max" because its three legs ran in
+  // parallel. The self-loop on `rollback` is the retry edge (maxIterations is mandatory).
+  // ---------------------------------------------------------------------------
+  var SPEC = {
+    nodes: [
+      { id: "alert",   label: "5xx alert fires", w: 186, data: { duration: "4m",  mode: "automated" } },
+      { id: "page",    label: "Page on-call",    w: 176, data: { duration: "6m",  mode: "automated" } },
+      { id: "triage",  label: "Triage", collapsed: true, durationAgg: "max", data: { mode: "manual" } },
+      { id: "triage.dash",    parent: "triage", label: "Dashboards",  w: 168, data: { duration: "13m", mode: "manual" } },
+      { id: "triage.logs",    parent: "triage", label: "Error logs",  w: 162, data: { duration: "9m",  mode: "manual" } },
+      { id: "triage.deploys", parent: "triage", label: "Deploy diff", w: 162, data: { duration: "13m", mode: "manual" } },
+      { id: "culprit",  label: "Culprit: deploy #4821", w: 236, data: { duration: "5m",  mode: "manual" } },
+      { id: "rollback", label: "Roll back to #4820",    w: 240, data: { duration: "20m", mode: "automated" } },
+      { id: "comms",    label: "Customer comms",        w: 208, data: { duration: "7m",  mode: "manual" } },
+      { id: "verify",   label: "Verify 5xx rate",       w: 192, data: { duration: "12m", mode: "automated" } },
+      { id: "cache",    label: "Warm rate cache",       w: 202, data: { duration: "9m",  mode: "automated" } },
+      { id: "queue",    label: "Drain DLQ",             w: 162, data: { duration: "13m", mode: "automated" } },
+      { id: "allclear", label: "All clear",             w: 156, data: { duration: "3m",  mode: "manual" } },
+    ],
+    edges: [
+      { id: "e-ap", source: "alert", target: "page" },
+      { id: "e-pd", source: "page", target: "triage.dash" },
+      { id: "e-pl", source: "page", target: "triage.logs" },
+      { id: "e-pv", source: "page", target: "triage.deploys" },
+      { id: "e-vc", source: "triage.deploys", target: "culprit" },
+      { id: "e-cr", source: "culprit", target: "rollback" },
+      { id: "e-cm", source: "culprit", target: "comms" },
+      // Mandatory on a loop edge, or addEdge throws `unbounded-loop` at mount time.
+      { id: "retry", source: "rollback", target: "rollback", loop: true, maxIterations: 3 },
+      { id: "e-rv", source: "rollback", target: "verify" },
+      { id: "e-vk", source: "verify", target: "cache" },
+      { id: "e-vq", source: "verify", target: "queue" },
+      { id: "e-ka", source: "cache", target: "allclear" },
+      { id: "e-qa", source: "queue", target: "allclear" },
+    ],
+  };
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), reportEl = $("#report"), logEl = $("#log"), countEl = $("#feed-count");
+  var playBtn = $("#play"), rewindBtn = $("#rewind"), liveBtn = $("#live"), resetBtn = $("#reset");
+  var mInc = $("#m-inc"), mClock = $("#m-clock"), mFollow = $("#m-follow"), mRollback = $("#m-rollback");
+
+  var g, run;
+  try {
+    g = SparkleMotion.mount("#pipe", SPEC, {
+      theme: "auto",
+      layout: { dir: "TB", nodesep: 52, ranksep: 28, marginx: 16, marginy: 16 },
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,      // the transport bar doubles as the live-mode scrubber
+      preset: "pipeline",
+    });
+    run = g.run({ mode: "live", hopMs: HOP_MS });
+    window.__g = g;
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Director helpers. Camera/highlight misuse never throws — it console.warns `[smv:…]`,
+  // which is exactly what the demo smoke check fails on. A collapsed container's children
+  // are not in the layout result at all, so every id is filtered against what is actually
+  // drawn before it is handed to the director.
+  // ---------------------------------------------------------------------------
+  function lay() { var r = g.layoutResult(); return r || { nodes: {}, edges: {} }; }
+  function keep(ids, bag) {
+    var out = [];
+    for (var i = 0; i < (ids || []).length; i++) if (bag && bag[ids[i]]) out.push(ids[i]);
+    return out;
+  }
+  /** camera({fit:true}) pads symmetrically, which parks the bottom rank under the caption
+   *  overlay (and under the transport bar). The absolute {x,y,k} form takes an explicit
+   *  top/bottom gutter instead, so the whole graph is always readable beside the narration. */
+  function frameGraph(dur) {
+    var b = (lay() || {}).bounds, host = document.querySelector("#pipe");
+    if (!b || !host || !(b.w > 0) || !(b.h > 0)) { g.camera({ fit: true, pad: 28, dur: dur }); return; }
+    var W = host.clientWidth, H = host.clientHeight, TOP = 22, BOT = 96, SIDE = 30;
+    var k = Math.min((W - 2 * SIDE) / b.w, (H - TOP - BOT) / b.h);
+    if (!(k > 0) || !isFinite(k)) k = 1;
+    g.camera({ x: W / 2 - (b.x + b.w / 2) * k, y: TOP - b.y * k, k: k, dur: dur });
+  }
+
+  function camera(o) {
+    if (o && o.gutter) { frameGraph(o.dur); return; }
+    var res = lay(), t = {}, k;
+    for (k in o) if (Object.prototype.hasOwnProperty.call(o, k)) t[k] = o[k];
+    if (t.node != null && !(res.nodes || {})[t.node]) { delete t.node; t.fit = true; }
+    if (t.nodes) {
+      t.nodes = keep(t.nodes, res.nodes);
+      if (!t.nodes.length) { delete t.nodes; t.fit = true; }
+    }
+    try { g.camera(t); } catch (e) { errors.push("camera: " + String(e && e.message)); }
+  }
+  function highlight(sel) {
+    var res = lay();
+    var o = { nodes: keep(sel.nodes, res.nodes), edges: keep(sel.edges, res.edges) };
+    if (sel.variant) o.variant = sel.variant;
+    if (sel.pulse) o.pulse = true;
+    if (sel.dim) o.dim = true;
+    if (!o.nodes.length && !o.edges.length) return;
+    g.highlight(o);
+  }
+  function caption(text, o) { g.caption(text, o || { place: "bottom" }); }
+
+  function expandTriage() {
+    try {
+      var h = g.expand("triage");
+      if (h && typeof h.then === "function") h.then(function () {}, function () {});
+    } catch (e) { errors.push("expand: " + String(e && e.message)); }
+  }
+
+  // ---------------------------------------------------------------------------
+  // The log. `m` is incident minutes; `fire` is the live-mode call that line caused.
+  // Ordered, monotonic, and every finish() is preceded by a start() on the same node, so
+  // no primitive ever hits the zero-occupancy path.
+  // ---------------------------------------------------------------------------
+  var EVENTS = [
+    { m: 0, src: "datadog", text: "monitor [payments-api · 5xx rate] → ALERT — 5.9% over a 2m window (threshold 5.0%)",
+      fire: function (r) { r.start("alert"); },
+      cam: { gutter: true, dur: 500 },
+      cap: "T+00:00 — Datadog's 5xx monitor fires. Every beat from here is a real log line." },
+    { m: 2, src: "datadog", text: "severity auto-set SEV-2 · service payments-api · region us-east-1" },
+    { m: 4, src: "pagerduty", text: "incident #4471 opened from monitor 1832",
+      fire: function (r) { r.finish("alert"); } },
+    { m: 5, src: "pagerduty", text: "escalation policy 'Payments · primary' → notifying rhea.n",
+      fire: function (r) { r.start("page"); },
+      cam: { nodes: ["alert", "page"], pad: 110, dur: 600 },
+      cap: "run.start() marks a step active; run.finish() hands its token to the next one." },
+    { m: 8, src: "slack", text: "#inc-4471  rhea.n: taking IC — splitting dashboards, logs and the deploy diff",
+      fire: function () { expandTriage(); },
+      cap: "Triage opens: three investigations run in parallel inside one container." },
+    { m: 9, src: "pagerduty", text: "acknowledged by rhea.n after 4m 32s" },
+    { m: 11, src: "slack", text: "#inc-4471  rhea.n: nobody touch prod until we know what shipped",
+      fire: function (r) { r.finish("page"); },
+      cam: { node: "triage", pad: 70, dur: 650 } },
+    { m: 12, src: "grafana", text: "payments-api p99 240ms → 4.1s · db_pool_wait_ms p99 3.8s",
+      fire: function (r) { r.start("triage.dash"); } },
+    { m: 13, src: "kubectl", text: "logs -l app=payments-api --since=15m | grep -c 'pool timeout' → 11,204",
+      fire: function (r) { r.start("triage.logs"); } },
+    { m: 14, src: "spinnaker", text: "pipeline history: 3 deploys inside the window; newest #4821 at 13:58Z",
+      fire: function (r) { r.start("triage.deploys"); } },
+    { m: 22, src: "kubectl", text: "no OOMKills, no node pressure, no evictions — every error is DB-side. dead end",
+      fire: function (r) { r.finish("triage.logs"); } },
+    { m: 25, src: "grafana", text: "saturation clean (CPU 34%, mem 61%), no host anomalies. dead end",
+      fire: function (r) { r.finish("triage.dash"); } },
+    { m: 27, src: "spinnaker", text: "diff #4820..#4821 — DB_POOL_MAX 64 → 8 (config/payments.yaml)",
+      fire: function (r) { r.finish("triage.deploys"); },
+      cap: "Two legs dead-end. Only the deploy diff hands its token onward." },
+    { m: 28, src: "slack", text: "#inc-4471  rhea.n: #4821 shrank the connection pool 8×. that's it. rolling back",
+      fire: function (r) { r.start("culprit"); },
+      cam: { node: "culprit", k: 1.25, pad: 60, dur: 600 } },
+    { m: 33, src: "slack", text: "#inc-4471  rhea.n: mitigation = rollback; sam is on the status page",
+      fire: function (r) { r.finish("culprit"); },
+      cap: "One step, two successors — implicit fan-out mints a second token." },
+    { m: 34, src: "spinnaker", text: "rollback payments-api → v4820 initiated (12 pods, surge 25%)",
+      fire: function (r) { r.start("rollback"); },
+      cam: { nodes: ["rollback", "comms"], pad: 90, dur: 600 } },
+    { m: 35, src: "statuspage", text: "status page → 'Degraded performance · Payments'; support macro armed; exec brief sent",
+      fire: function (r) { r.start("comms"); r.spawn("comms", 2); },
+      cap: "run.spawn() adds two more tokens to comms — the ×3 badge is live occupancy." },
+    { m: 42, src: "statuspage", text: "3/3 notifications acknowledged (status page, support, exec)", kind: "ok",
+      fire: function (r) { r.finish("comms"); } },
+    { m: 44, src: "spinnaker", text: "ERROR rollback aborted — pod payments-api-7f9c stuck Terminating, finalizer not released", kind: "fail",
+      fire: function (r) { obs.failAt = r.fail("rollback", { reason: "pod payments-api-7f9c stuck Terminating (finalizer)" }); },
+      cam: { node: "rollback", k: 1.3, pad: 60, dur: 600 },
+      hl: { nodes: ["rollback"], variant: "warn", pulse: true },
+      cap: "run.fail() — the rollback aborts. Nothing fans out; this branch simply dies." },
+    { m: 47, src: "kubectl", text: "patch pod payments-api-7f9c -p '{\"metadata\":{\"finalizers\":null}}' → patched; pod deleted" },
+    { m: 49, src: "spinnaker", text: "rollback retry 1/3 → v4820",
+      fire: function (r) { r.start("rollback"); },
+      hl: { nodes: ["rollback"], edges: ["retry"], variant: "focus" },
+      cap: "Restarting a failed step IS the retry — that is what ticks the loop edge to 1/3." },
+    { m: 54, src: "spinnaker", text: "rollback complete — 12/12 pods healthy on v4820", kind: "ok",
+      fire: function (r) { r.finish("rollback"); g.clearHighlight(); },
+      cam: { gutter: true, dur: 650 } },
+    { m: 55, src: "datadog", text: "5xx rate 5.9% → 0.7% and falling; p99 1.2s",
+      fire: function (r) { r.start("verify"); } },
+    { m: 67, src: "datadog", text: "5xx rate 0.08%, p99 262ms — error-budget burn stopped", kind: "ok",
+      fire: function (r) { r.finish("verify"); },
+      cap: "Recovery work runs in parallel: warm the cache, drain the dead-letter queue." },
+    { m: 68, src: "redis", text: "cache hit rate 31% — warming payments:rates:* (18,400 keys)",
+      fire: function (r) { r.start("cache"); } },
+    { m: 69, src: "sqs", text: "payments-dlq depth 4,192 — replay started at 60 msg/s",
+      fire: function (r) { r.start("queue"); } },
+    { m: 77, src: "redis", text: "cache hit rate 96.4% — warm", kind: "ok",
+      fire: function (r) { r.finish("cache"); } },
+    { m: 82, src: "sqs", text: "payments-dlq depth 0 — 4,192 replayed, 0 poison messages", kind: "ok",
+      fire: function (r) { r.finish("queue"); },
+      cam: { node: "allclear", k: 1.3, pad: 60, dur: 600 } },
+    { m: 84, src: "slack", text: "#inc-4471  rhea.n: both recovery tasks green, calling it",
+      fire: function (r) { r.start("allclear"); },
+      cap: "All clear needs both branches: a 2-way AND-join, two filled pips." },
+    { m: 87, src: "slack", text: "#inc-4471  SEV-2 #4471 resolved — 87m, customer impact 14:02–14:56Z", kind: "ok",
+      fire: function (r) { r.finish("allclear"); },
+      hl: { nodes: ["allclear"], variant: "ok" },
+      cam: { gutter: true, dur: 650 } },
+    { m: 88, src: "slack", text: "#inc-4471  postmortem scheduled Thu 10:00 — action item: pool-size guardrail in CI" },
+  ];
+
+  // ---------------------------------------------------------------------------
+  // The feed panel. Every line is pre-built and revealed as its event fires, stamped with
+  // the live-run time it landed at so a seek() can dim everything that hadn't happened yet.
+  // ---------------------------------------------------------------------------
+  function tPlus(min) {
+    var h = Math.floor(min / 60), m = Math.floor(min % 60);
+    return "T+" + (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m;
+  }
+  var lis = EVENTS.map(function (ev) {
+    var li = document.createElement("li");
+    if (ev.kind) li.setAttribute("data-kind", ev.kind);
+    var b = document.createElement("b"); b.textContent = tPlus(ev.m);
+    var i = document.createElement("i"); i.textContent = ev.src;
+    var s = document.createElement("span"); s.textContent = ev.text;
+    li.appendChild(b); li.appendChild(i); li.appendChild(s);
+    logEl.appendChild(li);
+    return li;
+  });
+
+  function revealLine(idx, stamp) {
+    var li = lis[idx];
+    li.className = "on";
+    li.setAttribute("data-t", String(stamp));
+    countEl.textContent = (idx + 1) + " line" + (idx === 0 ? "" : "s");
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  /** Dim every line logged after `ms`; optionally ring the one at `markIdx`. */
+  function scrubFeed(ms, markIdx) {
+    for (var i = 0; i < lis.length; i++) {
+      var li = lis[i];
+      if (li.className.indexOf("on") === -1) continue;
+      var t = Number(li.getAttribute("data-t"));
+      li.className = "on" + (ms != null && t > ms ? " future" : "") + (i === markIdx ? " mark" : "");
+    }
+    if (markIdx != null && lis[markIdx]) {
+      logEl.scrollTop = Math.max(0, lis[markIdx].offsetTop - logEl.clientHeight / 2);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Readouts, sampled on the shared ticker — the same clock the run and the scene are on.
+  // ---------------------------------------------------------------------------
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+  var obs = { failReason: null, failAt: null, loopIter: 0, commsPeak: 0, joinFired: false };
+
+  function sampleFrame() {
+    if (!run) return;
+    var view = run.time(), front = run.now();
+    var st = run.state();
+    // Live time never stops (that IS the frontier), so past the end of the log the
+    // incident clock says so rather than inventing minutes the incident did not have.
+    mInc.textContent = (lastStamp != null && view >= lastStamp)
+      ? tPlus(EVENTS[EVENTS.length - 1].m) + " · log ends"
+      : tPlus(Math.max(0, (view - PREROLL) / MS_PER_MIN));
+    mClock.innerHTML = fmt(view) + ' <em>/ ' + fmt(front) + '</em>';
+    mFollow.textContent = run.following ? "live" : "detached · " + fmt(front - view) + " behind";
+    mFollow.className = run.following ? "good" : "bad";
+
+    var rb = st.nodes.rollback;
+    if (rb) {
+      var lp = st.loops.retry;
+      mRollback.textContent = rb.status + (lp && lp.iteration ? " · iter " + lp.iteration + "/" + lp.max : "");
+      mRollback.className = rb.status === "failed" ? "bad" : rb.status === "done" ? "good" : "";
+      if (lp && lp.iteration > obs.loopIter) obs.loopIter = lp.iteration;
+    }
+    var cm = st.nodes.comms;
+    if (cm && cm.occupancy > obs.commsPeak) obs.commsPeak = cm.occupancy;
+    var j = st.joins.allclear;
+    if (j && j.fired) obs.joinFired = true;
+  }
+  g.ticker.add(sampleFrame);
+
+  run.on("fail", function (ev) {
+    if (ev && ev.id === "rollback") { obs.failReason = ev.reason || null; obs.failAt = ev.t; }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Replay: one pump, comparing wall-clock elapsed against each line's incident minute.
+  // ---------------------------------------------------------------------------
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  var FAIL_IDX = 0;
+  for (var fi = 0; fi < EVENTS.length; fi++) if (EVENTS[fi].kind === "fail") FAIL_IDX = fi;
+
+  var started = false, replayDone = false, t0 = 0, cursor = 0, lastStamp = null;
+
+  function fireEvent(ev, idx) {
+    var stamp = run.now();
+    if (ev.fire) {
+      try { ev.fire(run); } catch (e) { errors.push("event " + idx + ": " + String(e && e.message)); }
+    }
+    revealLine(idx, stamp);
+    if (idx === EVENTS.length - 1) lastStamp = stamp;
+    if (ev.cam) camera(ev.cam);
+    if (ev.hl) highlight(ev.hl);
+    if (ev.cap) caption(ev.cap);
+    if (idx === FAIL_IDX) { rewindBtn.disabled = false; }
+    phaseEl.textContent = tPlus(ev.m) + " · " + ev.src;
+  }
+
+  function pump() {
+    if (!started) return;
+    var elapsed = (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0;
+    while (cursor < EVENTS.length && PREROLL + EVENTS[cursor].m * MS_PER_MIN <= elapsed) {
+      fireEvent(EVENTS[cursor], cursor);
+      cursor++;
+    }
+    if (cursor < EVENTS.length) { setTimeout(pump, 25); return; }
+    replayDone = true;
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    t0 = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    phaseEl.textContent = "replaying…";
+    pump();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Time travel. The frontier never stops — seek() only detaches the VIEW clock, which is
+  // why the two readouts diverge while we sit in the past.
+  // ---------------------------------------------------------------------------
+  function rewindToFailure() {
+    var t = obs.failAt;
+    if (t == null) return null;
+    liveBtn.disabled = false;
+    var landed = run.seek(t + 40);
+    scrubFeed(t + 40, FAIL_IDX);
+    highlight({ nodes: ["rollback"], edges: ["retry"], variant: "warn", pulse: true, dim: true });
+    camera({ node: "rollback", k: 1.35, pad: 60, dur: 700 });
+    caption("run.seek(" + Math.round(t) + ") — back at T+00:44. The rollback is red again and " +
+            "everything after it is unhappened; the frontier keeps running underneath.",
+            { place: "bottom" });
+    phaseEl.textContent = "scrubbed back to T+00:44";
+    return landed;
+  }
+
+  function backToLive() {
+    run.follow();
+    g.clearHighlight();
+    scrubFeed(null, null);
+    logEl.scrollTop = logEl.scrollHeight;
+    camera({ gutter: true, dur: 650 });
+    caption("run.follow() — the view clock snaps back to the frontier. Incident closed.",
+            { place: "bottom", variant: "note" });
+    phaseEl.textContent = "following live";
+    liveBtn.disabled = true;
+  }
+
+  playBtn.addEventListener("click", start);
+  rewindBtn.addEventListener("click", rewindToFailure);
+  liveBtn.addEventListener("click", backToLive);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport(checks) {
+    reportEl.textContent =
+      "log lines replayed        " + checks.lines + " over " + tPlus(EVENTS[EVENTS.length - 1].m) + "\n" +
+      "rollback fail reason      " + checks.failReason + "\n" +
+      "retry loop iterations     " + checks.loopIter + " of max 3\n" +
+      "comms peak occupancy      x" + checks.commsPeak + "  (1 arrival + run.spawn(comms, 2))\n" +
+      "all-clear AND-join fired  " + checks.joinFired + "\n" +
+      "seek back to the fail     view " + fmt(checks.seekView) + " while the frontier was " + fmt(checks.seekFrontier) + "\n" +
+      "following after follow()  " + checks.followingAfter + "\n" +
+      "errors                    " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  // ---------------------------------------------------------------------------
+
+  function waitFor(fn, ms) {
+    var begin = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - begin > (ms || 40000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  async function story() {
+    await sleep(AUTO ? 150 : 500);
+    start();
+    await waitFor(function () { return replayDone; }, 40000);
+    await sleep(AUTO ? 700 : 1200);
+
+    var checks = {
+      lines: EVENTS.length,
+      failReason: obs.failReason,
+      loopIter: obs.loopIter,
+      commsPeak: obs.commsPeak,
+      joinFired: obs.joinFired,
+    };
+
+    caption("Now rewind: the whole run is an event log, so the view clock can walk back into it.",
+            { place: "bottom", variant: "note" });
+    await sleep(AUTO ? 900 : 1500);
+
+    rewindToFailure();
+    checks.seekView = run.time();
+    checks.seekFrontier = run.now();
+    checks.clampedToNow = run.seek(1e9) === run.now();
+    run.seek(checks.seekView);           // ...and straight back into the past again
+    await sleep(AUTO ? 2200 : 3000);
+
+    backToLive();
+    checks.followingAfter = run.following;
+    await sleep(AUTO ? 900 : 1400);
+
+    caption("SEV-2 #4471 — detected T+00:00, mitigated T+00:54, closed T+01:27.", { place: "bottom" });
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    writeReport(checks);
+    window.__smvExit = { done: true, errors: errors, checks: checks };
+  }
+
+  story().catch(function (err) {
+    errors.push("story: " + String((err && err.message) || err));
+    phaseEl.textContent = "done — error";
+    writeReport({ lines: cursor, failReason: obs.failReason, loopIter: obs.loopIter,
+                  commsPeak: obs.commsPeak, joinFired: obs.joinFired, seekView: 0,
+                  seekFrontier: 0, followingAfter: run && run.following });
+    window.__smvExit = { done: true, errors: errors };
+  });
+})();
+</script>
+
+</body>
+</html>
