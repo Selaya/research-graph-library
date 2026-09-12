@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cache-aside: miss, fill, hit — sparkle-motion-visualizer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8; --card: #ffffff; --ink: #1b2230; --muted: #6b7488;
+    --line: rgba(128,138,160,.32); --accent: #5b6ef5; --warm: #b97400;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+            --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 20px 40px; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--page); color: var(--ink); }
+  main { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: -.01em; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; }
+  p.lede { margin: 0 0 14px; color: var(--muted); max-width: 80ch; }
+  code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #phase { color: var(--muted); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  #pipe { height: 620px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  aside { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 14px 16px; }
+  aside h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  aside ol { margin: 0; padding-left: 18px; max-height: 320px; overflow-y: auto; }
+  aside li { margin: 0 0 6px; color: var(--muted); }
+  aside li.now { color: var(--ink); font-weight: 600; }
+  aside li.done { color: var(--ink); }
+  aside li.done::marker { color: #2f9e6a; }
+  ul.watch { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
+  ul.watch li { margin: 0 0 4px; }
+  footer { margin-top: 20px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+<h1>Cache-aside: miss, fill, hit <small>— a cold request, a warm one, then a stampede</small></h1>
+<p class="lede">
+  The same <code>GET /products/42</code>, three times. Cold, the app pays for every hop:
+  gateway to Redis, a miss, Redis to Postgres, and back again to fill the cache. Warm, Redis
+  alone answers. Five minutes later the key expires and two clients race to refill it at
+  once — a cache stampede. The closing beat uses <code>g.condense()</code> to fold request
+  one's miss → fetch → fill chain into a single "read-through" hop.
+</p>
+
+<div class="bar">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="step" type="button">Step ⏭</button>
+  <button id="restart" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div class="layout">
+  <div id="pipe"></div>
+  <aside>
+    <h3>Messages</h3>
+    <ol id="msgs"></ol>
+    <h3 style="margin-top:14px">What to look for</h3>
+    <ul class="watch">
+      <li>Cold: five hops, ~24ms, most of it one Postgres round trip.</li>
+      <li>Warm: Redis alone answers — three hops, ~2ms.</li>
+      <li><b>MISS</b>/<b>HIT</b> label what Redis actually decided; message text is the wire call.</li>
+      <li>Five minutes on, the key's TTL lapses and <em>two</em> clients miss at once — watch
+        both balls converge on Postgres for the same row.</li>
+      <li>The last beat condenses request one's Redis→Postgres→Redis span into one
+        "read-through cache" hop — same latency, one box. Watch its duration chip and the
+        total-duration bar at the bottom (the pipeline preset).</li>
+      <li>Scrub the transport bar backward — every structural step, condense included,
+        snapshots cleanly.</li>
+    </ul>
+  </aside>
+</div>
+<footer>Part of the <a href="index.html">sparkle-motion-visualizer demos</a>. Layout by <code>demo/sequence-solver.js</code>; see the page source.</footer>
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script src="sequence-solver.js"></script>
+<script>
+(function () {
+  "use strict";
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) { errors.push(String((e && e.message) || e)); });
+  window.addEventListener("unhandledrejection", function (e) { errors.push("unhandledrejection: " + String(e && e.reason)); });
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  var P = AUTO ? 0.45 : 1; // pace multiplier
+
+  // ---- actors -----------------------------------------------------------------------
+  var ACTORS = [
+    { id: "app", label: "Web app" },
+    { id: "app2", label: "Web app #2" },
+    { id: "api", label: "Product API" },
+    { id: "redis", label: "Redis cache" },
+    { id: "pg", label: "Postgres" },
+  ];
+
+  // Each entry is one activation: who runs it (actor), the incoming message (msg, edge
+  // label — null means "no wire message, just the next thing this actor does"), what the
+  // actor does while the ball dwells (node), how long that really takes (dur), which
+  // activation it arrives FROM (from — null only for the very first), the row it sits on,
+  // and an optional `group` shared by activations that happen at the same instant (a real
+  // fan-out — different actor columns, same row).
+  var MSGS = [
+    // -- request 1: cold -------------------------------------------------------------
+    { id: "app.1", actor: "app", node: "GET /products/42", msg: null, dur: "1ms", from: null, row: 0 },
+    { id: "api.1", actor: "api", node: "route request", msg: "GET /products/42", dur: "0.3ms", from: "app.1", row: 1 },
+    { id: "redis.1", actor: "redis", node: "MISS", msg: "GET product:42", dur: "0.4ms", from: "api.1", row: 2 },
+    { id: "api.2", actor: "api", node: "miss → query DB", msg: "nil", dur: "0.3ms", from: "redis.1", row: 3 },
+    { id: "pg.1", actor: "pg", node: "query products", msg: "SELECT id=42", dur: "18ms", from: "api.2", row: 4 },
+    { id: "api.3", actor: "api", node: "cache the row", msg: "row", dur: "0.3ms", from: "pg.1", row: 5 },
+    { id: "redis.2", actor: "redis", node: "SET ex=300", msg: "SET product:42 ex=300", dur: "0.5ms", from: "api.3", row: 6 },
+    { id: "api.4", actor: "api", node: "shape response", msg: "OK", dur: "0.3ms", from: "redis.2", row: 7 },
+    { id: "app.2", actor: "app", node: "render product", msg: "200 OK", dur: "0.2s", from: "api.4", row: 8 },
+    // -- request 2: warm (gap: TTL still fresh) ---------------------------------------
+    { id: "app.3", actor: "app", node: "GET /products/42", msg: null, dur: "1ms", from: "app.2", row: 10 },
+    { id: "api.5", actor: "api", node: "route request", msg: "GET /products/42", dur: "0.3ms", from: "app.3", row: 11 },
+    { id: "redis.3", actor: "redis", node: "HIT", msg: "GET product:42", dur: "0.4ms", from: "api.5", row: 12 },
+    { id: "api.6", actor: "api", node: "serve from cache", msg: "row", dur: "0.3ms", from: "redis.3", row: 13 },
+    { id: "app.4", actor: "app", node: "render product", msg: "200 OK", dur: "0.2s", from: "api.6", row: 14 },
+    // -- request 3: stampede (gap: 5 minutes, TTL expires) ----------------------------
+    { id: "app.5", actor: "app", node: "TTL expired", msg: "5 min later", dur: "1ms", from: "app.4", row: 16 },
+    { id: "api.s1", actor: "api", node: "route request", msg: "GET /products/42", dur: "0.3ms", from: "app.5", row: 17, group: "g1" },
+    { id: "app2.1", actor: "app2", node: "GET /products/42", msg: "meanwhile", dur: "1ms", from: "app.5", row: 17, group: "g1" },
+    { id: "redis.s1", actor: "redis", node: "MISS", msg: "GET product:42", dur: "0.4ms", from: "api.s1", row: 18, group: "g2" },
+    { id: "api.s2", actor: "api", node: "route request", msg: "GET /products/42", dur: "0.3ms", from: "app2.1", row: 18, group: "g2" },
+    { id: "pg.s1", actor: "pg", node: "query products", msg: "SELECT id=42", dur: "18ms", from: "redis.s1", row: 19, group: "g3" },
+    { id: "redis.s2", actor: "redis", node: "MISS", msg: "GET product:42", dur: "0.4ms", from: "api.s2", row: 19, group: "g3" },
+    { id: "pg.s2", actor: "pg", node: "query products", msg: "SELECT id=42", dur: "18ms", from: "redis.s2", row: 20 },
+  ];
+  // Request 1's real hops the closing beat folds into one "read-through" activation.
+  var CONDENSE_IDS = ["redis.1", "api.2", "pg.1", "api.3", "redis.2"];
+  var REQ1_IDS = ["app.1", "api.1", "redis.1", "api.2", "pg.1", "api.3", "redis.2", "api.4", "app.2"];
+
+  var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
+  MSGS.forEach(function (m) { seq.place(m.id, m.actor, m.row); });
+  seq.place("readthrough.1", "api", 3); // lands where the merge's earliest activation sat
+
+  function byId(id) { for (var i = 0; i < MSGS.length; i++) if (MSGS[i].id === id) return MSGS[i]; return null; }
+
+  // The pipeline preset draws a duration chip in every node's top-right corner (D6/M6);
+  // the core layout has no idea that chip exists, so a short label ("MISS", "HIT") in an
+  // auto-sized box collides with it. Size every activation box explicitly — label's own
+  // footprint plus the chip's, side by side with a gap — so nothing overlaps.
+  var measureCtx = document.createElement("canvas").getContext("2d");
+  var LABEL_FONT = "500 13px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  var CHIP_FONT = "600 10px system-ui, -apple-system, 'Segoe UI', sans-serif";
+  function textW(s, font) { measureCtx.font = font; return measureCtx.measureText(String(s)).width; }
+  function sizedNode(id, actor, label, dur) {
+    var w = Math.max(60, Math.ceil(textW(label, LABEL_FONT)) + 28 + Math.ceil(textW(dur, CHIP_FONT)) + 20);
+    return { id: id, parent: actor, label: label, data: { duration: dur }, w: w, h: 36 };
+  }
+  function nodeOf(m) { return sizedNode(m.id, m.actor, m.node, m.dur); }
+  function edgeOf(m) { return { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id, label: m.msg }; }
+
+  var SEED = {
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    edges: [],
+  };
+
+  // ---- the storyboard ---------------------------------------------------------------
+  var STEPS = [{ label: "cold" }, { op: "caption", args: ["A cold GET: nothing cached yet.", { place: "top" }] }];
+
+  function addBatch(nodes, edges) {
+    var steps = [];
+    nodes.forEach(function (n) { steps.push({ op: "addNode", args: [n] }); });
+    edges.forEach(function (e) { steps.push({ op: "addEdge", args: [e] }); });
+    STEPS.push({ op: "batch", steps: steps, dur: 260 * P });
+  }
+
+  var i = 1;
+  while (i < MSGS.length) {
+    var m = MSGS[i];
+
+    if (m.id === "app.3") {
+      STEPS.push({ label: "warm" });
+      STEPS.push({ op: "caption", args: ["Same key, requested again — the cache is still fresh.", { place: "top" }] });
+    }
+    if (m.id === "app.5") {
+      STEPS.push({ label: "stampede" });
+      STEPS.push({ op: "caption", args: ["5 minutes later: the TTL on product:42 expires.", { place: "top" }] });
+    }
+
+    if (m.group) {
+      var mate = MSGS[i + 1];
+      addBatch([nodeOf(m), nodeOf(mate)], [edgeOf(m), edgeOf(mate)]);
+      STEPS.push({ op: "camera", args: [{ nodes: [m.from, m.id, mate.from, mate.id], pad: 140, dur: 320 * P }] });
+      STEPS.push({ op: "run.play", until: m.id });
+      STEPS.push({ op: "run.play", until: mate.id });
+      i += 2;
+    } else {
+      addBatch([nodeOf(m)], [edgeOf(m)]);
+      STEPS.push({ op: "camera", args: [{ nodes: [m.from, m.id], k: 1, pad: 120, dur: 300 * P }] });
+      STEPS.push({ op: "run.play", until: m.id });
+      i += 1;
+    }
+
+    if (m.id === "app.2") {
+      STEPS.push({ op: "highlight", args: [{ nodes: REQ1_IDS, variant: "warn" }] });
+      STEPS.push({ op: "caption", args: ["Cold cache: 5 hops, ~24ms.", { place: "top" }] });
+      STEPS.push({ op: "wait", ms: 700 * P });
+      STEPS.push({ op: "clearHighlight", args: [] });
+    }
+    if (m.id === "redis.3") {
+      STEPS.push({ op: "highlight", args: [{ nodes: ["redis.3"], variant: "ok", pulse: true }] });
+    }
+    if (m.id === "app.4") {
+      STEPS.push({ op: "caption", args: ["Warm cache: 3 hops, ~2ms.", { place: "top" }] });
+      STEPS.push({ op: "wait", ms: 700 * P });
+      STEPS.push({ op: "clearHighlight", args: [] });
+    }
+    if (m.id === "pg.s2") {
+      STEPS.push({ op: "caption", args: ["Cache stampede: both requests refill the same key.", { place: "top" }] });
+      STEPS.push({ op: "wait", ms: 700 * P });
+    }
+  }
+
+  // ---- closing beat: condense request 1's read-through span into one hop ------------
+  STEPS.push({ label: "condense" });
+  STEPS.push({ op: "camera", args: [{ nodes: CONDENSE_IDS, pad: 90, dur: 400 * P }] });
+  STEPS.push({ op: "caption", args: ["Folding request 1's miss → fetch → fill into one hop.", { place: "top" }] });
+  STEPS.push({
+    op: "condense",
+    args: [CONDENSE_IDS, sizedNode("readthrough.1", "api", "read-through cache (1 hop)", "18.9ms")],
+  });
+  STEPS.push({ op: "highlight", args: [{ nodes: ["readthrough.1"], variant: "ok", pulse: true }] });
+  STEPS.push({ op: "camera", args: [{ node: "readthrough.1", k: 1.1, pad: 100, dur: 400 * P }] });
+  STEPS.push({ op: "caption", args: ["Same real latency — now one conceptual hop.", { place: "top" }] });
+  STEPS.push({ op: "wait", ms: 800 * P });
+  STEPS.push({ op: "clearHighlight", args: [] });
+  STEPS.push({ label: "done" });
+  STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
+  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -30 }, dur: 200 * P }] }); // clear the transport bar
+  STEPS.push({ op: "caption", args: ["Cold vs warm: watch the total-duration bar below.", { place: "top" }] });
+  STEPS.push({ op: "wait", ms: 900 * P });
+
+  var RUN_OPTS = {
+    hopMs: 480 * P, // the message in flight — the part worth watching
+    dwell: function (sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; },
+  };
+
+  // ---- mount --------------------------------------------------------------------
+  var $ = function (s) { return document.querySelector(s); };
+  var phaseEl = $("#phase"), msgsEl = $("#msgs");
+  var g, sb;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "TB", solver: seq.solver, nodesep: 34, ranksep: 20, marginx: 22, marginy: 16, minColWidth: 148 },
+      animation: { duration: 340 * P, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS);
+    sb = g.storyboard();
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed: " + err.message;
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+  window.__g = g;
+
+  // ---- side panel: the message list lights up as the ball arrives ----------------------
+  MSGS.forEach(function (m) {
+    var li = document.createElement("li");
+    li.id = "li-" + m.id.replace(/\./g, "-");
+    var actorLabel = ACTORS.filter(function (a) { return a.id === m.actor; })[0].label;
+    li.textContent = (m.msg ? m.msg + " → " : "") + actorLabel + ": " + m.node;
+    msgsEl.appendChild(li);
+  });
+  var run = g.run();
+  run.on("start", function (ev) {
+    var li = document.getElementById("li-" + String(ev.nodeId).replace(/\./g, "-"));
+    if (!li) return;
+    msgsEl.querySelectorAll("li.now").forEach(function (x) { x.classList.remove("now"); x.classList.add("done"); });
+    li.classList.add("now");
+  });
+
+  // ---- controls -------------------------------------------------------------------
+  var playing = false;
+  function finish() {
+    playing = false;
+    phaseEl.textContent = "story complete — scrub the bar or Restart";
+    window.__smvExit = { done: true, errors: errors };
+  }
+  $("#play").addEventListener("click", function () {
+    if (playing) return;
+    playing = true;
+    phaseEl.textContent = "playing…";
+    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+  });
+  $("#step").addEventListener("click", function () {
+    Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
+  });
+  $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
+
+  if (AUTO) $("#play").click();
+})();
+</script>
+</body>
+</html>
