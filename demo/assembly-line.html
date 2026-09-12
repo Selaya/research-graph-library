@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — the assembly line</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --bad: #c94b4b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --bad: #e08383;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #pipe {
+    height: 460px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span.bad { color: var(--bad); }
+
+  .legend { margin-top: 16px; color: var(--muted); font-size: 12.5px; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>The assembly line <small>— sub-assemblies, a QC fail, and a rework loop</small></h1>
+  <p class="lede">
+    Three sub-assemblies — <em>chassis</em>, <em>drivetrain</em>, <em>electronics</em> — build
+    as collapsed containers with a summed duration chip, converge on an
+    <code>join:"all"</code> <em>final assembly</em>, and hit <em>QC inspection</em>. The first
+    pass fails with a reason (<code>data.fail</code>); the second pass rides the dashed
+    <code>rework</code> loop edge (<code>maxIterations:2</code>) back to final assembly before
+    packaging and shipping. Watch the duration chips, the bottleneck sub-assembly, and the
+    loop's iteration badge.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s</span></div>
+  <div class="tile"><i>QC status</i><span id="m-qc">pending</span></div>
+  <div class="tile"><i>join · final</i><span id="m-join">0/3</span></div>
+  <div class="tile"><i>rework loop</i><span id="m-loop">iter 0/2</span></div>
+</div>
+
+<p class="legend">
+  Legend — chip = duration (<code>durationAgg:'sum'</code> rolls a collapsed sub-assembly up),
+  pips under <em>Final assembly</em> = the three join slots, dashed arc = the
+  <code>rework</code> back edge (<code>loop:true, maxIterations:2</code>), red node = a
+  <code>data.fail</code> step, slim bar under the graph = total pipeline duration.
+</p>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  var FAIL_REASON = "warped weld on the B-pillar";
+
+  // ---------------------------------------------------------------------------
+  // The spec. Three parallel sub-assemblies (no shared upstream — each is its own root
+  // chain) converge on an explicit join:"all", then QC, then packaging/ship. `qc` carries
+  // data.fail from mount so the FIRST simulated pass genuinely fails with a reason; the
+  // storyboard clears it before the second pass so the structural `rework` loop edge
+  // (already present the whole time) actually gets to tick — a failing node never falls
+  // through to its loop edge (README: "no loop, no fan-out to successors").
+  // ---------------------------------------------------------------------------
+
+  var SPEC = {
+    nodes: [
+      { id: "chassis", label: "Chassis", collapsed: true, durationAgg: "sum" },
+      { id: "chassis.stamp", parent: "chassis", label: "Stamp", data: { duration: "20m" } },
+      { id: "chassis.weld", parent: "chassis", label: "Weld", data: { duration: "35m" } },
+      { id: "chassis.paint", parent: "chassis", label: "Paint", data: { duration: "40m" } },
+
+      { id: "drivetrain", label: "Drivetrain", collapsed: true, durationAgg: "sum" },
+      { id: "drivetrain.mount", parent: "drivetrain", label: "Engine mount", data: { duration: "25m" } },
+      { id: "drivetrain.trans", parent: "drivetrain", label: "Transmission", data: { duration: "50m" } },
+      { id: "drivetrain.axles", parent: "drivetrain", label: "Axles", data: { duration: "30m" } },
+
+      { id: "electronics", label: "Electronics", collapsed: true, durationAgg: "sum" },
+      { id: "electronics.harness", parent: "electronics", label: "Harness", data: { duration: "15m" } },
+      { id: "electronics.ecu", parent: "electronics", label: "ECU", data: { duration: "10m" } },
+      { id: "electronics.sensors", parent: "electronics", label: "Sensors", data: { duration: "20m" } },
+
+      { id: "final", label: "Final assembly", join: "all", data: { duration: "30m" } },
+      { id: "qc", label: "QC inspection", data: { duration: "12m", fail: FAIL_REASON } },
+      { id: "packaging", label: "Packaging", data: { duration: "18m" } },
+      { id: "ship", label: "Ship", data: { duration: "8m" } },
+    ],
+    edges: [
+      { id: "c1", source: "chassis.stamp", target: "chassis.weld" },
+      { id: "c2", source: "chassis.weld", target: "chassis.paint" },
+      { id: "c3", source: "chassis.paint", target: "final" },
+
+      { id: "d1", source: "drivetrain.mount", target: "drivetrain.trans" },
+      { id: "d2", source: "drivetrain.trans", target: "drivetrain.axles" },
+      { id: "d3", source: "drivetrain.axles", target: "final" },
+
+      { id: "e1", source: "electronics.harness", target: "electronics.ecu" },
+      { id: "e2", source: "electronics.ecu", target: "electronics.sensors" },
+      { id: "e3", source: "electronics.sensors", target: "final" },
+
+      { id: "f1", source: "final", target: "qc" },
+      { id: "f2", source: "qc", target: "packaging" },
+      { id: "f3", source: "packaging", target: "ship" },
+      // The rework loop: iteration 1 flies the arc back to final assembly, iteration 2
+      // ticks in place — capped by the edge's own maxIterations (2 of a possible 2 here).
+      { id: "rework", source: "qc", target: "final", loop: true, maxIterations: 2 },
+    ],
+  };
+
+  var RUN_OPTS = {
+    hopMs: 200,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 380;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 180 + 900 * f;
+    },
+  };
+
+  function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
+  function cam(target) { return { op: "camera", args: [target] }; }
+
+  var STEPS = [
+    { label: "assemble" },
+    cap("Three sub-assemblies build in parallel: chassis, drivetrain, electronics."),
+    { op: "run.play", args: [{ until: "final" }] },
+
+    { label: "bottleneck" },
+    { op: "expand", args: ["drivetrain"] },
+    cam({ node: "drivetrain", k: 1.7, pad: 60 }),
+    cap("Drivetrain is the bottleneck: 1h45m total — transmission alone is 50 minutes.", { place: "bottom" }),
+    { op: "highlight", args: [{ nodes: ["drivetrain.trans"], variant: "warn", pulse: true }] },
+
+    { label: "close it up" },
+    { op: "clearHighlight" },
+    { op: "collapse", args: ["drivetrain"] },
+    cam({ fit: true }),
+
+    { label: "expand all" },
+    cap("expandAll() opens every sub-assembly in one transition."),
+
+    { label: "collapse all" },
+    cap("collapseAll() folds them all back down just as cleanly."),
+
+    { label: "QC — first pass" },
+    cam({ node: "qc", k: 1.8, pad: 50 }),
+    cap("QC inspection runs..."),
+    { op: "run.play", args: [{ until: "qc" }] },
+    cap("QC fails: " + FAIL_REASON + " (data.fail, carried through as the fail reason).", { place: "bottom" }),
+
+    { label: "rework" },
+    { op: "run.seek", ms: 0 },
+    { op: "update", args: ["qc", { data: { fail: false } }] },
+    cam({ fit: true }),
+    cap("Defect fixed. Same graph, same QC step — rework sends it back through final assembly."),
+
+    { label: "QC — second pass" },
+    { op: "run.play", args: [{ until: "qc" }] },
+    cap("QC passes this time — the rework loop is free to tick."),
+    { op: "highlight", args: [{ nodes: ["final"], variant: "ok", pulse: true }] },
+    { op: "run.play", args: [{ until: "packaging" }] },
+    cap("Two rework ticks on final assembly, capped at maxIterations:2, then QC waves it through."),
+
+    { label: "packaging & ship" },
+    { op: "clearHighlight" },
+    cam({ fit: true }),
+    { op: "run.play", args: [{}] },
+    cap("Packaged and shipped."),
+
+    { label: "done" },
+    { op: "caption", args: [null] },
+  ];
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mTime = $("#m-time"), mQc = $("#m-qc"), mJoin = $("#m-join"), mLoop = $("#m-loop");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 26, ranksep: 50 },
+      animation: { duration: 400, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Observations — sampled from the public run state, never library internals.
+  // ---------------------------------------------------------------------------
+
+  var obs = { failedOnce: false, failReason: null, loopIteration: 0, loopMax: 0, loopBadge: "", joinFiredAt: null, joinNeeded: 0 };
+
+  var nodeEls = function () { return document.querySelectorAll("#pipe .smv-node"); };
+  var loopBadgeText = function () {
+    var el = document.querySelector("#pipe .smv-loop-badge");
+    return el ? el.textContent : "";
+  };
+
+  function scanNaN() {
+    var bad = [];
+    var all = document.querySelectorAll("#pipe *");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      for (var a = 0; a < el.attributes.length; a++) {
+        var at = el.attributes[a];
+        if (/NaN|Infinity/.test(at.value)) bad.push((el.getAttribute("class") || el.nodeName) + "@" + at.name + "=" + at.value);
+      }
+      if (el.children.length === 0 && /NaN|Infinity/.test(el.textContent || "")) {
+        bad.push((el.getAttribute("class") || el.nodeName) + "#text=" + el.textContent);
+      }
+    }
+    return bad;
+  }
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  g.run().on("fail", function (ev) {
+    if (ev && ev.nodeId === "qc" && !obs.failedOnce) {
+      obs.failedOnce = true;
+      obs.failReason = ev.reason || null;
+    }
+  });
+  g.run().on("loop", function (ev) {
+    if (ev && ev.edgeId === "rework") {
+      if (ev.max > obs.loopMax) obs.loopMax = ev.max;
+      if (ev.iteration > obs.loopIteration) obs.loopIteration = ev.iteration;
+    }
+  });
+  g.run().on("join", function (ev) {
+    if (ev && ev.nodeId === "final" && obs.joinFiredAt == null) {
+      obs.joinFiredAt = ev.arrived;
+      obs.joinNeeded = ev.needed;
+    }
+  });
+
+  function sampleFrame() {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+    mTime.textContent = fmt(run.time());
+    var qcNode = st.nodes.qc;
+    var qcStatus = qcNode ? qcNode.status : "pending";
+    mQc.textContent = qcStatus;
+    mQc.className = qcStatus === "failed" ? "bad" : "";
+    var j = st.joins.final;
+    mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "0/3";
+    var lp = st.loops.rework;
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/2";
+    if (lp) obs.loopBadge = loopBadgeText() || obs.loopBadge;
+  }
+  g.ticker.add(sampleFrame);
+
+  var checks = {};
+  var storyDone = false;
+
+  // expandAll/collapseAll are top-level g methods, not storyboard ops (M2's OPS set has
+  // per-container expand/collapse only) — trigger them directly off the rail label so the
+  // "collapseAll/expandAll beat" the brief asks for exercises the real methods.
+  sb.on("step", function (ev) {
+    var label = sb.position().label;
+    if (label === "expand all") g.expandAll();
+    else if (label === "collapse all") g.collapseAll();
+    paintRail();
+    g.fitView({ animate: true });
+    phaseEl.textContent = "step " + ev.index + " · " + (label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+
+  // ---------------------------------------------------------------------------
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  function transportPlay() {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    transportPlay();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "QC failed on first pass   " + obs.failedOnce + "  reason: " + JSON.stringify(obs.failReason) + "\n" +
+      "final assembly join       " + obs.joinFiredAt + "/" + obs.joinNeeded + "\n" +
+      "rework loop                " + obs.loopIteration + " of max " + obs.loopMax + "  (" + obs.loopBadge + ")\n" +
+      "NaN in DOM                 " + (checks.nan && checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
+      "errors                     " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  async function auto() {
+    if (AUTO) g.run().speed(1.6);
+    await sleep(200);
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(400);
+    checks.nan = scanNaN();
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      checks.nan = checks.nan || scanNaN();
+      writeReport();
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

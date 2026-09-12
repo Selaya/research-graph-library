@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — the tool-use agent loop</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --ok: #1c8a5a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --ok: #4fd493;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 12px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 76ch; }
+
+  .lookfor {
+    margin: 14px 0 0; padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--card); max-width: 76ch;
+  }
+  .lookfor b.kicker { display: block; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .lookfor ul { margin: 0; padding-left: 18px; }
+  .lookfor li { margin: 3px 0; }
+  .lookfor code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 4px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+  p.howto { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; max-width: 76ch; }
+  p.howto code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #stage {
+    height: 440px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+
+  .legend { margin-top: 16px; color: var(--muted); font-size: 12.5px; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  #log {
+    margin: 14px 0 0; padding: 10px 14px; list-style: none;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    font: 12.5px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+    max-height: 220px; overflow-y: auto;
+  }
+  #log li.beat { color: var(--ink); font-weight: 600; margin-top: 6px; }
+  #log li.beat:first-child { margin-top: 0; }
+
+  #issues {
+    margin-top: 14px; padding: 10px 14px; border-radius: 10px;
+    border: 1px solid var(--warm); background: var(--card); color: var(--warm);
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>The tool-use agent loop <small>— a ReAct-style cycle, one <code>&lt;script&gt;</code> tag</small></h1>
+  <p class="lede">
+    Think → act (tool call) → observe → back to think, a real bounded loop
+    (<code>loop:true, maxIterations:6</code>) — this run rides it three iterations, a different
+    tool each time, then exits to a final answer.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="step" type="button">Step ⏭</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+<p class="howto">
+  <b>Play</b> runs the whole storyboard start to finish; <b>Step</b> calls the storyboard's own
+  <code>sb.next()</code> one beat at a time. The graph's own transport bar (bottom of the pane,
+  once the story starts) has the same ⏮ ▶ ⏭ plus a scrubber over the whole thing.
+</p>
+
+<div id="stage"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>loop iteration</i><span id="m-iter">iter 0/6</span></div>
+  <div class="tile"><i>active step</i><span id="m-active">—</span></div>
+  <div class="tile"><i>last tool call</i><span id="m-tool">—</span></div>
+</div>
+
+<div class="lookfor">
+  <b class="kicker">What to look for</b>
+  <ul>
+    <li>The dashed loop-back arc from <b>Observe</b> to <b>Think</b> — its badge ticks
+      <code>iter 1/6 → 2/6 → 3/6</code> as the agent keeps going.</li>
+    <li>A caption under the graph naming the exact tool call each iteration reaches for
+      (<code>iteration 2: read_file src/auth.js</code>), paired with a highlight pulse on the
+      active tool.</li>
+    <li><b>Act</b> is a collapsed container — the story expands it to reveal its three tool
+      children (<code>search</code> / <code>read_file</code> / <code>run_tests</code>), each with
+      its own declared duration.</li>
+    <li>Once the loop's iteration budget for this run is spent, the token leaves via
+      <b>Observe</b>'s own out-edge — not the loop edge — to <b>Final answer</b>.</li>
+  </ul>
+</div>
+
+<p class="legend">
+  Legend — dashed arc = the loop edge (<code>loop:true, maxIterations:6</code>, this run rides it
+  for 3), pulsing outline = the highlighted/active element. Zoom is ctrl/⌘ + wheel; a click on a
+  container toggles it directly.
+</p>
+
+<ul id="log"></ul>
+<div id="issues" hidden></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The spec. `act` is a collapsed container; a container is never itself executable
+  // (README §API / docs/RUN.md D5) — with no internal edges among its three children the
+  // engine's own entry/exit resolution picks the first one, `act.search`, for both, so the
+  // token's one real pass through the container dwells there. The other two tools are real,
+  // inspectable nodes (their own declared durations, visible once the story expands the
+  // container) that this run narrates into rather than physically re-visits — exactly how a
+  // bounded loop's post-iteration-1 ticks already work (docs/RUN.md "Bounded retry loops":
+  // only the first arc-cross is a real hop, everything after is a compressed in-place tick).
+  // ---------------------------------------------------------------------------
+  var SPEC = {
+    nodes: [
+      { id: "prompt", label: "User prompt", data: { duration: "1s" } },
+      { id: "think", label: "Think", data: { duration: "2s" } },
+      { id: "act", label: "Act (tool call)", collapsed: true, durationAgg: "max" },
+      { id: "act.search", parent: "act", label: "search", data: { duration: "2.5s" } },
+      { id: "act.read_file", parent: "act", label: "read_file", data: { duration: "1.8s" } },
+      { id: "act.run_tests", parent: "act", label: "run_tests", data: { duration: "6s" } },
+      { id: "observe", label: "Observe", data: { duration: "1.2s" } },
+      { id: "final", label: "Final answer", data: { duration: "1s" } },
+    ],
+    edges: [
+      { id: "e1", source: "prompt", target: "think" },
+      { id: "e2", source: "think", target: "act" },
+      { id: "e3", source: "act", target: "observe" },
+      { id: "loop", source: "observe", target: "think", loop: true, maxIterations: 6 },
+      { id: "e4", source: "observe", target: "final" },
+    ],
+  };
+
+  var TOOLS = [
+    { id: "act.search", name: "search", arg: '"token refresh bug"' },
+    { id: "act.read_file", name: "read_file", arg: "src/auth.js" },
+    { id: "act.run_tests", name: "run_tests", arg: "auth" },
+  ];
+  var LOOP_EDGE = "loop";
+
+  var FRIENDLY = {
+    prompt: "User prompt", think: "Think", observe: "Observe", final: "Final answer",
+    "act.search": "Act → search", "act.read_file": "Act → read_file", "act.run_tests": "Act → run_tests",
+  };
+
+  // Pacing: short, friendly dwells regardless of the "narrative" seconds declared above, and
+  // this run rides the loop for 2 of its 6 allowed iterations (the 1st tool call is the real
+  // pass through `act.search`; the loop then fires twice more) — 3 tool calls total, then exit.
+  var RUN_OPTS = {
+    hopMs: 240,
+    iterations: { loop: 2 },
+    dwell: function (sec, ctx) {
+      if (sec == null) return 480;
+      return Math.min(2200, 460 + sec * 320);
+    },
+  };
+
+  var STEPS = [
+    { label: "assemble" },
+    { op: "camera", args: [{ fit: true, pad: 40 }], dur: 500 },
+    { op: "caption", args: ["A ReAct-style loop: think, call a tool, observe, decide whether to think again.", { place: "bottom" }] },
+    { op: "wait", ms: 900 },
+    { label: "expand" },
+    { op: "camera", args: [{ node: "act", pad: 70 }], dur: 600 },
+    { op: "caption", args: ["Act is a tool container — expand it to see what the agent can call.", { place: "bottom" }] },
+    { op: "expand", args: ["act"] },
+    { op: "wait", ms: 700 },
+    { label: "run" },
+    { op: "camera", args: [{ fit: true, pad: 40 }], dur: 600 },
+    { op: "clearHighlight" },
+    { op: "caption", args: ["Running the loop — watch the iteration badge on Think.", { place: "bottom" }] },
+    { op: "run.play" },
+    { label: "exit" },
+    { op: "clearHighlight" },
+    { op: "highlight", args: [{ nodes: ["final"], variant: "ok", pulse: true }] },
+    { op: "camera", args: [{ fit: true, pad: 40 }], dur: 700 },
+    { op: "caption", args: ["Confidence threshold reached — the agent emits its final answer.", { place: "bottom" }] },
+  ];
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), logEl = $("#log"), issuesEl = $("#issues");
+  var playBtn = $("#play"), stepBtn = $("#step"), resetBtn = $("#reset");
+  var mTime = $("#m-time"), mIter = $("#m-iter"), mActive = $("#m-active"), mTool = $("#m-tool");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#stage", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 30, ranksep: 60 },
+      animation: { duration: 360, easing: "cubic-out" },
+      controls: true,
+      storyboard: STEPS,
+      autoplay: false,
+    });
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var run = g.run(RUN_OPTS); // compile up front so the transport has a timeline from step 0
+  var sb = g.storyboard();
+
+  function fmt(ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; }
+
+  function logLine(text, isBeat) {
+    var li = document.createElement("li");
+    if (isBeat) { li.className = "beat"; li.textContent = text; }
+    else { li.innerHTML = ""; li.appendChild(document.createTextNode(text)); }
+    logEl.appendChild(li);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reactive per-iteration narration: `run.on('start' | 'loop', ...)` fires as the compiled
+  // schedule actually plays, whichever control (Play, Step, or the graph's own transport bar)
+  // drove it there — so this stays correct no matter how a visitor reaches the "run" beat.
+  // ---------------------------------------------------------------------------
+  var iterCount = 0;
+  function narrate() {
+    iterCount++;
+    var t = TOOLS[(iterCount - 1) % TOOLS.length];
+    g.highlight({ nodes: ["think", t.id], variant: iterCount < TOOLS.length ? "focus" : "warn", pulse: true });
+    var text = "iteration " + iterCount + ": " + t.name + " " + t.arg;
+    g.caption(text, { place: "bottom" });
+    logLine(text);
+    mTool.textContent = t.name + "(" + t.arg + ")";
+  }
+  run.on("start", function (ev) { if (ev && ev.nodeId === TOOLS[0].id) narrate(); });
+  run.on("loop", function (ev) { if (ev && ev.edgeId === LOOP_EDGE) narrate(); });
+
+  function sampleFrame() {
+    var r = g.run();
+    if (!r) return;
+    var st = r.state();
+    mTime.textContent = fmt(r.time()) + " / " + fmt(r.duration);
+    var active = null;
+    for (var id in st.nodes) { if (st.nodes[id].status === "active") { active = id; break; } }
+    mActive.textContent = active ? (FRIENDLY[active] || active) : "—";
+    var lp = st.loops[LOOP_EDGE];
+    mIter.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/6";
+  }
+  g.ticker.add(sampleFrame);
+
+  // ---------------------------------------------------------------------------
+
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+  }
+
+  sb.on("step", function (ev) {
+    paintRail();
+    var step = STEPS[ev.index];
+    if (step && step.label) logLine("— " + step.label + " —", true);
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+  });
+  sb.on("seek", paintRail);
+
+  /** Any NaN/Infinity that reached an attribute or a text node under the mount root. */
+  function scanNaN() {
+    var bad = [];
+    var all = document.querySelectorAll("#stage *");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      for (var a = 0; a < el.attributes.length; a++) {
+        var at = el.attributes[a];
+        if (/NaN|Infinity/.test(at.value)) bad.push((el.getAttribute("class") || el.nodeName) + "@" + at.name + "=" + at.value);
+      }
+      if (el.children.length === 0 && /NaN|Infinity/.test(el.textContent || "")) {
+        bad.push((el.getAttribute("class") || el.nodeName) + "#text=" + el.textContent);
+      }
+    }
+    return bad;
+  }
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  var storyDone = false;
+  sb.on("done", function () {
+    storyDone = true;
+    paintRail();
+    phaseEl.textContent = "story complete";
+    playBtn.disabled = true;
+    stepBtn.disabled = true;
+  });
+
+  var busy = false;
+  function play() {
+    if (busy || storyDone) return;
+    busy = true;
+    playBtn.disabled = true;
+    stepBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    sb.play().finally(function () {
+      busy = false;
+      if (!storyDone) { playBtn.disabled = false; stepBtn.disabled = false; }
+    });
+  }
+  function step() {
+    if (busy || storyDone) return;
+    busy = true;
+    playBtn.disabled = true;
+    stepBtn.disabled = true;
+    phaseEl.textContent = "stepping…";
+    sb.next().finally(function () {
+      busy = false;
+      if (!storyDone) { playBtn.disabled = false; stepBtn.disabled = false; }
+    });
+  }
+
+  playBtn.addEventListener("click", play);
+  stepBtn.addEventListener("click", step);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function reportIssues() {
+    if (!errors.length) return;
+    issuesEl.hidden = false;
+    issuesEl.textContent = "errors\n" + JSON.stringify(errors, null, 2);
+  }
+
+  /** The headless verification path: speed the run up, play through, done. */
+  async function auto() {
+    try {
+      run.speed(1.6); // safety margin under the 45s auto budget; the story is ~11s at 1x anyway
+      await sleep(250); // mount's initial fit gets one beat
+      play();
+      await waitFor(function () { return storyDone; }, 40000);
+      await sleep(400); // the last commit settles
+      var nan = scanNaN();
+      if (nan.length) errors.push("NaN in DOM: " + JSON.stringify(nan));
+    } catch (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+    }
+    reportIssues();
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto();
+  } else {
+    reportIssues();
+  }
+})();
+</script>
+
+</body>
+</html>

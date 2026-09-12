@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — A/B experiment lifecycle</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --good: #1f8f5f;
+    --bad: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --good: #46c48b; --bad: #e0685a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+  p.lede strong { color: var(--ink); font-weight: 600; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #pipe {
+    height: 480px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile[data-hot] span { color: var(--good); }
+
+  .legend { margin-top: 16px; color: var(--muted); font-size: 12.5px; max-width: 90ch; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  footer { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+  footer a { color: var(--accent); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>A/B experiment lifecycle <small>— hypothesis to ship, with an iteration loop</small></h1>
+  <p class="lede">
+    A hypothesis becomes a design, an implementation, and a three-way fan-out —
+    <strong>control</strong>, <strong>variant A</strong>, <strong>variant B</strong> — each
+    collecting data for two weeks before an <code>all</code>-join rolls them into one
+    analysis. The decision either ships the winner or loops back to redesign, up to three
+    times. Watch the loop's iteration badge tick, and the winning variant tint green while
+    the loser dims. Zoom is ctrl/⌘&nbsp;+&nbsp;wheel; plain scroll pans.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>chapter</i><span id="m-chapter">—</span></div>
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>live tokens</i><span id="m-tokens">0</span></div>
+  <div class="tile"><i>join · analyze</i><span id="m-join">—</span></div>
+  <div class="tile" id="t-loop"><i>iterate loop</i><span id="m-loop">iter 0/3</span></div>
+</div>
+
+<p class="legend">
+  Legend — chip = duration (2 weeks of collection per variant), pips under
+  <em>Analyze results</em> = join slots (<code>join:"all"</code>, all three variants
+  required), dashed arc = the <code>iterate</code> loop edge
+  (<code>loop:true, maxIterations:3</code>) from <em>Ship decision</em> back to
+  <em>Design experiment</em>, green/red tint = a <code>props</code> override marking the
+  winning/losing variant for that beat, gold ring = the shipped node.
+</p>
+
+<div id="report"></div>
+
+<footer>
+  ← back to the <a href="index.html">demo index</a> · built with
+  <code>sparkle-motion-visualizer</code>
+</footer>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ===========================================================================
+  // 1. The graph. Fixed shape, one g.run() replays the whole lifecycle including the
+  // bounded loop; the "which variant wins this round" story rides real-time run events
+  // (below), so the same compiled schedule can honestly narrate two different outcomes.
+  // ===========================================================================
+
+  var SPEC = {
+    nodes: [
+      { id: "hypothesis", label: "Hypothesis: checklist lifts D7 retention", data: { duration: "1d" } },
+      { id: "design", label: "Design experiment", data: { duration: "3d" } },
+      { id: "implement", label: "Implement variants", data: { duration: "4d" } },
+      { id: "variants", label: "Variants", collapsed: false },
+      { id: "control", parent: "variants", label: "Collect: Control", data: { duration: "14d" } },
+      { id: "variant-a", parent: "variants", label: "Collect: Variant A", data: { duration: "14d" } },
+      { id: "variant-b", parent: "variants", label: "Collect: Variant B", data: { duration: "14d" } },
+      { id: "stats", label: "Analyze results", join: "all", data: { duration: "2d" } },
+      { id: "decision", label: "Ship decision", data: { duration: "1d" } },
+      { id: "ship", label: "Ship winner", data: { duration: "3d" } },
+    ],
+    edges: [
+      { id: "e-hyp-design", source: "hypothesis", target: "design" },
+      { id: "e-design-impl", source: "design", target: "implement" },
+      { id: "e-impl-control", source: "implement", target: "control" },
+      { id: "e-impl-a", source: "implement", target: "variant-a" },
+      { id: "e-impl-b", source: "implement", target: "variant-b" },
+      { id: "e-control-stats", source: "control", target: "stats" },
+      { id: "e-a-stats", source: "variant-a", target: "stats" },
+      { id: "e-b-stats", source: "variant-b", target: "stats" },
+      { id: "e-stats-decision", source: "stats", target: "decision" },
+      { id: "iterate", source: "decision", target: "design", loop: true, maxIterations: 3 },
+      { id: "e-decision-ship", source: "decision", target: "ship" },
+    ],
+  };
+
+  var VARIANTS = ["control", "variant-a", "variant-b"];
+  var WIN_COLOR = "#1f8f5f", LOSE_COLOR = "#8a8f9c";
+
+  function cam(target) { return { op: "camera", args: [target] }; }
+  function hi(nodes, variant, opts) {
+    var o = { nodes: nodes, variant: variant };
+    if (opts) for (var k in opts) o[k] = opts[k];
+    return { op: "highlight", args: [o] };
+  }
+  function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
+  function hold(ms) { return { op: "wait", ms: ms }; }
+
+  var STEPS = [
+    { label: "hypothesis" },
+    cam({ node: "hypothesis", k: 1.4, pad: 60, dur: 700 }),
+    cap("Every experiment starts with a testable hypothesis."),
+    hold(500),
+
+    { label: "design" },
+    cam({ nodes: ["hypothesis", "design"], pad: 60, dur: 700 }),
+    cap("Design turns it into a concrete experiment plan."),
+    hold(400),
+
+    { label: "implement" },
+    cam({ nodes: ["design", "implement"], pad: 60, dur: 700 }),
+    cap("Implementation ships control and both variants behind a flag."),
+    hold(400),
+
+    { label: "collect" },
+    cam({ node: "variants", pad: 60, dur: 800 }),
+    cap("Three-way fan-out: control, variant A, variant B — each collects for 2 weeks."),
+    { op: "run.play", until: "stats" },
+    hold(600), // let the round-1 result (fired live off the join event, below) breathe
+
+    { label: "iterate" },
+    cam({ nodes: ["stats", "decision"], pad: 60, dur: 700 }),
+    cap("Ship decision: loop back to design, or ship — capped at 2 of the edge's 3 tries."),
+    hold(400),
+    { op: "run.play" }, // plays the loop ticks (live-narrated below) then falls through to ship
+    cam({ node: "ship", k: 1.5, pad: 60, dur: 800 }),
+    { op: "props", args: [{ ship: { "--smv-fill": "#c9971f" } }] },
+    hi(["ship"], "ok", { pulse: true }),
+    cap("Shipped — the redesigned variant B wins."),
+  ];
+
+  // ===========================================================================
+  // 2. Wiring
+  // ===========================================================================
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mChapter = $("#m-chapter"), mTime = $("#m-time"), mTokens = $("#m-tokens");
+  var mJoin = $("#m-join"), mLoop = $("#m-loop");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 26, ranksep: 60 },
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  // Iteration 1: capped at a single loop crossing, so "iterate 1" resolves fast, and the
+  // decision node's own out-edge to `ship` is the one it falls through to right after.
+  var run = g.run({ hopMs: 220, iterations: { iterate: 2 } });
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+    mChapter.textContent = pos.label || "—";
+  }
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  function sampleFrame() {
+    var r = g.run();
+    if (!r) return;
+    var st = r.state();
+    mTime.textContent = fmt(r.time()) + " / " + fmt(r.duration);
+    mTokens.textContent = String(st.tokens.length);
+    var j = st.joins.stats;
+    mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "—";
+    var lp = st.loops.iterate;
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/3";
+  }
+  g.ticker.add(sampleFrame);
+
+  // Real-time narration, riding the run's own event bus rather than a scripted guess at
+  // timing — the highlight/props land the instant the data actually would.
+  var lossNarrated = false, winNarrated = false;
+  run.on("join", function (ev) {
+    if (!ev || ev.nodeId !== "stats" || lossNarrated) return;
+    lossNarrated = true;
+    // Round 1: variant B trails control and variant A.
+    g.highlight({ nodes: ["variant-b"], variant: "warn", dim: false });
+    g.props({ "variant-b": { "--smv-fill": LOSE_COLOR }, "control": { "--smv-fill": WIN_COLOR } });
+    g.caption("Round 1: control leads, variant B underperforms. Iterating on design.", { place: "bottom" });
+  });
+  run.on("loop", function (ev) {
+    if (!ev || ev.edgeId !== "iterate" || ev.iteration !== ev.max || winNarrated) return;
+    winNarrated = true;
+    // The final capped iteration: the redesigned variant B pulls ahead.
+    g.props({ "variant-b": { "--smv-fill": WIN_COLOR }, "control": null });
+    g.highlight({ nodes: ["variant-b"], variant: "ok", pulse: true });
+    g.caption("Iteration " + ev.iteration + ": the redesigned variant B wins — shipping it.", { place: "bottom" });
+  });
+
+  var storyDone = false;
+  sb.on("step", function (ev) {
+    paintRail();
+    g.fitView({ animate: true });
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    sb.play();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "story steps         " + STEPS.length + "\n" +
+      "final chapter        " + (sb.position().label || "(none)") + "\n" +
+      "round 1 (loss) narrated " + lossNarrated + "\n" +
+      "final iteration (win) narrated " + winNarrated + "\n" +
+      "errors               " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  async function auto() {
+    if (g.run()) g.run().speed(3);
+    await sleep(200);
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(300);
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      writeReport();
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

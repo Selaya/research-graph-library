@@ -1,0 +1,768 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — interactive spec editor</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8; --card: #ffffff; --ink: #1b2230; --muted: #6b7488;
+    --line: rgba(128,138,160,.32); --accent: #5b6ef5; --warm: #b97400;
+    --good: #1f8a52; --bad: #c23b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a;
+      --good: #5fcf94; --bad: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 20px 44px; background: var(--page); color: var(--ink);
+         font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; }
+  header { margin-bottom: 14px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 88ch; }
+  code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .controls { display: flex; align-items: center; gap: 8px; margin: 14px 0 12px; flex-wrap: wrap; }
+  .controls .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+  .controls .tag { font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  button { font-family: inherit; font-size: 13px; font-weight: 600; line-height: 1;
+           padding: 9px 14px; border-radius: 8px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--card); color: inherit; }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button[data-on] { border-color: var(--accent); color: var(--accent); }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #phase[data-dirty] { color: var(--warm); }
+
+  .cols { display: grid; grid-template-columns: minmax(320px, 430px) 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+
+  .panel { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 12px 13px; }
+  .panel > h2 { font-family: inherit; font-size: 11px; font-weight: 600; line-height: 1;
+                letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+  .panel > h2 em { font-style: normal; text-transform: none; letter-spacing: 0; font-weight: 500; }
+  textarea { width: 100%; resize: vertical; color: inherit; background: transparent;
+             border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; tab-size: 2;
+             font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+             white-space: pre-wrap; overflow: auto; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #spec { height: 196px; }
+  #story { height: 92px; }
+  .panel + .panel { margin-top: 12px; }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #pipe { height: 404px; border: 1px solid var(--line); border-radius: 12px;
+          background: var(--card); overflow: hidden;
+          box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06); }
+
+  .strip { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .tile { flex: 1 1 120px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 11px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 2px; font-variant-numeric: tabular-nums; font-size: 14.5px; font-weight: 600; }
+
+  #diff { font: 11.5px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+          margin: 0; max-height: 156px; overflow: auto; }
+  #diff .none { color: var(--muted); font-family: inherit; }
+  #diff b { display: inline-block; width: 1ch; font-weight: 700; }
+  #diff .add b { color: var(--good); }
+  #diff .del b { color: var(--bad); }
+  #diff .chg b { color: var(--warm); }
+  #diff .k { color: var(--muted); }
+  #diff div { overflow-wrap: anywhere; }
+  #diffhead { color: var(--muted); font-size: 11.5px; margin: 0 0 6px; font-variant-numeric: tabular-nums; }
+
+  #err { display: none; margin-top: 12px; border-radius: 10px; padding: 10px 12px;
+         border: 1px solid var(--bad); background: color-mix(in srgb, var(--bad) 8%, transparent); }
+  #err[data-show] { display: block; }
+  #err[data-kind="ok"] { border-color: var(--good); background: color-mix(in srgb, var(--good) 9%, transparent); }
+  #err .code { display: inline-block; padding: 5px 8px; border-radius: 6px; margin-right: 8px;
+               font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+               background: var(--bad); color: #fff; }
+  #err[data-kind="ok"] .code { background: var(--good); }
+  #err p { margin: 8px 0 0; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  #err p.hint { font-family: inherit; font-size: 12.5px; color: var(--muted); }
+
+  ul.watch { margin: 18px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; columns: 2; column-gap: 28px; }
+  @media (max-width: 900px) { ul.watch { columns: 1; } }
+  ul.watch li { margin: 4px 0; break-inside: avoid; }
+  ul.watch code { color: var(--ink); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Interactive spec editor <small>— edit the JSON, watch the difference animate</small></h1>
+  <p class="lede">
+    The left pane is the graph's own <code>spec</code>, as JSON, plus a storyboard script.
+    <b>Apply</b> never remounts: it diffs what you typed against <code>g.spec()</code> and commits
+    only the difference through one <code>g.batch()</code> of <code>addNode</code> /
+    <code>removeNode</code> / <code>addEdge</code> / <code>removeEdge</code> / <code>update</code>,
+    so every id you kept keeps its DOM node and tweens into place. Misuse — a dangling edge, a
+    <code>loop:true</code> edge with no <code>maxIterations</code> — throws a
+    <code>GraphError</code>, caught and shown with its code.
+  </p>
+</header>
+
+<div class="controls">
+  <span class="tag">example</span>
+  <button id="p0" type="button">pipeline</button>
+  <button id="p1" type="button">fan-out / join</button>
+  <button id="p2" type="button">loop</button>
+  <span class="sep"></span>
+  <button id="apply" class="primary" type="button">Apply diff</button>
+  <button id="run" type="button">Run</button>
+  <button id="play" type="button">Play storyboard</button>
+  <span class="sep"></span>
+  <span id="phase">ready</span>
+</div>
+
+<div class="cols">
+  <div>
+    <div class="panel">
+      <h2>spec <em>— nodes &amp; edges (JSON)</em></h2>
+      <textarea id="spec" spellcheck="false" aria-label="graph spec as JSON"></textarea>
+    </div>
+    <div class="panel">
+      <h2>storyboard <em>— director ops (JSON)</em></h2>
+      <textarea id="story" spellcheck="false" aria-label="storyboard steps as JSON"></textarea>
+    </div>
+    <div class="panel">
+      <h2>computed diff <em>— what Apply committed</em></h2>
+      <p id="diffhead">nothing applied yet</p>
+      <div id="diff"><span class="none">Press <b>Apply diff</b> to commit the edits above.</span></div>
+    </div>
+    <div id="err" role="status"></div>
+  </div>
+
+  <div>
+    <div id="pipe"></div>
+    <div class="strip">
+      <div class="tile"><i>graph</i><span id="m-size">0 nodes · 0 edges</span></div>
+      <div class="tile"><i>run clock</i><span id="m-time">0.0s / 0.0s</span></div>
+      <div class="tile"><i>live tokens</i><span id="m-tokens">0</span></div>
+      <div class="tile"><i>last diff</i><span id="m-diff">—</span></div>
+    </div>
+  </div>
+</div>
+
+<ul class="watch">
+  <li>Load <b>fan-out / join</b> over <b>pipeline</b>: the whole graph is replaced, but the
+    commit is one animated batch, not a remount — the transport bar never resets.</li>
+  <li>Every kept id keeps its DOM node: change one <code>data.duration</code> and the chip
+    odometers in place via <code>update()</code>. <code>collapsed</code> is view state, not spec
+    state, so a changed flag is dispatched to <code>g.expand()</code>/<code>g.collapse()</code>.</li>
+  <li><b>Run</b> plays <code>g.run()</code> — Mode A, compiled from the declared
+    <code>data.duration</code>s (<code>45m</code>, <code>90s</code>, …).</li>
+  <li>The fan-out example carries <code>data.fail</code> on <code>canary.ap</code> and a
+    <code>join:{count:2}</code> quorum on <em>Promote</em>: one leg goes red, two green legs
+    still fire the join.</li>
+  <li>The loop example's dashed arc is <code>loop:true, maxIterations:3</code> — watch the
+    iteration badge tick before the token leaves for <em>Announce</em>.</li>
+  <li>Delete a node an edge still points at, or drop <code>maxIterations</code> from the loop
+    edge: Apply shows the <code>GraphError</code> code (<code>dangling</code>,
+    <code>unbounded-loop</code>) instead of throwing into the console. <b>Play storyboard</b>
+    validates the script at build time the same way (<code>storyboard-op</code>, by step index).</li>
+</ul>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  var GraphError = SparkleMotion.GraphError;
+
+  // ---------------------------------------------------------------------------
+  // Three example specs + the storyboard that narrates each one. Plain objects here;
+  // fmtSpec()/fmtSteps() print them into the textareas one record per line, so what the
+  // reader edits is exactly what g.spec() round-trips.
+  // ---------------------------------------------------------------------------
+
+  var PRESETS = [
+    {
+      key: "pipeline",
+      spec: {
+        nodes: [
+          { id: "ingest", label: "Ingest orders", data: { duration: "45m" } },
+          { id: "clean", label: "Clean", collapsed: true, durationAgg: "sum" },
+          { id: "clean.dedupe", parent: "clean", label: "Dedupe", data: { duration: "30m" } },
+          { id: "clean.validate", parent: "clean", label: "Validate schema", data: { duration: "1h" } },
+          { id: "enrich", label: "Enrich with CRM", data: { duration: "20m" } },
+          { id: "publish", label: "Publish to warehouse", data: { duration: "12m" } }
+        ],
+        edges: [
+          { id: "e1", source: "ingest", target: "clean.dedupe" },
+          { id: "e2", source: "clean.dedupe", target: "clean.validate" },
+          { id: "e3", source: "clean.validate", target: "enrich" },
+          { id: "e4", source: "enrich", target: "publish" }
+        ]
+      },
+      steps: [
+        { label: "overview" },
+        { op: "run.seek", ms: 0 },
+        { op: "camera", args: [{ fit: true, pad: 34, dur: 600 }] },
+        { op: "caption", args: ["Nightly orders ETL. “Clean” is a container — its chip is a durationAgg sum.", { place: "bottom" }] },
+        { op: "wait", ms: 900 },
+        { label: "drill in" },
+        { op: "expand", args: ["clean"], dur: 650 },
+        { op: "highlight", args: [{ nodes: ["clean.dedupe", "clean.validate"], variant: "focus", dim: true }] },
+        { op: "wait", ms: 900 },
+        { label: "run" },
+        { op: "clearHighlight" },
+        { op: "caption", args: ["One token, the declared durations: 45m → 30m → 1h → 20m → 12m.", { place: "bottom" }] },
+        { op: "run.play" },
+        { label: "done" },
+        { op: "caption", args: [null] },
+        { op: "collapse", args: ["clean"], dur: 600 },
+        { op: "camera", args: [{ fit: true, pad: 34, dur: 600 }] }
+      ]
+    },
+    {
+      key: "fan-out / join",
+      spec: {
+        nodes: [
+          { id: "build", label: "Build image", data: { duration: "4m" } },
+          { id: "canary.us", label: "Smoke · us-east", data: { duration: "90s" } },
+          { id: "canary.eu", label: "Smoke · eu-west", data: { duration: "70s" } },
+          { id: "canary.ap", label: "Smoke · ap-south", data: { duration: "50s", fail: "health probe 503 after 3 attempts" } },
+          { id: "promote", label: "Promote (2 of 3)", join: { count: 2 } },
+          { id: "rollout", label: "Rollout 100%", data: { duration: "6m" } }
+        ],
+        edges: [
+          { id: "b1", source: "build", target: "canary.us" },
+          { id: "b2", source: "build", target: "canary.eu" },
+          { id: "b3", source: "build", target: "canary.ap" },
+          { id: "j1", source: "canary.us", target: "promote" },
+          { id: "j2", source: "canary.eu", target: "promote" },
+          { id: "j3", source: "canary.ap", target: "promote" },
+          { id: "r1", source: "promote", target: "rollout" }
+        ]
+      },
+      steps: [
+        { label: "fan-out" },
+        { op: "run.seek", ms: 0 },
+        { op: "camera", args: [{ fit: true, pad: 34, dur: 600 }] },
+        { op: "caption", args: ["Three out-edges from Build ARE the fan-out — one token per region.", { place: "bottom" }] },
+        { op: "run.play", until: "canary.ap" },
+        { label: "ap-south fails" },
+        { op: "camera", args: [{ node: "canary.ap", pad: 90, dur: 600 }] },
+        { op: "highlight", args: [{ nodes: ["canary.ap"], edges: ["j3"], variant: "warn", pulse: true }] },
+        { op: "caption", args: ["data.fail on ap-south: status ‘failed’, nothing handed downstream.", { place: "bottom" }] },
+        { op: "wait", ms: 1300 },
+        { label: "quorum join" },
+        { op: "clearHighlight" },
+        { op: "camera", args: [{ fit: true, pad: 34, dur: 600 }] },
+        { op: "caption", args: ["Promote declares join {count:2}, so two green legs still fire it.", { place: "bottom" }] },
+        { op: "run.play" },
+        { label: "done" },
+        { op: "caption", args: [null] }
+      ]
+    },
+    {
+      key: "loop",
+      spec: {
+        nodes: [
+          { id: "pack", label: "Package release", data: { duration: "30s" } },
+          { id: "deploy", label: "Deploy to staging", data: { duration: "25s" } },
+          { id: "health", label: "Health check", data: { duration: "10s" } },
+          { id: "announce", label: "Announce release", data: { duration: "5s" } }
+        ],
+        edges: [
+          { id: "c1", source: "pack", target: "deploy" },
+          { id: "c2", source: "deploy", target: "health" },
+          { id: "c3", source: "health", target: "announce" },
+          { id: "retry", source: "health", target: "deploy", loop: true, maxIterations: 3, label: "retry" }
+        ]
+      },
+      steps: [
+        { label: "retry loop" },
+        { op: "run.seek", ms: 0 },
+        { op: "camera", args: [{ fit: true, pad: 34, dur: 600 }] },
+        { op: "caption", args: ["The dashed arc is loop:true, maxIterations:3 — bounded, never an open cycle.", { place: "bottom" }] },
+        { op: "highlight", args: [{ nodes: ["deploy", "health"], edges: ["retry"], variant: "focus", dim: true }] },
+        { op: "wait", ms: 1100 },
+        { label: "run" },
+        { op: "clearHighlight" },
+        { op: "caption", args: ["The iteration badge ticks 1/3 → 3/3 before the token leaves for Announce.", { place: "bottom" }] },
+        { op: "run.play" },
+        { label: "done" },
+        { op: "caption", args: [null] },
+        { op: "camera", args: [{ fit: true, pad: 34, dur: 600 }] }
+      ]
+    }
+  ];
+
+  // The graph mounts with the first half of the pipeline example while the editor holds all
+  // of it, so the very first Apply has a real difference to animate.
+  var SEED = {
+    nodes: PRESETS[0].spec.nodes.slice(0, 4),
+    edges: PRESETS[0].spec.edges.slice(0, 2)
+  };
+
+  // Pacing (run opts, not engine internals): a log curve over the graph's own durations, so
+  // 5s / 90s / 6m read as visibly different dwells. Under ?auto=1 a global rate event keeps
+  // the whole story inside the 45s budget.
+  var RUN_OPTS = {
+    hopMs: 200,
+    rates: AUTO ? [{ t: 0, scope: "*", factor: 2.6 }] : [],
+    dwell: function (sec, ctx) {
+      if (sec == null) return 380;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 260 + 950 * f;
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // JSON <-> textarea
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var specEl = $("#spec"), storyEl = $("#story"), phaseEl = $("#phase");
+  var diffEl = $("#diff"), diffHead = $("#diffhead"), errEl = $("#err");
+  var mSize = $("#m-size"), mTime = $("#m-time"), mTokens = $("#m-tokens"), mDiff = $("#m-diff");
+
+  /** One record per line, spaced so a soft wrap breaks between keys, not mid-token. */
+  function fmtList(items, indent) {
+    return items.map(function (it, i) {
+      var one = JSON.stringify(it, null, 1).replace(/\s*\n\s*/g, " ");
+      return indent + one + (i === items.length - 1 ? "" : ",");
+    });
+  }
+  function fmtSpec(spec) {
+    return ['{', '  "nodes": ['].concat(
+      fmtList(spec.nodes, "    "), ['  ],', '  "edges": ['], fmtList(spec.edges, "    "), ['  ]', '}']
+    ).join("\n");
+  }
+  function fmtSteps(steps) { return ["["].concat(fmtList(steps, "  "), ["]"]).join("\n"); }
+
+  /** Key-sorted stringify: the comparison key for "did this record change?". */
+  function stable(v) {
+    if (Array.isArray(v)) return "[" + v.map(stable).join(",") + "]";
+    if (v && typeof v === "object") {
+      return "{" + Object.keys(v).sort().filter(function (k) { return v[k] !== undefined; })
+        .map(function (k) { return JSON.stringify(k) + ":" + stable(v[k]); }).join(",") + "}";
+    }
+    return JSON.stringify(v === undefined ? null : v);
+  }
+
+  function setPhase(text, dirty) {
+    phaseEl.textContent = text;
+    if (dirty) phaseEl.setAttribute("data-dirty", ""); else phaseEl.removeAttribute("data-dirty");
+  }
+
+  function clearError() { errEl.removeAttribute("data-show"); errEl.removeAttribute("data-kind"); errEl.textContent = ""; }
+
+  /** The inline error surface: a code chip, the message, and what it means for the store. */
+  function showPanel(kind, chipText, head, body, hint) {
+    errEl.textContent = "";
+    var add = function (tag, cls, text) {
+      var el = document.createElement(tag);
+      if (cls) el.className = cls;
+      el.textContent = text;
+      errEl.appendChild(el);
+    };
+    add("span", "code", chipText);
+    add("span", null, head);
+    if (body) add("p", null, body);
+    if (hint) add("p", "hint", hint);
+    errEl.setAttribute("data-show", "");
+    errEl.setAttribute("data-kind", kind);
+  }
+
+  function showError(err, where) {
+    var isGraph = GraphError && err instanceof GraphError;
+    var code = isGraph ? err.code : (err && err.name === "SyntaxError" ? "invalid-json" : "error");
+    showPanel(
+      "bad",
+      isGraph ? "[smv:" + code + "]" : (code === "invalid-json" ? "JSON" : "error"),
+      isGraph ? "GraphError thrown by " + where : "not a GraphError — " + where,
+      String((err && err.message) || err).replace(/^\[smv:[^\]]+\]\s*/, ""),
+      isGraph
+        ? "Thrown synchronously, before this op touched the store — but g.batch() is not transactional, so ops committed earlier in the same Apply are still on screen."
+        : "Fix the JSON and press Apply again."
+    );
+    setPhase("error: " + code, true);
+    return code;
+  }
+
+  function showOk(title, detail) { showPanel("ok", "recovered", title, null, detail); }
+
+  // ---------------------------------------------------------------------------
+  // The diff: old spec (g.spec()/g.nodes()/g.edges()) vs. the parsed textarea.
+  // ---------------------------------------------------------------------------
+
+  function byId(list) {
+    var m = Object.create(null);
+    for (var i = 0; i < list.length; i++) m[list[i].id] = list[i];
+    return m;
+  }
+
+  function patchOf(oldItem, newItem) {
+    var patch = {}, keys = [], k;
+    for (k in newItem) {
+      if (k === "id") continue;
+      if (stable(newItem[k]) !== stable(oldItem[k])) { patch[k] = newItem[k]; keys.push(k); }
+    }
+    return { patch: patch, keys: keys };
+  }
+
+  function computeDiff(oldSpec, newSpec) {
+    var oN = byId(oldSpec.nodes), nN = byId(newSpec.nodes);
+    var oE = byId(oldSpec.edges), nE = byId(newSpec.edges);
+    var d = { addNodes: [], delNodes: [], addEdges: [], delEdges: [], updates: [], view: [], lines: [], count: 0 };
+    var id, i;
+
+    // --- removals. removeNode() cascades its descendants, so a doomed child must not be
+    // named twice (the second call would throw `missing`).
+    var doomed = Object.create(null);
+    for (id in oN) if (!nN[id]) doomed[id] = true;
+    for (id in oN) {
+      if (!doomed[id]) continue;
+      var anc = oN[id].parent, swallowed = false;
+      while (anc !== undefined) { if (doomed[anc]) { swallowed = true; break; } anc = oN[anc] && oN[anc].parent; }
+      if (!swallowed) d.delNodes.push(id);
+    }
+    for (id in oE) {
+      if (nE[id]) continue;
+      // Edges that the node cascade already takes are not named separately, same reason.
+      if (doomed[oE[id].source] || doomed[oE[id].target]) continue;
+      d.delEdges.push(id);
+    }
+
+    // --- additions, parents before children (addNode rejects a dangling parent).
+    var pending = [];
+    for (i = 0; i < newSpec.nodes.length; i++) if (!oN[newSpec.nodes[i].id]) pending.push(newSpec.nodes[i]);
+    var have = Object.create(null);
+    for (id in oN) if (!doomed[id]) have[id] = true;
+    var guard = pending.length + 1;
+    while (pending.length && guard-- > 0) {
+      var rest = [];
+      for (i = 0; i < pending.length; i++) {
+        var n = pending[i];
+        if (n.parent === undefined || have[n.parent]) { d.addNodes.push(n); have[n.id] = true; }
+        else rest.push(n);
+      }
+      if (rest.length === pending.length) break;
+      pending = rest;
+    }
+    for (i = 0; i < pending.length; i++) d.addNodes.push(pending[i]); // dangling parent: let addNode say so
+    for (i = 0; i < newSpec.edges.length; i++) if (!oE[newSpec.edges[i].id]) d.addEdges.push(newSpec.edges[i]);
+
+    // --- changes to records that survive.
+    for (i = 0; i < newSpec.nodes.length; i++) {
+      var nn = newSpec.nodes[i], on = oN[nn.id];
+      if (!on) continue;
+      var r = patchOf(on, nn);
+      if (!r.keys.length) continue;
+      // `collapsed` is folded into the view state once, at the node's first sighting, so
+      // patching the spec field alone would never open or close the box.
+      if (r.keys.indexOf("collapsed") !== -1) d.view.push({ id: nn.id, collapsed: !!nn.collapsed });
+      d.updates.push({ kind: "node", id: nn.id, patch: r.patch, keys: r.keys });
+    }
+    for (i = 0; i < newSpec.edges.length; i++) {
+      var ne = newSpec.edges[i], oe = oE[ne.id];
+      if (!oe) continue;
+      var re = patchOf(oe, ne);
+      if (re.keys.length) d.updates.push({ kind: "edge", id: ne.id, patch: re.patch, keys: re.keys });
+    }
+
+    d.count = d.addNodes.length + d.delNodes.length + d.addEdges.length + d.delEdges.length + d.updates.length;
+    d.summary = [
+      d.addNodes.length ? "+" + d.addNodes.length + " node" : "",
+      d.delNodes.length ? "−" + d.delNodes.length + " node" : "",
+      d.addEdges.length ? "+" + d.addEdges.length + " edge" : "",
+      d.delEdges.length ? "−" + d.delEdges.length + " edge" : "",
+      d.updates.length ? "~" + d.updates.length + " changed" : ""
+    ].filter(Boolean).join(" · ") || "no changes";
+    return d;
+  }
+
+  /** One rendered diff row: a coloured marker, the op it will dispatch, and an annotation. */
+  function line(cls, mark, text, note) {
+    var div = document.createElement("div");
+    div.className = cls;
+    var b = document.createElement("b");
+    b.textContent = mark;
+    div.appendChild(b);
+    div.appendChild(document.createTextNode(" " + text));
+    if (note) {
+      var k = document.createElement("span");
+      k.className = "k";
+      k.textContent = "  " + note;
+      div.appendChild(k);
+    }
+    diffEl.appendChild(div);
+  }
+
+  function renderDiff(d) {
+    diffEl.textContent = "";
+    diffHead.textContent = d.count
+      ? d.summary + "  —  one g.batch(), one relayout"
+      : "no difference between the editor and g.spec()";
+    if (!d.count) {
+      var none = document.createElement("span");
+      none.className = "none";
+      none.textContent = "The graph already matches the JSON above.";
+      diffEl.appendChild(none);
+      return;
+    }
+    d.delEdges.forEach(function (id) { line("del", "−", "removeEdge  " + id); });
+    d.delNodes.forEach(function (id) { line("del", "−", "removeNode  " + id); });
+    d.addNodes.forEach(function (n) {
+      line("add", "+", "addNode     " + n.id, (n.label || "") + (n.data && n.data.duration ? "  " + n.data.duration : ""));
+    });
+    d.addEdges.forEach(function (e) {
+      line("add", "+", "addEdge     " + e.id, e.source + " → " + e.target + (e.loop ? "  (loop)" : ""));
+    });
+    d.updates.forEach(function (u) { line("chg", "~", "update      " + u.id, "{" + u.keys.join(", ") + "}"); });
+    d.view.forEach(function (v) {
+      line("chg", "~", (v.collapsed ? "collapse    " : "expand      ") + v.id, "view state, not spec state");
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mount
+  // ---------------------------------------------------------------------------
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 26, ranksep: 48 },
+      animation: { duration: 420, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline"
+    });
+    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from the start
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    setPhase("mount failed", true);
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var fmtMs = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  function refreshSize() {
+    mSize.textContent = g.nodes().length + " nodes · " + g.edges().length + " edges";
+  }
+
+  g.ticker.add(function () {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+    mTime.textContent = fmtMs(run.time()) + " / " + fmtMs(run.duration);
+    mTokens.textContent = String(st.tokens.length);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Actions
+  // ---------------------------------------------------------------------------
+
+  function parseJSON(text, what) {
+    var v = JSON.parse(text); // SyntaxError is caught by the caller
+    if (!v || typeof v !== "object") throw new SyntaxError(what + " must be a JSON object");
+    return v;
+  }
+
+  function loadPreset(i) {
+    var p = PRESETS[i];
+    specEl.value = fmtSpec(p.spec);
+    storyEl.value = fmtSteps(p.steps);
+    for (var k = 0; k < 3; k++) {
+      var b = document.getElementById("p" + k);
+      if (k === i) b.setAttribute("data-on", ""); else b.removeAttribute("data-on");
+    }
+    setPhase("loaded “" + p.key + "” — press Apply", true);
+  }
+
+  var applying = false;
+
+  function apply() {
+    if (applying) return Promise.resolve(false);
+    clearError();
+    var parsed;
+    try {
+      parsed = parseJSON(specEl.value, "spec");
+      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
+        throw new SyntaxError('spec needs a "nodes" array and an "edges" array');
+      }
+    } catch (err) {
+      showError(err, "the spec editor");
+      return Promise.resolve(false);
+    }
+
+    var d = computeDiff(g.spec(), parsed);
+    renderDiff(d);
+    mDiff.textContent = d.summary;
+    if (!d.count) { setPhase("no changes to apply"); return Promise.resolve(true); }
+
+    applying = true;
+    setPhase("applying " + d.summary + "…");
+    var handle = null, thrown = null;
+    try {
+      handle = g.batch(function (gg) {
+        var i;
+        for (i = 0; i < d.delEdges.length; i++) gg.removeEdge(d.delEdges[i]);
+        for (i = 0; i < d.delNodes.length; i++) gg.removeNode(d.delNodes[i]);
+        for (i = 0; i < d.addNodes.length; i++) gg.addNode(d.addNodes[i]);
+        for (i = 0; i < d.addEdges.length; i++) gg.addEdge(d.addEdges[i]);
+        for (i = 0; i < d.updates.length; i++) gg.update(d.updates[i].id, d.updates[i].patch);
+        for (i = 0; i < d.view.length; i++) {
+          if (d.view[i].collapsed) gg.collapse(d.view[i].id); else gg.expand(d.view[i].id);
+        }
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    return Promise.resolve(handle || null).then(function () {
+      applying = false;
+      refreshSize();
+      g.fitView({ animate: true });
+      g.run().seek(0);
+      if (thrown) {
+        diffHead.textContent = "rejected — " + d.summary + ", see the error below";
+        showError(thrown, "g.batch()");
+        return false;
+      }
+      setPhase("applied · " + d.summary);
+      return true;
+    });
+  }
+
+  /** Play the compiled Mode A run from the top; resolves when the schedule has played out. */
+  function runAll() {
+    var run = g.run();
+    run.seek(0);
+    setPhase("running…");
+    return run.play().then(function (r) {
+      setPhase(r && r.canceled ? "run canceled" : "run complete");
+      return r;
+    });
+  }
+
+  function playStory() {
+    clearError();
+    var steps;
+    try {
+      steps = parseJSON(storyEl.value, "storyboard");
+      if (!Array.isArray(steps)) throw new SyntaxError("storyboard must be a JSON array of steps");
+    } catch (err) { showError(err, "the storyboard editor"); return Promise.resolve(false); }
+
+    var sb;
+    try {
+      sb = g.storyboard(steps); // validated at BUILD time: an unknown op throws here
+    } catch (err) { showError(err, "g.storyboard()"); return Promise.resolve(false); }
+
+    setPhase("storyboard · playing…");
+    return new Promise(function (resolve) {
+      var off = sb.on("done", function () {
+        off();
+        setPhase("storyboard · complete");
+        resolve(true);
+      });
+      sb.play();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+
+  for (var k = 0; k < 3; k++) {
+    (function (i) {
+      document.getElementById("p" + i).addEventListener("click", function () { loadPreset(i); });
+    })(k);
+  }
+  $("#apply").addEventListener("click", function () { apply(); });
+  $("#run").addEventListener("click", function () { runAll(); });
+  $("#play").addEventListener("click", function () { playStory(); });
+  specEl.addEventListener("input", function () { setPhase("spec edited — press Apply", true); });
+  storyEl.addEventListener("input", function () { setPhase("storyboard edited — press Play storyboard", true); });
+
+  loadPreset(0);
+  refreshSize();
+  setPhase("mounted with half the pipeline — press Apply to animate the rest", true);
+
+  // ---------------------------------------------------------------------------
+  // ?auto=1 — every preset in turn: load, apply, run to completion; one deliberate
+  // GraphError in the middle; the loop example's storyboard as the closing beat.
+  // ---------------------------------------------------------------------------
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  async function auto() {
+    await sleep(250);
+
+    // 1 — the pipeline example the page mounted half of.
+    await apply();
+    await sleep(250);
+    await runAll();
+
+    // 2 — replace it wholesale with the fan-out/join example.
+    loadPreset(1);
+    await sleep(200);
+    await apply();
+    await sleep(250);
+    await runAll();
+
+    // 3 — the loop example, then its storyboard.
+    loadPreset(2);
+    await sleep(200);
+    await apply();
+    await sleep(250);
+    await runAll();
+    await playStory();
+
+    // 4 — one deliberate misuse to close on: a loop edge with no maxIterations. addEdge
+    // throws GraphError('unbounded-loop') before anything reaches the store.
+    var broken = JSON.parse(specEl.value);
+    broken.edges.push({ id: "rollback", source: "announce", target: "pack", loop: true });
+    specEl.value = fmtSpec(broken);
+    await apply();
+    await sleep(600);
+    loadPreset(2);
+    showOk("caught [smv:unbounded-loop] — nothing committed",
+      "addEdge validates before it writes, so the bad edge never reached the store: the graph is exactly as it was.");
+
+    // Park the run on its final frame so the closing view still carries the loop's
+    // iteration badge and every node's terminal status.
+    var fin = g.run();
+    fin.seek(fin.duration);
+
+    await sleep(300);
+    setPhase(errors.length ? "done — with errors" : "done — three examples applied, run and narrated");
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

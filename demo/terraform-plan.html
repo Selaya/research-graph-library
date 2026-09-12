@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — Terraform plan / apply</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --bad: #c23b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --bad: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 76ch; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #pipe {
+    height: 600px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span.bad { color: var(--bad); }
+
+  ul.watch { margin: 16px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+  ul.watch li { margin: 3px 0; }
+  ul.watch code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Terraform plan / apply <small>— a resource-dependency DAG, plus a caught cycle</small></h1>
+  <p class="lede">
+    <code>vpc</code> fans out to two subnets and a security group; <code>rds</code> and
+    <code>eks-cluster</code> each wait on all three (an AND-join) before creating; the
+    cluster then unblocks a node group and an IAM role, and both must finish before
+    <code>app-deployment</code>. That's the clean apply. Then a change request adds a
+    <code>dns-record</code> depending on the deployment — and someone also wires the
+    deployment back onto the record, a circular dependency Terraform would refuse to plan.
+    The graph renders it anyway, as a back edge, calls it out, then the bad edge is
+    removed and the apply replays clean.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the apply</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>apply clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>resources created</i><span id="m-created">0/10</span></div>
+  <div class="tile"><i>rds / eks-cluster join</i><span id="m-join">0/3 · 0/3</span></div>
+  <div class="tile"><i>graph state</i><span id="m-state">acyclic</span></div>
+</div>
+
+<ul class="watch">
+  <li><code>rds</code> and <code>eks-cluster</code> are both implicit <b>AND-joins</b> —
+    each waits for all three of <code>subnet-a</code>, <code>subnet-b</code> and
+    <code>security-group</code> to finish before its own (realistically slow) create
+    dwell starts.</li>
+  <li>Durations are real-world-shaped — <code>rds</code> 8 minutes, <code>eks-cluster</code>
+    12 minutes, a subnet 20 seconds — compressed for playback but still visibly different
+    rates.</li>
+  <li>Watch for the <b>dashed back edge</b> when the change request lands: <code>dns-record
+    → app-deployment</code>, a <code>loop:true, maxIterations:1</code> edge that makes the
+    dependency graph cyclic — a warn highlight and caption call it out.</li>
+  <li>The bad edge is then removed and the apply <b>replays from a fresh, clean run</b> —
+    the total-duration bar at the bottom of the pane restarts at 0.</li>
+</ul>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // Resource spec. Mount holds only `vpc`; the storyboard assembles the rest of the DAG
+  // in waves that mirror a real `terraform apply -parallelism` fan-out: networking, then
+  // the two resources that need all of it, then compute, then the app.
+  // ---------------------------------------------------------------------------
+
+  var SEED = {
+    nodes: [{ id: "vpc", label: "vpc", data: { duration: "20s" } }],
+    edges: [],
+  };
+
+  var WAVE_NETWORK = [
+    { op: "addNode", args: [{ id: "subnet-a", label: "subnet-a", data: { duration: "20s" } }] },
+    { op: "addNode", args: [{ id: "subnet-b", label: "subnet-b", data: { duration: "20s" } }] },
+    { op: "addNode", args: [{ id: "security-group", label: "security-group", data: { duration: "15s" } }] },
+    { op: "addEdge", args: [{ id: "e-vpc-suba", source: "vpc", target: "subnet-a" }] },
+    { op: "addEdge", args: [{ id: "e-vpc-subb", source: "vpc", target: "subnet-b" }] },
+    { op: "addEdge", args: [{ id: "e-vpc-sg", source: "vpc", target: "security-group" }] },
+  ];
+
+  var WAVE_CORE = [
+    { op: "addNode", args: [{ id: "rds", label: "rds", join: "all", data: { duration: "8m" } }] },
+    { op: "addNode", args: [{ id: "eks-cluster", label: "eks-cluster", join: "all", data: { duration: "12m" } }] },
+    { op: "addEdge", args: [{ id: "e-suba-rds", source: "subnet-a", target: "rds" }] },
+    { op: "addEdge", args: [{ id: "e-subb-rds", source: "subnet-b", target: "rds" }] },
+    { op: "addEdge", args: [{ id: "e-sg-rds", source: "security-group", target: "rds" }] },
+    { op: "addEdge", args: [{ id: "e-suba-eks", source: "subnet-a", target: "eks-cluster" }] },
+    { op: "addEdge", args: [{ id: "e-subb-eks", source: "subnet-b", target: "eks-cluster" }] },
+    { op: "addEdge", args: [{ id: "e-sg-eks", source: "security-group", target: "eks-cluster" }] },
+  ];
+
+  var WAVE_COMPUTE = [
+    { op: "addNode", args: [{ id: "eks-node-group", label: "eks-node-group", data: { duration: "3m" } }] },
+    { op: "addNode", args: [{ id: "iam-role", label: "iam-role", join: "all", data: { duration: "10s" } }] },
+    { op: "addEdge", args: [{ id: "e-eks-ng", source: "eks-cluster", target: "eks-node-group" }] },
+    { op: "addEdge", args: [{ id: "e-eks-iam", source: "eks-cluster", target: "iam-role" }] },
+    { op: "addEdge", args: [{ id: "e-rds-iam", source: "rds", target: "iam-role" }] },
+  ];
+
+  var WAVE_APP = [
+    { op: "addNode", args: [{ id: "app-deployment", label: "app-deployment", join: "all", data: { duration: "45s" } }] },
+    { op: "addEdge", args: [{ id: "e-ng-app", source: "eks-node-group", target: "app-deployment" }] },
+    { op: "addEdge", args: [{ id: "e-iam-app", source: "iam-role", target: "app-deployment" }] },
+  ];
+
+  var STEPS = [
+    { label: "assemble" },
+    { op: "batch", steps: WAVE_NETWORK, dur: 550 },
+    { op: "batch", steps: WAVE_CORE, dur: 650 },
+    { op: "batch", steps: WAVE_COMPUTE, dur: 550 },
+    { op: "batch", steps: WAVE_APP, dur: 450 },
+    { label: "apply" },
+    { op: "run.play" },
+    { label: "change request" },
+    { op: "addNode", args: [{ id: "dns-record", label: "dns-record", data: { duration: "5s" } }] },
+    { op: "addEdge", args: [{ id: "e-app-dns", source: "app-deployment", target: "dns-record" }] },
+    { op: "camera", args: [{ nodes: ["app-deployment", "dns-record"], pad: 70, dur: 600 }] },
+    { op: "addEdge", args: [{ id: "cycle-edge", source: "dns-record", target: "app-deployment", loop: true, maxIterations: 1 }] },
+    { op: "highlight", args: [{ nodes: ["dns-record", "app-deployment"], edges: ["cycle-edge"], variant: "warn", pulse: true }] },
+    { op: "caption", args: ["Cycle detected: app-deployment now depends on dns-record, which already depends on app-deployment.", { place: "bottom" }] },
+    { op: "wait", ms: 1800 },
+    { label: "fix" },
+    { op: "caption", args: [null] },
+    { op: "clearHighlight" },
+    { op: "removeEdge", args: ["cycle-edge"] },
+    { op: "camera", args: [{ fit: true, pad: 32, dur: 600 }] },
+    { op: "caption", args: ["Bad edge removed — replaying the apply clean.", { place: "bottom", variant: "note" }] },
+    { op: "wait", ms: 900 },
+    { op: "caption", args: [null] },
+    { label: "replay" },
+    { op: "run.play" },
+    { label: "done" },
+  ];
+
+  var APPLY_AT = 6, CYCLE_AT = 11, FIX_AT = 18, REPLAY_AT = 23;
+
+  // Pacing: a log curve over the graph's own declared durations (8m rds / 12m eks-cluster
+  // down to 5s dns-record) so the spread is visible without the pane taking literal
+  // minutes to play, and stays inside the 45s auto-mode budget once combined with speed().
+  var RUN_OPTS = {
+    hopMs: 180,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 340;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 240 + 1500 * f;
+    },
+  };
+
+  var ALL_RESOURCES = [
+    "vpc", "subnet-a", "subnet-b", "security-group", "rds", "eks-cluster",
+    "eks-node-group", "iam-role", "app-deployment", "dns-record",
+  ];
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mTime = $("#m-time"), mCreated = $("#m-created"), mJoin = $("#m-join"), mState = $("#m-state");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "TB", nodesep: 30, ranksep: 50 },
+      animation: { duration: 420, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+  }
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  function sampleFrame() {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+
+    var created = 0;
+    for (var i = 0; i < ALL_RESOURCES.length; i++) {
+      var n = st.nodes[ALL_RESOURCES[i]];
+      if (n && n.status === "done") created++;
+    }
+    mCreated.textContent = created + "/10";
+
+    var jr = st.joins.rds, je = st.joins["eks-cluster"];
+    mJoin.textContent = (jr ? jr.arrived + "/" + jr.needed : "—") + " · " + (je ? je.arrived + "/" + je.needed : "—");
+
+    mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
+  }
+  g.ticker.add(sampleFrame);
+
+  var checks = {};
+  var storyDone = false;
+
+  sb.on("step", function (ev) {
+    paintRail();
+    g.fitView({ animate: true, pad: 44 });
+    if (ev.index === APPLY_AT) {
+      checks.createdAfterFirstApply = 0;
+      var st0 = g.run().state();
+      ALL_RESOURCES.slice(0, 9).forEach(function (id) { if (st0.nodes[id] && st0.nodes[id].status === "done") checks.createdAfterFirstApply++; });
+    }
+    if (ev.index === CYCLE_AT) {
+      checks.cycleEdges = g.edges({ loop: true }).map(function (e) { return e.id; });
+      mState.textContent = "cyclic";
+      mState.className = "bad";
+    }
+    if (ev.index === FIX_AT) {
+      checks.cycleEdgeRemoved = g.edges({ loop: true }).length === 0;
+      mState.textContent = "acyclic";
+      mState.className = "";
+    }
+    if (ev.index === REPLAY_AT) {
+      // Fresh transport at t=0 so the replayed apply — including dns-record now that the
+      // cycle is gone — runs from a clean schedule instead of a stale mid-flight one.
+      g.run(RUN_OPTS);
+    }
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () {
+    storyDone = true;
+    paintRail();
+    phaseEl.textContent = "story complete";
+    var st = g.run().state();
+    checks.dnsRecordDone = st.nodes["dns-record"] && st.nodes["dns-record"].status === "done";
+    checks.createdAfterReplay = 0;
+    ALL_RESOURCES.forEach(function (id) { if (st.nodes[id] && st.nodes[id].status === "done") checks.createdAfterReplay++; });
+  });
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  function transportPlay() {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    transportPlay();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "resources done after first apply   " + checks.createdAfterFirstApply + "/9\n" +
+      "loop-tagged edges at cycle beat    " + JSON.stringify(checks.cycleEdges) + "\n" +
+      "cycle edge removed on fix          " + checks.cycleEdgeRemoved + "\n" +
+      "dns-record done after replay       " + checks.dnsRecordDone + "\n" +
+      "resources done after replay        " + checks.createdAfterReplay + "/10\n" +
+      "errors                             " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  async function auto() {
+    var speedUp = function () { var r = g.run(); if (r && typeof r.speed === "function") r.speed(3); };
+    speedUp();
+    // Every fresh run() the story creates (see REPLAY_AT above) needs its own speed-up too.
+    sb.on("step", function (ev) { if (ev.index === REPLAY_AT) speedUp(); });
+    await sleep(200);
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(300);
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors, checks: checks };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      writeReport();
+      window.__smvExit = { done: true, errors: errors, checks: checks };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

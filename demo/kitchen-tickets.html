@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — Restaurant kitchen ticket</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --bad: #c23b3b;
+    --good: #1a8f5e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a;
+      --bad: #e06868; --good: #57d19a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #pipe {
+    height: 520px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+  .tile.fail span { color: var(--bad); }
+
+  ul.look { margin: 16px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+  ul.look li { margin: 2px 0; }
+  ul.look code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Restaurant kitchen ticket <small>— fan-out, join, a loop, a failed check</small></h1>
+  <p class="lede">
+    Expo fires one dinner ticket at four stations at once — grill, sauté, fry, garde manger —
+    then plating waits for all four (an <code>all</code>-join) before the pass. The pass is a
+    quality check: usually it sends one plate back to the grill for a quick fix (a bounded
+    retry loop), and once — this run — a steak comes back <em>under</em> and the ticket is
+    declared failed outright (<code>data.fail</code>) instead of looping. Run several
+    tickets: watch the fry station get sped up on its own branch, then step through the
+    plating join one event at a time.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Run the tickets</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>plating · join</i><span id="m-join">0/4</span></div>
+  <div class="tile"><i>remake loop</i><span id="m-loop">iter 0/2</span></div>
+  <div class="tile"><i>grill</i><span id="m-occ-grill">idle</span></div>
+  <div class="tile"><i>sauté</i><span id="m-occ-saute">idle</span></div>
+  <div class="tile"><i>fry</i><span id="m-occ-fry">idle</span></div>
+  <div class="tile"><i>garde manger</i><span id="m-occ-garde">idle</span></div>
+  <div class="tile fail"><i>ticket 3</i><span id="m-fail">—</span></div>
+</div>
+
+<ul class="look">
+  <li>The slowest station sets the pace — risotto (12m) is still cooking after fries (4m)
+    and salad (3m) are long done, so plating waits on it, not the other way round.</li>
+  <li><code>plate</code> is an implicit <code>join:"all"</code> — four in-edges, four pips.</li>
+  <li><code>pass → grill</code> is a bounded retry (<code>loop:true, maxIterations:2</code>) —
+    watch the iteration badge and the dashed back-edge arc.</li>
+  <li>Ticket 3 sets <code>data.fail:"steak under, remake"</code> on the pass step itself: no
+    loop, no fan-out, the branch just stops — a first-class failed outcome, not a hang.</li>
+  <li><code>run.speed(2, {branch:"fry"})</code> speeds up only the fry branch mid-run; a
+    paused <code>run.step()</code> walks the plating join one event at a time.</li>
+</ul>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // Spec — one dinner ticket, four stations, an all-join at plating, a pass/quality-check
+  // step with a bounded remake loop back to the grill.
+  // ---------------------------------------------------------------------------
+
+  var SPEC = {
+    nodes: [
+      { id: "expo", label: "Expo receives ticket" },
+      { id: "grill", label: "Grill · steak", data: { duration: "9m" } },
+      { id: "saute", label: "Sauté · risotto", data: { duration: "12m" } },
+      { id: "fry", label: "Fry · fries", data: { duration: "4m" } },
+      { id: "garde", label: "Garde manger · salad", data: { duration: "3m" } },
+      { id: "plate", label: "Plating", join: "all", data: { duration: "2m" } },
+      { id: "pass", label: "Pass · quality check", data: { duration: "1m" } },
+      { id: "served", label: "Served" },
+    ],
+    edges: [
+      { id: "e-grill", source: "expo", target: "grill" },
+      { id: "e-saute", source: "expo", target: "saute" },
+      { id: "e-fry", source: "expo", target: "fry" },
+      { id: "e-garde", source: "expo", target: "garde" },
+      { id: "p-grill", source: "grill", target: "plate" },
+      { id: "p-saute", source: "saute", target: "plate" },
+      { id: "p-fry", source: "fry", target: "plate" },
+      { id: "p-garde", source: "garde", target: "plate" },
+      { id: "plate-pass", source: "plate", target: "pass" },
+      { id: "pass-served", source: "pass", target: "served" },
+      { id: "remake", source: "pass", target: "grill", loop: true, maxIterations: 2 },
+    ],
+  };
+
+  var RUN_OPTS = {
+    hopMs: 220,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 350;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 200 + 900 * f;
+    },
+  };
+
+  var STEPS = [
+    { label: "ticket 1" },
+    { op: "camera", args: [{ fit: true }] },
+    { op: "caption", args: ["Ticket 1 — expo fires the ticket at four stations at once.", { place: "bottom" }] },
+    { op: "highlight", args: [{ nodes: ["grill", "saute", "fry", "garde"], variant: "focus" }] },
+    { op: "run.play", until: "expo" },
+    { op: "caption", args: ["The slowest station sets the pace: risotto (12m) still cooking after fries and salad are long done.", { place: "bottom" }] },
+    { op: "camera", args: [{ node: "plate", k: 1.6, pad: 80 }] },
+    { op: "run.play", until: "plate" },
+    { op: "clearHighlight" },
+    { op: "caption", args: ["The pass sends one plate back to the grill for a quick fix — a bounded retry loop.", { place: "bottom" }] },
+    { op: "camera", args: [{ nodes: ["pass", "grill"], pad: 70 }] },
+    { op: "run.play" },
+    { label: "ticket 2 · branch speed" },
+    { op: "camera", args: [{ fit: true }] },
+    { op: "caption", args: ["Ticket 2 — same ticket, but the fry station gets sped up on its own branch this time.", { place: "bottom" }] },
+    { op: "run.seek", ms: 0 },
+    { op: "highlight", args: [{ nodes: ["fry"], variant: "ok", pulse: true }] },
+    { op: "run.play" },
+    { op: "clearHighlight" },
+    { label: "ticket 3 · failed check" },
+    { op: "camera", args: [{ fit: true }] },
+    { op: "caption", args: ["Ticket 3 — this time the steak comes back under. The pass fails the ticket outright: no loop, no fan-out.", { place: "bottom" }] },
+    { op: "update", args: ["pass", { data: { duration: "1m", fail: "steak under, remake" } }] },
+    { op: "run.seek", ms: 0 },
+    { op: "highlight", args: [{ nodes: ["pass"], variant: "warn" }] },
+    { op: "run.play" },
+    { op: "caption", args: ["Pass reports 'failed', not 'done' — a first-class outcome, and the branch just stops.", { place: "bottom" }] },
+  ];
+
+  // ---------------------------------------------------------------------------
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mTime = $("#m-time"), mJoin = $("#m-join"), mLoop = $("#m-loop"), mFail = $("#m-fail");
+  var mOcc = {
+    grill: $("#m-occ-grill"), saute: $("#m-occ-saute"),
+    fry: $("#m-occ-fry"), garde: $("#m-occ-garde"),
+  };
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 22, ranksep: 52 },
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS);
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+  }
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+  var STATIONS = ["grill", "saute", "fry", "garde"];
+
+  function sampleFrame() {
+    var run = g.run();
+    if (!run) return;
+    var st = run.state();
+    var j = st.joins.plate;
+    var lp = st.loops.remake;
+    mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
+    mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "—";
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/2";
+    STATIONS.forEach(function (id) {
+      var n = st.nodes[id];
+      var el = mOcc[id];
+      if (!n) { el.textContent = "idle"; return; }
+      if (n.status === "active") el.textContent = "cooking ×" + n.occupancy;
+      else if (n.status === "done") el.textContent = "done";
+      else if (n.status === "failed") el.textContent = "failed";
+      else el.textContent = "idle";
+    });
+    var pass = st.nodes.pass;
+    mFail.textContent = pass && pass.status === "failed" ? "FAILED — steak under, remake" : (pass && pass.status === "done" ? "passed" : "—");
+  }
+  g.ticker.add(sampleFrame);
+
+  var failEventSeen = false;
+  g.run().on("fail", function (ev) {
+    if (ev && ev.nodeId === "pass") failEventSeen = true;
+  });
+
+  // Demonstrate per-branch speed + step() once ticket 2's storyboard segment begins playing.
+  var didBranchSpeedDemo = false;
+  var didStepDemo = false;
+
+  sb.on("step", function (ev) {
+    paintRail();
+    g.fitView({ animate: true });
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+
+    // Right after "ticket 2 · branch speed" resumes playback, nudge the fry branch to 2x —
+    // a live demonstration of g.run().speed(factor, {branch}) mid-run.
+    if (!didBranchSpeedDemo && sb.position().label === "ticket 2 · branch speed") {
+      didBranchSpeedDemo = true;
+      var run = g.run();
+      run.speed(2, { branch: "fry" });
+    }
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () {
+    paintRail();
+    phaseEl.textContent = "story complete";
+    g.caption(null);
+    g.fitView({ animate: false });
+    stepThroughJoin();
+  });
+
+  /** One last, explicit demonstration: reset to t=0, pause, and single-step the transport
+   *  event-by-event (`run.step()`, no `token`) until the plating join fires, logging its
+   *  arrived/needed count at every boundary. Ticket 3's `data.fail` is still on `pass`, so
+   *  this replay also proves the fan-out into `plate` runs to completion before it ever
+   *  reaches — and stops at — the failed pass step. */
+  function stepThroughJoin() {
+    var run = g.run();
+    if (!run) return;
+    run.pause();
+    run.seek(0);
+    var lines = ["run.step() through the plating join, from t=0 —"];
+    var j = run.state().joins.plate;
+    lines.push("  t=" + fmt(run.time()) + "  plate join: " + JSON.stringify(j));
+    var guard = 0;
+    while ((!j || !j.fired) && guard < 40) {
+      run.step();
+      j = run.state().joins.plate;
+      lines.push("  t=" + fmt(run.time()) + "  plate join: " + JSON.stringify(j));
+      guard++;
+    }
+    lines.push("plate join fired after " + guard + " step()s.");
+    lines.push("fail event on 'pass' observed earlier in the run: " + failEventSeen);
+    lines.push("errors: " + (errors.length ? JSON.stringify(errors, null, 2) : "none"));
+    reportEl.textContent = lines.join("\n");
+    run.seek(run.duration);
+    didStepDemo = true;
+    checksReady = true;
+  }
+
+  var checksReady = false;
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  function transportPlay() {
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    transportPlay();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  async function auto() {
+    await sleep(250);
+    start();
+    await waitFor(function () { return checksReady; }, 42000);
+    await sleep(300);
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>
