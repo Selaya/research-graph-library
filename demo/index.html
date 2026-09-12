@@ -82,8 +82,9 @@
     and joins, retry loops ticking, manual steps condensing into automated ones, and a
     transport bar to play, pause, and scrub the whole story. One
     <code>&lt;script&gt;</code> tag, no build step, no framework. Below: the flagship
-    story, eighteen use-case demos across software delivery, AI agents, streaming data,
-    business operations and tooling, and the engineering demos the library grew up on.
+    story, nine animated sequence diagrams, eighteen use-case demos across software delivery,
+    AI agents, streaming data, business operations and tooling, and the engineering demos
+    the library grew up on.
     Every page runs on the same <code>dist/smv.iife.min.js</code>.
     <a href="https://github.com/selaya/research-graph-library">View the repo on GitHub →</a>
   </p>
@@ -101,6 +102,43 @@
 </a>
 
 <!-- use-case demos: start -->
+<h4 class="section">Sequence diagrams</h4>
+<p class="section-lede">Actors as lifelines, messages as arrows, and the ball riding each call out and back. All built on demo/sequence-solver.js, a 150-line custom layout solver.</p>
+<div class="grid">
+  <a class="card" href="seq-basics.html">
+    <h3>Sequence diagram basics</h3>
+    <p>A login and a profile fetch drawn as a sequence diagram with the custom-solver seam: actors become lifeline columns, and the ball rides each message out to the database and back, one activation ahead of the diagram unfolding.</p>
+  </a>
+  <a class="card" href="seq-checkout.html">
+    <h3>Checkout with a 3-D Secure detour</h3>
+    <p>A checkout call that Payment turns into a question mid-flight, forcing the ball all the way home to the app before a fire-and-forget email fan-out closes it out.</p>
+  </a>
+  <a class="card" href="seq-oauth-pkce.html">
+    <h3>OAuth authorization code + PKCE, then a token refresh</h3>
+    <p>A login walks the authorization code and PKCE challenge through the browser, then an expired access token fails outright 55 minutes later and the app backend starts a fresh activation to refresh it.</p>
+  </a>
+  <a class="card" href="seq-retry-circuit.html">
+    <h3>Timeouts, retries, and a circuit breaker</h3>
+    <p>A search request times out, retries three times with backoff, trips a circuit breaker onto stale cache, and is closed again 30 seconds later by a single half-open probe.</p>
+  </a>
+  <a class="card" href="seq-saga.html">
+    <h3>Order saga with compensating transactions</h3>
+    <p>A five-actor order saga runs forward until shipping fails, then a second ball starts on a fresh orchestrator activation and undoes the committed steps in reverse.</p>
+  </a>
+  <a class="card" href="seq-chat-fanout.html">
+    <h3>Group chat delivery</h3>
+    <p>One send fans out on a single row into a live push to one client and a queued entry for an offline one, and a join delivery report waits for both before the sender sees the double check.</p>
+  </a>
+  <a class="card" href="seq-cache-aside.html">
+    <h3>Cache-aside: miss, fill, hit</h3>
+    <p>The same product lookup runs cold, warm, and as a two-client TTL-expiry stampede, then condense folds the cold path into one read-through hop under the pipeline preset&#x27;s odometer.</p>
+  </a>
+  <a class="card" href="seq-graphql-federation.html">
+    <h3>GraphQL federation and the N+1 a DataLoader batches away</h3>
+    <p>One federated query: the gateway fans out to two subgraphs at once, joins them, then pays three sequential round trips to Reviews until condense merges them into a single batched call.</p>
+  </a>
+</div>
+
 <h4 class="section">Software delivery</h4>
 <p class="section-lede">CI, infrastructure, and source control as pipelines of work.</p>
 <div class="grid">
@@ -156,7 +194,7 @@
   </a>
   <a class="card" href="ab-experiment.html">
     <h3>A/B experiment lifecycle</h3>
-    <p>Hypothesis, design, and implement fan out into control and two variants that collect for two weeks per arm, join on all three, and a ship decision either loops back to redesign or ships the winner.</p>
+    <p>hypothesis -&gt; design -&gt; implement fans out into a control/variant-a/variant-b container that collects for two weeks per arm, joins on all three, and a ship decision either loops back to redesign (up to 3x) or ships the winner.</p>
   </a>
 </div>
 

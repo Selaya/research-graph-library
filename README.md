@@ -536,6 +536,12 @@ IIFE's 50KB budget held.
   runs the whole story unattended and sets `window.__smvExit.done` at the end so
   `npm run check-demos` can drive every page in headless chromium and fail on any console
   error, `[smv:` misuse warning, or empty render.
+- `demo/seq-*.html` — nine **animated sequence diagrams** (login, checkout with a 3-D Secure
+  detour, OAuth PKCE, retries and a circuit breaker, a saga with compensations, group chat
+  fan-out, cache-aside, a live distributed trace, GraphQL federation). They share
+  `demo/sequence-solver.js`, a ~150-line solver for the layout seam that places each actor
+  as a lifeline column and each activation on an (actor, time) grid, so the run token rides
+  every message out and back.
 
 ## Development
 
