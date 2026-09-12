@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Group chat delivery — sparkle-motion-visualizer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8; --card: #ffffff; --ink: #1b2230; --muted: #6b7488;
+    --line: rgba(128,138,160,.32); --accent: #5b6ef5; --warm: #b97400;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+            --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 20px 40px; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--page); color: var(--ink); }
+  main { max-width: 1120px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: -.01em; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; }
+  p.lede { margin: 0 0 14px; color: var(--muted); max-width: 80ch; }
+  code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #phase { color: var(--muted); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  #pipe { height: 600px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  aside { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 14px 16px; }
+  aside h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  aside ol { margin: 0; padding-left: 18px; }
+  aside li { margin: 0 0 6px; color: var(--muted); }
+  aside li.now { color: var(--ink); font-weight: 600; }
+  aside li.done { color: var(--ink); }
+  aside li.done::marker { color: #2f9e6a; }
+  ul.watch { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
+  ul.watch li { margin: 0 0 4px; }
+  footer { margin-top: 20px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+<h1>Group chat delivery <small>— one send, three receivers</small></h1>
+<p class="lede">
+  Client A sends one message into a room; the gateway checks who's actually online, persists
+  the message once, then fans out on a single row — a live push to Client B and a queue entry
+  for offline Client C, two balls in flight at once. A join waits for both receipts before A
+  sees its double check. Later, when C reconnects, the queued message finally lands.
+</p>
+
+<div class="bar">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="step" type="button">Step ⏭</button>
+  <button id="restart" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div class="layout">
+  <div id="pipe"></div>
+  <aside>
+    <h3>Messages</h3>
+    <ol id="msgs"></ol>
+    <h3 style="margin-top:14px">What to look for</h3>
+    <ul class="watch">
+      <li>The gateway's ack fans out on one row: two balls leave together — a push to B, a queue entry in the store for C.</li>
+      <li>The store's queued ack usually arrives at the join first and waits; B's read receipt is what the join is really waiting on.</li>
+      <li><code>gwjoin</code> is a declared <code>join: "all"</code> activation — it only fires once both branches have checked in.</li>
+      <li>After the gap, Client C's own reconnect kicks off a second, shorter delivery: drain the queue, render, receipt, ack.</li>
+      <li>Scrub the transport bar backwards — structural steps are snapshotted, so the diagram folds back up.</li>
+    </ul>
+  </aside>
+</div>
+<footer>Part of the <a href="index.html">sparkle-motion-visualizer demos</a>. Layout by <code>demo/sequence-solver.js</code>; see the page source.</footer>
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script src="sequence-solver.js"></script>
+<script>
+(function () {
+  "use strict";
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) { errors.push(String((e && e.message) || e)); });
+  window.addEventListener("unhandledrejection", function (e) { errors.push("unhandledrejection: " + String(e && e.reason)); });
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  var P = AUTO ? 0.45 : 1; // pace multiplier
+
+  // ---- actors -----------------------------------------------------------------------
+  var ACTORS = [
+    { id: "a", label: "Client A" },
+    { id: "gw", label: "WS gateway" },
+    { id: "pres", label: "Presence" },
+    { id: "store", label: "Message store" },
+    { id: "b", label: "Client B" },
+    { id: "c", label: "Client C" },
+  ];
+
+  // Each entry is one activation: who runs it, what it does, how long that takes, and the
+  // message(s) that hand it the ball. `from` can carry two entries — that's a join. `pair`
+  // marks the second of two activations that share a row (a fan-out landing at once).
+  var ACT = [
+    { id: "a1", actor: "a", row: 0, node: "compose message", dur: "0.2s" },
+    { id: "gw1", actor: "gw", row: 1, node: "route to room", dur: "4ms", from: [{ id: "a1", msg: "send msg" }] },
+    { id: "pres1", actor: "pres", row: 2, node: "B online · C offline", dur: "3ms", from: [{ id: "gw1", msg: "who's online in room?" }] },
+    { id: "gw2", actor: "gw", row: 3, node: "plan delivery", dur: "1ms", from: [{ id: "pres1", msg: "roster" }] },
+    { id: "store1", actor: "store", row: 4, node: "INSERT message", dur: "4ms", from: [{ id: "gw2", msg: "persist(msg)" }] },
+    { id: "gw3", actor: "gw", row: 5, node: "ack + fan out", dur: "1ms", from: [{ id: "store1", msg: "ok · id 42" }] },
+    { id: "b1", actor: "b", row: 6, node: "render bubble", dur: "0.2s", from: [{ id: "gw3", msg: "push msg" }], pair: true },
+    { id: "store2", actor: "store", row: 6, node: "queue for C", dur: "3ms", from: [{ id: "gw3", msg: "queue (C offline)" }] },
+    { id: "b2", actor: "b", row: 7, node: "mark read", dur: "0.15s", from: [{ id: "b1", msg: null }] },
+    { id: "gwjoin", actor: "gw", row: 8, node: "delivery report", dur: "1ms", join: "all",
+      from: [{ id: "b2", msg: "read ✓" }, { id: "store2", msg: "queued ok" }] },
+    { id: "a2", actor: "a", row: 9, node: "show ✓✓", dur: "0.2s", from: [{ id: "gwjoin", msg: "delivered + read" }] },
+    { id: "c1", actor: "c", row: 11, node: "reconnect", dur: "0.2s", from: [{ id: "a2", msg: null }] },
+    { id: "gw4", actor: "gw", row: 12, node: "client back online", dur: "2ms", from: [{ id: "c1", msg: "reconnect" }] },
+    { id: "store3", actor: "store", row: 13, node: "drain queue", dur: "6ms", from: [{ id: "gw4", msg: "drain for C" }] },
+    { id: "c2", actor: "c", row: 14, node: "render bubble", dur: "0.2s", from: [{ id: "store3", msg: "queued msg" }] },
+    { id: "c3", actor: "c", row: 15, node: "mark read", dur: "0.15s", from: [{ id: "c2", msg: null }] },
+    { id: "gw5", actor: "gw", row: 16, node: "relay receipt", dur: "1ms", from: [{ id: "c3", msg: "read ✓" }] },
+    { id: "a3", actor: "a", row: 17, node: "show ✓✓ (C)", dur: "0.2s", from: [{ id: "gw5", msg: "delivered + read (C)" }] },
+  ];
+  var byId = {};
+  ACT.forEach(function (it) { byId[it.id] = it; });
+
+  var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
+  ACT.forEach(function (it) { seq.place(it.id, it.actor, it.row); });
+
+  function nodeOf(it) {
+    var n = { id: it.id, parent: it.actor, label: it.node, data: { duration: it.dur } };
+    if (it.join) n.join = it.join;
+    return n;
+  }
+  function edgesFor(it) {
+    return (it.from || []).map(function (f) {
+      return { id: "m:" + f.id + ">" + it.id, source: f.id, target: it.id, label: f.msg };
+    });
+  }
+
+  var SEED = { nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(ACT[0])]), edges: [] };
+
+  // ---- storyboard: add the next activation(s) a beat before the ball arrives ----------
+  var STEPS = [{ label: "send" },
+    { op: "caption", args: ["One send — the gateway checks who's in the room, then fans out.", { place: "top" }] }];
+
+  var i = 1;
+  while (i < ACT.length) {
+    var it = ACT[i];
+    if (it.pair) {
+      var it2 = ACT[i + 1];
+      STEPS.push({ op: "batch", steps: [
+        { op: "addNode", args: [nodeOf(it)] }, { op: "addEdge", args: [edgesFor(it)[0]] },
+        { op: "addNode", args: [nodeOf(it2)] }, { op: "addEdge", args: [edgesFor(it2)[0]] },
+      ], dur: 260 * P });
+      STEPS.push({ op: "camera", args: [{ nodes: [it.from[0].id, it.id, it2.id], k: 1, pad: 130, dur: 320 * P }] });
+      STEPS.push({ op: "caption", args: ["Two balls, one row — pushed to B, queued for C.", { place: "top" }] });
+      STEPS.push({ op: "run.play", until: it.id });
+      STEPS.push({ op: "run.play", until: it2.id });
+      i += 2;
+      continue;
+    }
+    var addOps = [{ op: "addNode", args: [nodeOf(it)] }];
+    edgesFor(it).forEach(function (e) { addOps.push({ op: "addEdge", args: [e] }); });
+    STEPS.push({ op: "batch", steps: addOps, dur: 260 * P });
+    var camNodes = it.from.map(function (f) { return f.id; }).concat([it.id]);
+    STEPS.push({ op: "camera", args: [{ nodes: camNodes, k: 1, pad: 120, dur: 300 * P }] });
+    if (it.id === "gwjoin") {
+      STEPS.push({ op: "caption", args: ["The report waits for both — B's read receipt and the store's queued ack.", { place: "top" }] });
+    }
+    if (it.id === "c1") {
+      STEPS.push({ op: "caption", args: ["Meanwhile: Client C's connection comes back online.", { place: "top" }] });
+    }
+    STEPS.push({ op: "run.play", until: it.id });
+    i += 1;
+  }
+  STEPS.push({ label: "done" });
+  STEPS.push({ op: "caption", args: [null] });
+  STEPS.push({ op: "highlight", args: [{ nodes: ["a3"], variant: "ok", pulse: true }] });
+  STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
+  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -26 }, dur: 200 * P }] });
+  STEPS.push({ op: "wait", ms: 900 * P });
+
+  var RUN_OPTS = {
+    hopMs: 520 * P,                       // the message in flight — the part worth watching
+    dwell: function (sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; },
+  };
+
+  // ---- mount --------------------------------------------------------------------------
+  var $ = function (s) { return document.querySelector(s); };
+  var phaseEl = $("#phase"), msgsEl = $("#msgs");
+  var g, sb;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "TB", solver: seq.solver, nodesep: 32, ranksep: 22, marginx: 24, marginy: 16, minColWidth: 132 },
+      animation: { duration: 360 * P, easing: "cubic-out" },
+      controls: true,
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS);
+    sb = g.storyboard();
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed: " + err.message;
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+  window.__g = g;
+
+  // ---- side panel: the message list lights up as the ball arrives --------------------
+  ACT.forEach(function (it) {
+    var li = document.createElement("li");
+    li.id = "li-" + it.id;
+    var actorLabel = ACTORS.filter(function (a) { return a.id === it.actor; })[0].label;
+    var msgs = (it.from || []).map(function (f) { return f.msg; }).filter(Boolean);
+    li.textContent = (msgs.length ? msgs.join(" + ") + " → " : "") + actorLabel + ": " + it.node;
+    msgsEl.appendChild(li);
+  });
+  var run = g.run();
+  run.on("start", function (ev) {
+    var li = document.getElementById("li-" + String(ev.nodeId));
+    if (!li) return;
+    msgsEl.querySelectorAll("li.now").forEach(function (x) { x.classList.remove("now"); x.classList.add("done"); });
+    li.classList.add("now");
+  });
+
+  // ---- controls -------------------------------------------------------------------
+  var playing = false;
+  function finish() {
+    playing = false;
+    phaseEl.textContent = "story complete — scrub the bar or Restart";
+    window.__smvExit = { done: true, errors: errors };
+  }
+  $("#play").addEventListener("click", function () {
+    if (playing) return;
+    playing = true;
+    phaseEl.textContent = "playing…";
+    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+  });
+  $("#step").addEventListener("click", function () {
+    Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
+  });
+  $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
+
+  if (AUTO) $("#play").click();
+})();
+</script>
+</body>
+</html>
