@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GraphQL federation — sparkle-motion-visualizer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8; --card: #ffffff; --ink: #1b2230; --muted: #6b7488;
+    --line: rgba(128,138,160,.32); --accent: #5b6ef5; --warm: #b97400;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+            --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 20px 40px; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--page); color: var(--ink); }
+  main { max-width: 1120px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: -.01em; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; }
+  p.lede { margin: 0 0 14px; color: var(--muted); max-width: 80ch; }
+  code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #phase { color: var(--muted); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 292px; gap: 14px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  #pipe { height: 540px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  /* Captions sit at the pane's bottom edge, which the transport bar and the preset's
+     total-duration bar already own; lift them clear of both. */
+  #pipe .smv-caption { bottom: 64px; }
+  /* A lifeline whose first activation has not landed yet is still a childless leaf to the
+     renderer, so it paints as one big filled node. Draw it as the empty column it is. */
+  #pipe .smv-node:not([data-container])[data-id="gw"] .smv-node-box,
+  #pipe .smv-node:not([data-container])[data-id="users"] .smv-node-box,
+  #pipe .smv-node:not([data-container])[data-id="products"] .smv-node-box,
+  #pipe .smv-node:not([data-container])[data-id="reviews"] .smv-node-box {
+    fill: none; stroke-dasharray: 5 5; opacity: .5;
+  }
+  /* Activation labels are long here (a sequence activation is a sentence, not a noun), so
+     the preset's duration chip — anchored at the node's top-right corner — would land on
+     the tail of the label. Lift it into the row gap just above the box. */
+  #pipe .smv-node:not([data-container]) .smv-chip { transform: translate(0, -18px); }
+  aside { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 14px 16px; }
+  aside h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  aside ol { margin: 0; padding-left: 18px; }
+  aside li { margin: 0 0 6px; color: var(--muted); }
+  aside li.now { color: var(--ink); font-weight: 600; }
+  aside li.done { color: var(--ink); }
+  aside li.done::marker { color: #2f9e6a; }
+  aside li.merged { color: var(--muted); text-decoration: line-through; opacity: .65; }
+  aside li.batched { color: var(--warm); font-weight: 600; }
+  ul.watch { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
+  ul.watch li { margin: 0 0 4px; }
+  footer { margin-top: 20px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+<h1>GraphQL federation <small>— parallel subgraphs, and the N+1 a DataLoader batches away</small></h1>
+<p class="lede">
+  One query — <code>{me{cart{items{product{name reviews{rating}}}}}}</code> — through a
+  federated gateway and three subgraphs. It fans out to Users and Products at once, joins
+  both with <code>join:"all"</code>, then asks Reviews once <em>per product</em>: three
+  round trips. The last beat merges those five activations into one
+  <code>g.condense()</code>d <code>reviews(products:[1,2,3])</code> and replays the leg.
+</p>
+
+<div class="bar">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="step" type="button">Step ⏭</button>
+  <button id="restart" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div class="layout">
+  <div id="pipe"></div>
+  <aside>
+    <h3>Messages</h3>
+    <ol id="msgs"></ol>
+    <h3 style="margin-top:14px">What to look for</h3>
+    <ul class="watch">
+      <li>One row carries <em>two</em> activations: the fan-out to Users and Products really is simultaneous, so two balls cross at once.</li>
+      <li><code>join:"all"</code> on “merge entities” makes the gateway wait for both before it moves on.</li>
+      <li>Beat 2 zigzags: gateway → Reviews → gateway, three times. That shape <em>is</em> the N+1.</li>
+      <li>The condense set includes the two gateway waits — without them a path would leave the set and re-enter, which <code>condense()</code> rejects as <code>non-convex</code>.</li>
+      <li>After the merge, the chip odometer rolls 117ms → 45ms and the total-duration bar drops.</li>
+    </ul>
+  </aside>
+</div>
+<footer>Part of the <a href="index.html">sparkle-motion-visualizer demos</a>. Layout by <code>demo/sequence-solver.js</code>; see the page source.</footer>
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script src="sequence-solver.js"></script>
+<script>
+(function () {
+  "use strict";
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) { errors.push(String((e && e.message) || e)); });
+  window.addEventListener("unhandledrejection", function (e) { errors.push("unhandledrejection: " + String(e && e.reason)); });
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  var P = AUTO ? 0.45 : 1; // pace multiplier
+
+  // ---- actors (lifeline columns, left to right) --------------------------------------
+  var ACTORS = [
+    { id: "client", label: "Web client", full: "Web client" },
+    { id: "gw", label: "Gateway", full: "Gateway (router)" },
+    { id: "users", label: "Users", full: "Users subgraph" },
+    { id: "products", label: "Products", full: "Products subgraph" },
+    { id: "reviews", label: "Reviews", full: "Reviews subgraph" },
+  ];
+
+  // Each entry is one activation: who runs it, what it does while the ball dwells there,
+  // which messages arrive at it, and the real-world time it costs. `sameRow` keeps an
+  // activation on the row above's row — that is the fan-out, two actors at one instant —
+  // and `gap` skips a row, which the solver draws as extra space (a pause).
+  var MSGS = [
+    { id: "cli.1", actor: "client", node: "send cart query", dur: "8ms", in: [] },
+    { id: "gw.1", actor: "gw", node: "plan query", dur: "3ms", in: [{ from: "cli.1", label: "POST /graphql" }] },
+    { id: "usr.1", actor: "users", node: "resolve me", dur: "11ms", in: [{ from: "gw.1", label: "Query.me" }] },
+    { id: "prd.1", actor: "products", node: "cart items ×3", dur: "14ms", sameRow: true, anchor: true,
+      in: [{ from: "gw.1", label: "Query.cart" }] },
+    { id: "gw.2", actor: "gw", node: "merge entities", dur: "2ms", join: "all",
+      in: [{ from: "usr.1", label: "user{cart}" }, { from: "prd.1", label: "items[1,2,3]" }] },
+    { id: "rev.1", actor: "reviews", node: "reviews(product:1)", dur: "38ms", in: [{ from: "gw.2", label: "fetch #1" }] },
+    { id: "gw.3", actor: "gw", node: "wait · 1 of 3", dur: "1ms", in: [{ from: "rev.1", label: "ratings" }] },
+    { id: "rev.2", actor: "reviews", node: "reviews(product:2)", dur: "36ms", in: [{ from: "gw.3", label: "fetch #2" }] },
+    { id: "gw.4", actor: "gw", node: "wait · 2 of 3", dur: "1ms", in: [{ from: "rev.2", label: "ratings" }] },
+    { id: "rev.3", actor: "reviews", node: "reviews(product:3)", dur: "41ms", in: [{ from: "gw.4", label: "fetch #3" }] },
+    { id: "gw.5", actor: "gw", node: "assemble response", dur: "4ms", in: [{ from: "rev.3", label: "ratings" }] },
+    { id: "cli.2", actor: "client", node: "render cart", dur: "16ms", in: [{ from: "gw.5", label: "200 {data}" }] },
+  ];
+
+  // The DataLoader beat: five activations (three fetches AND the two gateway waits between
+  // them) become one. The waits are not optional — a set of just the three fetches is
+  // non-convex (gw.2 → rev.1 → gw.3 → rev.2 leaves the set and re-enters), and condense()
+  // throws [smv:non-convex] on it.
+  var CONDENSE_IDS = ["rev.1", "gw.3", "rev.2", "gw.4", "rev.3"];
+  var MERGED = { id: "rev.batch", parent: "reviews", label: "reviews(products:[1,2,3])", data: { duration: "45ms" } };
+  // condense() derives the redirected edge ids as `<protoEdgeId>~<mergedId>`.
+  var IN_EDGE = "m:gw.2>rev.1~rev.batch", OUT_EDGE = "m:rev.3>gw.5~rev.batch";
+
+  // ---- placements: (actor, row) for every activation ---------------------------------
+  var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
+  // An actor with no activations yet is still a leaf to the solver — with no placement it
+  // would be parked in the spare column on the right until its first child lands. Place
+  // each one at the head of its own column; the placement is ignored the moment the actor
+  // becomes a container, which is exactly when the solver starts drawing it as a lifeline.
+  ACTORS.forEach(function (a) { seq.place(a.id, a.id, 0); });
+  var row = -1;
+  MSGS.forEach(function (m) {
+    if (m.sameRow) m.row = row;
+    else { row += 1 + (m.gap || 0); m.row = row; }
+    seq.place(m.id, m.actor, m.row);
+  });
+  // The merged node is minted by condense() mid-story, so the solver would have no
+  // placement for it and would park it in the spare column with a warning. Place it up
+  // front instead — nothing requires the node to exist yet. Two rows under "merge
+  // entities": the skipped row in between is the gap that reads as the DataLoader holding
+  // its keys for a tick before it fires one batched call.
+  var MERGED_ROW = byId("gw.2").row + 2;
+  seq.place(MERGED.id, "reviews", MERGED_ROW);
+
+  function byId(id) { for (var i = 0; i < MSGS.length; i++) if (MSGS[i].id === id) return MSGS[i]; return null; }
+  function actorLabel(id) { for (var i = 0; i < ACTORS.length; i++) if (ACTORS[i].id === id) return ACTORS[i].full; return id; }
+  function nodeOf(m) {
+    var n = { id: m.id, parent: m.actor, label: m.node, data: { duration: m.dur } };
+    if (m.join) n.join = m.join;
+    return n;
+  }
+  function edgesOf(m) {
+    return m.in.map(function (e) { return { id: "m:" + e.from + ">" + m.id, source: e.from, target: m.id, label: e.label }; });
+  }
+
+  // Activations that share a row are added, framed and played as one beat.
+  var GROUPS = [];
+  MSGS.forEach(function (m) {
+    var g0 = GROUPS[GROUPS.length - 1];
+    if (g0 && g0.row === m.row) g0.msgs.push(m);
+    else GROUPS.push({ row: m.row, msgs: [m] });
+  });
+  GROUPS.forEach(function (g0) {
+    var anchored = g0.msgs.filter(function (m) { return m.anchor; });
+    g0.anchor = (anchored[0] || g0.msgs[g0.msgs.length - 1]).id;      // the last one to finish
+    g0.ids = g0.msgs.map(function (m) { return m.id; });
+  });
+
+  var SEED = {
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    edges: [],
+  };
+
+  // ---- the storyboard ----------------------------------------------------------------
+  var CAPTIONS = {
+    "gw.1": "The gateway plans the query before it talks to anyone.",
+    "usr.1": "Fan-out: Users and Products resolve in parallel — one row, two balls.",
+    "gw.2": "join:\"all\" — both entities have to land before the merge runs.",
+    "rev.1": "Now the reviews. The gateway asks for product 1…",
+    "rev.2": "…then product 2, on its own round trip…",
+    "rev.3": "…then product 3. Three products, three sequential fetches.",
+    "cli.2": "Only now can the client render the cart.",
+  };
+  var LABELS = { "gw.1": "plan", "usr.1": "fan-out", "rev.1": "N+1", "cli.2": "render" };
+
+  var STEPS = [
+    { label: "query" },
+    { op: "caption", args: ["One GraphQL query, five lifelines. The ball is the request."] },
+  ];
+  for (var i = 1; i < GROUPS.length; i++) {
+    var g0 = GROUPS[i], prev = GROUPS[i - 1];
+    var head = g0.ids[0];
+    if (LABELS[head]) STEPS.push({ label: LABELS[head] });
+    if (CAPTIONS[head]) STEPS.push({ op: "caption", args: [CAPTIONS[head]] });
+    var adds = [];
+    g0.msgs.forEach(function (m) { adds.push({ op: "addNode", args: [nodeOf(m)] }); });
+    g0.msgs.forEach(function (m) { edgesOf(m).forEach(function (e) { adds.push({ op: "addEdge", args: [e] }); }); });
+    STEPS.push({ op: "batch", steps: adds, dur: 260 * P });
+    STEPS.push({ op: "camera", args: [{ nodes: prev.ids.concat(g0.ids), k: 1, pad: 110, dur: 300 * P }] });
+    STEPS.push({ op: "run.play", until: g0.anchor });
+    if (head === "rev.3") {
+      // The third round trip is the moment worth marking.
+      STEPS.push({ op: "highlight", args: [{ nodes: ["rev.1", "rev.2", "rev.3"], variant: "warn", pulse: true }] });
+      STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.1", "rev.3"], k: 0.9, pad: 90, dur: 450 * P }] });
+      STEPS.push({ op: "caption", args: ["N+1: 3 products = 3 round trips."] });
+      STEPS.push({ op: "wait", ms: 1200 * P });
+    }
+  }
+
+  // Beat 3 — same query, one batched call.
+  var REPLAY_SEEK = { op: "run.seek", ms: 0 };   // ms is patched in once the condense lands
+  STEPS.push({ label: "DataLoader" });
+  STEPS.push({ op: "clearHighlight" });
+  STEPS.push({ op: "caption", args: ["Same query, with a DataLoader."] });
+  STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.1", "rev.3", "gw.5"], k: 0.9, pad: 90, dur: 450 * P }] });
+  STEPS.push({ op: "condense", args: [CONDENSE_IDS, MERGED] });
+  STEPS.push({ op: "batch", steps: [
+    { op: "update", args: [IN_EDGE, { label: "fetch ×3" }] },
+    { op: "update", args: [OUT_EDGE, { label: "ratings ×3" }] },
+  ], dur: 260 * P });
+  STEPS.push({ op: "highlight", args: [{ nodes: ["rev.batch"], variant: "ok", pulse: true }] });
+  STEPS.push({ op: "caption", args: ["Five activations become one: 117ms of round trips → 45ms."] });
+  STEPS.push({ op: "wait", ms: 1100 * P });
+  STEPS.push({ op: "caption", args: ["Replay the same leg: the ball crosses once."] });
+  STEPS.push(REPLAY_SEEK);
+  STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.batch"], k: 1, pad: 110, dur: 400 * P }] });
+  STEPS.push({ op: "run.play", until: "rev.batch" });
+  STEPS.push({ op: "camera", args: [{ nodes: ["rev.batch", "gw.5"], k: 1, pad: 110, dur: 300 * P }] });
+  STEPS.push({ op: "run.play", until: "gw.5" });
+  STEPS.push({ op: "camera", args: [{ nodes: ["gw.5", "cli.2"], k: 1, pad: 110, dur: 300 * P }] });
+  STEPS.push({ op: "run.play", until: "cli.2" });
+  STEPS.push({ label: "done" });
+  STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
+  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -34 }, dur: 200 * P }] });  // clear the transport + total bar
+  STEPS.push({ op: "caption", args: ["One round trip instead of three — same data, same query."] });
+  STEPS.push({ op: "wait", ms: 1000 * P });
+
+  var RUN_OPTS = {
+    hopMs: 520 * P,                      // the message in flight — the part worth watching
+    // Durations here span 1ms … 45ms, so a square-root curve keeps a 1ms gateway hop and a
+    // 41ms subgraph call visibly different without either becoming tedious.
+    dwell: function (sec) {
+      if (sec == null) return 320 * P;
+      return (250 + 520 * Math.min(1, Math.sqrt(sec / 0.045))) * P;
+    },
+  };
+
+  // ---- mount --------------------------------------------------------------------------
+  var $ = function (s) { return document.querySelector(s); };
+  var phaseEl = $("#phase"), msgsEl = $("#msgs");
+  var g, sb;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "TB", solver: seq.solver, nodesep: 34, ranksep: 22, marginx: 22, marginy: 16, minColWidth: 150 },
+      animation: { duration: 360 * P, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",                // duration chips + the condense odometer/delta badge
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS);
+    sb = g.storyboard();
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed: " + err.message;
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+  window.__g = g;
+
+  // ---- side panel: the message list lights up as the ball arrives ---------------------
+  function liId(id) { return "li-" + id.split(".").join("-"); }
+  MSGS.forEach(function (m) {
+    var li = document.createElement("li");
+    li.id = liId(m.id);
+    li.textContent = (m.in.length ? m.in[0].label + " → " : "") + actorLabel(m.actor) + ": " + m.node;
+    msgsEl.appendChild(li);
+  });
+  var batchLi = document.createElement("li");
+  batchLi.id = liId(MERGED.id);
+  batchLi.className = "batched";
+  batchLi.hidden = true;
+  batchLi.textContent = "fetch ×3 → " + actorLabel("reviews") + ": reviews(products:[1,2,3])";
+  msgsEl.insertBefore(batchLi, document.getElementById(liId("gw.5")));
+
+  var run = g.run();
+  run.on("start", function (ev) {
+    var li = document.getElementById(liId(String(ev.nodeId)));
+    if (!li) return;
+    msgsEl.querySelectorAll("li.now").forEach(function (x) { x.classList.remove("now"); x.classList.add("done"); });
+    li.classList.add("now");
+  });
+
+  // The replay seeks back to the instant "merge entities" finished, so the ball re-crosses
+  // only the leg that changed. That instant is only knowable after the condense has
+  // recompiled the schedule, so the step's `ms` is filled in the moment the condense lands
+  // (applyOp reads `step.ms` when it runs the step, not when the storyboard was built).
+  sb.on("step", function (ev) {
+    if (!ev.step || ev.step.op !== "condense") return;
+    REPLAY_SEEK.ms = run.timeOf("gw.2");
+    CONDENSE_IDS.forEach(function (id) {
+      var li = document.getElementById(liId(id));
+      if (li) { li.className = "merged"; }
+    });
+    batchLi.hidden = false;
+    var tail = document.getElementById(liId("gw.5"));
+    if (tail) tail.textContent = "ratings ×3 → " + actorLabel("gw") + ": assemble response";
+  });
+
+  // ---- controls -----------------------------------------------------------------------
+  var playing = false;
+  function finish() {
+    playing = false;
+    phaseEl.textContent = "story complete — scrub the bar or Restart";
+    window.__smvExit = { done: true, errors: errors };
+  }
+  $("#play").addEventListener("click", function () {
+    if (playing) return;
+    playing = true;
+    phaseEl.textContent = "playing…";
+    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+  });
+  $("#step").addEventListener("click", function () {
+    Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
+  });
+  $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
+
+  if (AUTO) $("#play").click();
+})();
+</script>
+</body>
+</html>

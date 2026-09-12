@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OAuth authorization code + PKCE — sparkle-motion-visualizer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8; --card: #ffffff; --ink: #1b2230; --muted: #6b7488;
+    --line: rgba(128,138,160,.32); --accent: #5b6ef5; --warm: #b97400;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+            --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 20px 40px; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--page); color: var(--ink); }
+  main { max-width: 1120px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: -.01em; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; }
+  p.lede { margin: 0 0 14px; color: var(--muted); max-width: 80ch; }
+  code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #phase { color: var(--muted); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  #pipe { height: 640px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  aside { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 14px 16px; }
+  aside h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  aside ol { margin: 0; padding-left: 18px; }
+  aside li { margin: 0 0 6px; color: var(--muted); }
+  aside li.now { color: var(--ink); font-weight: 600; }
+  aside li.done { color: var(--ink); }
+  aside li.done::marker { color: #2f9e6a; }
+  ul.watch { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
+  ul.watch li { margin: 0 0 4px; }
+  footer { margin-top: 20px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+<h1>OAuth authorization code + PKCE <small>— a login, then a silent token refresh 55 minutes later</small></h1>
+<p class="lede">
+  Same solver seam as <a href="seq-basics.html">the login walkthrough</a> and
+  <a href="seq-checkout.html">the checkout detour</a>: four lifelines, one activation per row,
+  every message an edge the run token rides. The authorization code never travels straight
+  from the identity provider to the app backend — it bounces through the browser, and PKCE's
+  <code>code_verifier</code>/<code>code_challenge</code> pair is what stops a stolen code from
+  being redeemed by anyone else. Later, the access token quietly expires; the resource API's
+  activation fails outright, and the app backend has to notice that on its own and start a
+  brand-new activation to refresh it — a failed activation cannot hand anything to a
+  successor, so there is no edge from the dead call to the retry.
+</p>
+
+<div class="bar">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="step" type="button">Step ⏭</button>
+  <button id="restart" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div class="layout">
+  <div id="pipe"></div>
+  <aside>
+    <h3>Messages</h3>
+    <ol id="msgs"></ol>
+    <h3 style="margin-top:14px">What to look for</h3>
+    <ul class="watch">
+      <li>PKCE: the <code>code_verifier</code> never leaves the app backend. Only the code and
+        its <code>challenge</code> cross through the browser, so a stolen authorization code is
+        useless to anyone who doesn't hold the verifier that minted its challenge.</li>
+      <li>Every redirect between the app and the identity provider bounces through the browser —
+        the two never talk to each other directly during login, only during the code exchange
+        and the later token refresh.</li>
+      <li>55 minutes on, the access token has expired: the resource API's activation fails
+        outright (red) and stops there. A failed activation is terminal for its branch — no
+        <code>finish</code> event, no message out — so the retry can't be an edge from it; it's
+        a fresh activation the app backend starts on its own.</li>
+      <li>The identity provider rotates the refresh token on every use, so the old one is dead
+        the moment the new pair is issued.</li>
+      <li>Scrub the transport bar backwards: structural steps are snapshotted, so the diagram
+        folds back up, dead branch and all.</li>
+    </ul>
+  </aside>
+</div>
+<footer>Part of the <a href="index.html">sparkle-motion-visualizer demos</a>. The solver is ~150 lines of plain JS; see the page source.</footer>
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script src="sequence-solver.js"></script>
+<script>
+(function () {
+  "use strict";
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) { errors.push(String((e && e.message) || e)); });
+  window.addEventListener("unhandledrejection", function (e) { errors.push("unhandledrejection: " + String(e && e.reason)); });
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  var P = AUTO ? 0.42 : 1; // pace multiplier
+
+  // ---- actors and the message script -----------------------------------------------
+  var ACTORS = [
+    { id: "browser", label: "Browser" },
+    { id: "app", label: "App backend" },
+    { id: "idp", label: "Identity provider" },
+    { id: "api", label: "Resource API" },
+  ];
+
+  // Each entry is one activation: who runs it, what the incoming message says, what the
+  // actor does while the ball dwells there, and how long that takes in the real world.
+  // `from` names the activation the message departs FROM (usually the previous entry, but a
+  // few redirects and the 401 fan-out need something other than "previous"). `sameRow` puts
+  // an entry on the same row as another id — the one legitimate use here is the moment the
+  // app backend's call to the resource API fails while the app backend itself, on the very
+  // same call, separately notices that failure: two activations, one shared moment.
+  var MSGS = [
+    { id: "browser.1", actor: "browser", node: "tap “Sign in”",              msg: null,                     dur: "0.2s",  from: null },
+    { id: "app.1",     actor: "app",     node: "generate code_verifier, challenge", msg: "GET /login",       dur: "15ms",  from: "browser.1" },
+    { id: "browser.2", actor: "browser", node: "follow redirect",            msg: "302 → /authorize?challenge", dur: "0.15s", from: "app.1",
+      caption: "Every redirect bounces through the browser — the identity provider and the app backend never talk directly during login." },
+    { id: "idp.1",     actor: "idp",     node: "login form",                 msg: "GET /authorize?challenge", dur: "4s",  from: "browser.2",
+      caption: "The shopper types a password — a real ~4s wait, modeled as one activation's dwell." },
+    { id: "browser.3", actor: "browser", node: "follow redirect",            msg: "302 → /callback?code",   dur: "0.15s", from: "idp.1" },
+    { id: "app.2",     actor: "app",     node: "read code, verifier",        msg: "GET /callback?code",     dur: "20ms",  from: "browser.3" },
+    { id: "idp.2",     actor: "idp",     node: "verify PKCE, mint tokens",   msg: "POST /token (code, verifier)", dur: "90ms", from: "app.2",
+      caption: "PKCE's whole point: only the app backend that generated the original code_verifier can turn this code into tokens, even if the code itself leaked." },
+    { id: "app.3",     actor: "app",     node: "set session cookie",         msg: "{access, refresh}",      dur: "10ms",  from: "idp.2" },
+    { id: "browser.4", actor: "browser", node: "render dashboard",           msg: "200 (Set-Cookie)",       dur: "0.3s",  from: "app.3" },
+
+    { id: "browser.5", actor: "browser", node: "click dashboard link",       msg: null,                     dur: "0.2s",  from: "browser.4", gap: 1,
+      caption: "55 minutes later — the access token has quietly expired, but the session hasn't." },
+    { id: "app.4",     actor: "app",     node: "look up session, call API",  msg: "GET /dashboard",         dur: "12ms",  from: "browser.5" },
+    { id: "api.1",     actor: "api",     node: "check auth token",           msg: "GET /me · Bearer",       dur: "40ms",  from: "app.4",
+      fail: "401 token expired", highlight: { variant: "warn", pulse: true },
+      caption: "A failed activation is terminal for its branch — no finish event, no message out. The retry has to start somewhere else." },
+    { id: "app.5",     actor: "app",     node: "detect 401",                 msg: null,                     dur: "0.4s",  from: "app.4", sameRow: "api.1",
+      caption: "Meanwhile the app backend notices the 401 on its own — a fresh activation, not a continuation of the dead branch above." },
+    { id: "idp.3",     actor: "idp",     node: "rotate refresh token",       msg: "POST /token (refresh_token)", dur: "80ms", from: "app.5",
+      caption: "The identity provider rotates the refresh token on every use — the old one is dead now too." },
+    { id: "app.6",     actor: "app",     node: "store new tokens",           msg: "{access, refresh}",      dur: "10ms",  from: "idp.3" },
+    { id: "api.2",     actor: "api",     node: "verify Bearer (retry)",      msg: "GET /me · Bearer (retry)", dur: "15ms", from: "app.6",
+      highlight: { variant: "ok", pulse: true },
+      caption: "Same request, brand-new activation, now with a valid access token." },
+    { id: "app.7",     actor: "app",     node: "forward profile",            msg: "200 {profile}",          dur: "10ms",  from: "api.2" },
+    { id: "browser.6", actor: "browser", node: "render dashboard",           msg: "200 {profile}",          dur: "0.3s",  from: "app.7" },
+  ];
+
+  var byId = {};
+  MSGS.forEach(function (m) { byId[m.id] = m; });
+
+  var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
+  var row = 0, rowOf = {};
+  MSGS.forEach(function (m) {
+    if (m.sameRow) {
+      m.row = rowOf[m.sameRow];
+    } else {
+      row += (m.gap || 0);
+      m.row = row++;
+    }
+    rowOf[m.id] = m.row;
+    seq.place(m.id, m.actor, m.row);
+  });
+
+  function nodeOf(m) {
+    var data = { duration: m.dur };
+    if (m.fail) data.fail = m.fail;
+    return { id: m.id, parent: m.actor, label: m.node, data: data };
+  }
+  function edgeOf(m) { return { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id, label: m.msg }; }
+
+  var SEED = {
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    edges: [],
+  };
+
+  // ---- the storyboard: add the next activation, then let the ball travel to it -------
+  // Ids that are the SAME-ROW PARTNER of some other entry are folded into that entry's step
+  // instead of getting a standalone one, so the pair's shared batch/camera only runs once.
+  var pairedAway = {};
+  MSGS.forEach(function (m) { if (m.sameRow) pairedAway[m.sameRow] = true; });
+
+  var STEPS = [
+    { label: "login" },
+    { op: "caption", args: ["A login: the ball is one request, and PKCE ties the authorization code to the app that requested it.", { place: "top" }] },
+  ];
+  for (var i = 1; i < MSGS.length; i++) {
+    var m = MSGS[i];
+    if (pairedAway[m.id]) continue; // handled together with its sameRow partner below
+    var prev = byId[m.from];
+
+    if (m.id === "browser.5") { STEPS.push({ op: "caption", args: [null] }); STEPS.push({ label: "later" }); }
+    if (m.id === "api.1") STEPS.push({ label: "expired" });
+    if (m.id === "idp.3") STEPS.push({ label: "refresh" });
+
+    if (m.sameRow) {
+      // A shared moment: two activations spawned from the same call. The failing one (`other`)
+      // plays out first and gets its warn highlight; only then does the second one, the app
+      // backend's own fresh activation, get its turn.
+      var other = byId[m.sameRow];
+      STEPS.push({
+        op: "batch",
+        steps: [
+          { op: "addNode", args: [nodeOf(other)] }, { op: "addEdge", args: [edgeOf(other)] },
+          { op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeOf(m)] },
+        ],
+        dur: 260 * P,
+      });
+      STEPS.push({ op: "camera", args: [{ nodes: [prev.id, other.id, m.id], k: 1, pad: 130, dur: 340 * P }] });
+      STEPS.push({ op: "run.play", until: other.id });
+      if (other.highlight) {
+        STEPS.push({ op: "highlight", args: [Object.assign({ nodes: [other.id] }, other.highlight)] });
+        if (other.caption) STEPS.push({ op: "caption", args: [other.caption, { place: "top" }] });
+        STEPS.push({ op: "wait", ms: 420 * P });
+        STEPS.push({ op: "clearHighlight" });
+      }
+      STEPS.push({ op: "run.play", until: m.id });
+      if (m.caption) STEPS.push({ op: "caption", args: [m.caption, { place: "top" }] });
+      continue;
+    }
+
+    STEPS.push({ op: "batch", steps: [{ op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeOf(m)] }], dur: 260 * P });
+    STEPS.push({ op: "camera", args: [{ nodes: [prev.id, m.id], k: 1, pad: 120, dur: 300 * P }] });
+    STEPS.push({ op: "run.play", until: m.id });
+    if (m.highlight) {
+      STEPS.push({ op: "highlight", args: [Object.assign({ nodes: [m.id] }, m.highlight)] });
+      if (m.caption) STEPS.push({ op: "caption", args: [m.caption, { place: "top" }] });
+      STEPS.push({ op: "wait", ms: 420 * P });
+      STEPS.push({ op: "clearHighlight" });
+    } else if (m.caption) {
+      STEPS.push({ op: "caption", args: [m.caption, { place: "top" }] });
+    }
+  }
+  STEPS.push({ label: "done" });
+  STEPS.push({ op: "caption", args: [null] });
+  STEPS.push({ op: "highlight", args: [{ nodes: ["browser.6"], variant: "ok", pulse: true }] });
+  STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
+  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -26 }, dur: 200 * P }] });   // clear the transport bar
+  STEPS.push({ op: "caption", args: ["Eighteen activations, three redirects through the browser, one silent token refresh.", { place: "top" }] });
+  STEPS.push({ op: "wait", ms: 900 * P });
+  STEPS.push({ op: "clearHighlight" });
+
+  var RUN_OPTS = {
+    hopMs: 520 * P,                       // the message in flight — the part worth watching
+    dwell: function (sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; },
+  };
+
+  // ---- mount ----------------------------------------------------------------------
+  var $ = function (s) { return document.querySelector(s); };
+  var phaseEl = $("#phase"), msgsEl = $("#msgs");
+  var g, sb;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      layout: { dir: "TB", solver: seq.solver, nodesep: 40, ranksep: 26, marginx: 24, marginy: 16, minColWidth: 170 },
+      animation: { duration: 360 * P, easing: "cubic-out" },
+      controls: true,
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS);
+    sb = g.storyboard();
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed: " + err.message;
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+  window.__g = g;
+
+  // ---- side panel: the message list lights up as the ball arrives ----------------------
+  MSGS.forEach(function (m) {
+    var li = document.createElement("li");
+    li.id = "li-" + m.id.replace(".", "-");
+    var actorLabel = ACTORS.filter(function (a) { return a.id === m.actor; })[0].label;
+    li.textContent = (m.msg ? m.msg + " → " : "") + actorLabel + ": " + m.node;
+    msgsEl.appendChild(li);
+  });
+  var run = g.run();
+  run.on("start", function (ev) {
+    var li = document.getElementById("li-" + String(ev.nodeId).replace(".", "-"));
+    if (!li) return;
+    msgsEl.querySelectorAll("li.now").forEach(function (x) { x.classList.remove("now"); x.classList.add("done"); });
+    li.classList.add("now");
+  });
+
+  // ---- controls -------------------------------------------------------------------
+  var playing = false;
+  function finish() {
+    playing = false;
+    phaseEl.textContent = "story complete — scrub the bar or Restart";
+    window.__smvExit = { done: true, errors: errors };
+  }
+  $("#play").addEventListener("click", function () {
+    if (playing) return;
+    playing = true;
+    phaseEl.textContent = "playing…";
+    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+  });
+  $("#step").addEventListener("click", function () {
+    Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
+  });
+  $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
+
+  if (AUTO) $("#play").click();
+})();
+</script>
+</body>
+</html>
