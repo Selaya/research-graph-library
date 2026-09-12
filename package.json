@@ -67,6 +67,7 @@
     "build": "node scripts/build.js",
     "test": "node --test \"test/*.test.js\"",
     "size": "node scripts/size-budget.js",
+    "check-demos": "node scripts/check-demos.mjs --all",
     "types": "tsc -p types",
     "check-doc-versions": "node scripts/check-doc-versions.mjs",
     "check": "npm run test && npm run build && npm run size && npm run check-doc-versions",

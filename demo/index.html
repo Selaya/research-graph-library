@@ -33,6 +33,8 @@
   h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
   p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
   p.lede a { color: inherit; }
+  p.section-lede { margin: -4px 0 12px; color: var(--muted); font-size: 13px; }
+  .grid { margin-bottom: 26px; }
 
   a.card {
     display: block; border: 1px solid var(--line); border-radius: 12px;
@@ -79,7 +81,10 @@
     narrating pipelines of work: steps appearing over time, tokens flowing through fan-outs
     and joins, retry loops ticking, manual steps condensing into automated ones, and a
     transport bar to play, pause, and scrub the whole story. One
-    <code>&lt;script&gt;</code> tag, no build step, no framework.
+    <code>&lt;script&gt;</code> tag, no build step, no framework. Below: the flagship
+    story, eighteen use-case demos across software delivery, AI agents, streaming data,
+    business operations and tooling, and the engineering demos the library grew up on.
+    Every page runs on the same <code>dist/smv.iife.min.js</code>.
     <a href="https://github.com/selaya/research-graph-library">View the repo on GitHub →</a>
   </p>
 </header>
@@ -95,7 +100,106 @@
   </p>
 </a>
 
-<h4 class="section">More demos</h4>
+<!-- use-case demos: start -->
+<h4 class="section">Software delivery</h4>
+<p class="section-lede">CI, infrastructure, and source control as pipelines of work.</p>
+<div class="grid">
+  <a class="card" href="ci-matrix.html">
+    <h3>CI/CD matrix build</h3>
+    <p>A pull-request CI run fans out into a 6-way build matrix and AND-joins into a gate that stalls when windows/node20 fails.</p>
+  </a>
+  <a class="card" href="terraform-plan.html">
+    <h3>Terraform plan / apply</h3>
+    <p>A TB resource-dependency DAG runs a clean Terraform apply, then a change request introduces a dependency cycle that gets caught, highlighted, and fixed.</p>
+  </a>
+  <a class="card" href="git-branching.html">
+    <h3>Git branching strategy</h3>
+    <p>A trunk-based git flow where feat/auth and feat/search branch off main, condense into merge commits, and a hotfix cherry-picks back onto release/1.4 through a bounded retry loop.</p>
+  </a>
+  <a class="card" href="incident-postmortem.html">
+    <h3>Incident postmortem timeline</h3>
+    <p>A SEV-2 payments outage log replayed against the response runbook in live mode, with an aborted rollback, a retry, and a time-travel scrub back to the moment it broke.</p>
+  </a>
+</div>
+
+<h4 class="section">AI agents and LLM orchestration</h4>
+<p class="section-lede">Planners, tool loops, evals, and the human in the loop.</p>
+<div class="grid">
+  <a class="card" href="agent-swarm.html">
+    <h3>Multi-agent research swarm</h3>
+    <p>A planner fans out to five worker agents, one fails and is skipped by a count-join, and a critic&#x27;s bounded revision loop hands off to a final report.</p>
+  </a>
+  <a class="card" href="tool-use-loop.html">
+    <h3>Tool-use agent loop</h3>
+    <p>A ReAct-style think → act → observe cycle with a bounded loop edge back to Think, narrated iteration by iteration as the agent calls a different tool each time before exiting to a final answer.</p>
+  </a>
+  <a class="card" href="llm-eval-harness.html">
+    <h3>LLM evaluation harness</h3>
+    <p>A prompt set fans out to six judged test cases whose scores join into a threshold gate that fails, loops back through a bounded retry, and passes on a revised prompt.</p>
+  </a>
+  <a class="card" href="prompt-chain-debugger.html">
+    <h3>Prompt chain debugger</h3>
+    <p>One LLM request replayed as a live event log, with a retrieve/profile fan-out, a safety filter that blocks the draft, a bounded retry, and every step&#x27;s prompt, model, tokens, and latency in a click-to-inspect panel.</p>
+  </a>
+  <a class="card" href="human-in-the-loop.html">
+    <h3>Human-in-the-loop approval</h3>
+    <p>An AI-drafted reply pipeline shows a slow, fully human-reviewed approval loop get condensed into a 12-second auto-approver that routes only a 10% sample to a person.</p>
+  </a>
+</div>
+
+<h4 class="section">Data and streaming</h4>
+<p class="section-lede">Live-mode replays of event streams and experiments.</p>
+<div class="grid">
+  <a class="card" href="streaming-kafka.html">
+    <h3>Streaming pipeline (Kafka)</h3>
+    <p>A mock Kafka feed drives a live-mode run: two producers, an orders topic, and a three-partition consumer group whose lagging partition builds a backlog until a rebalance flushes it, with time-travel scrub and follow.</p>
+  </a>
+  <a class="card" href="ab-experiment.html">
+    <h3>A/B experiment lifecycle</h3>
+    <p>Hypothesis, design, and implement fan out into control and two variants that collect for two weeks per arm, join on all three, and a ship decision either loops back to redesign or ships the winner.</p>
+  </a>
+</div>
+
+<h4 class="section">Business operations</h4>
+<p class="section-lede">Real-world processes with parallel tracks, gates, and rework loops.</p>
+<div class="grid">
+  <a class="card" href="employee-onboarding.html">
+    <h3>Employee onboarding</h3>
+    <p>Three parallel onboarding tracks (HR, IT, manager) fan out from an offer, join at Day one, and condense their slowest manual steps into fast automated integrations.</p>
+  </a>
+  <a class="card" href="kitchen-tickets.html">
+    <h3>Restaurant kitchen ticket</h3>
+    <p>A dinner ticket fans out to four kitchen stations, joins at plating, and the pass step demonstrates a bounded remake loop, per-branch run speed, step() through a join, and a first-class data.fail outcome.</p>
+  </a>
+  <a class="card" href="assembly-line.html">
+    <h3>The assembly line</h3>
+    <p>A car assembly line where chassis/drivetrain/electronics sub-assemblies converge on a join:all final assembly, QC fails its first pass with a reason and reworks through a capped loop edge before packaging and shipping.</p>
+  </a>
+  <a class="card" href="recipe-dag.html">
+    <h3>The recipe as a DAG</h3>
+    <p>A lasagne recipe told as a real dependency graph: a naive one-line-at-a-time reading relayouts into parallel prep, a condense collapses the 2-hour ragù into a 2-minute jarred-sauce shortcut with an odometer flip, and g.split breaks assembly into its real layers.</p>
+  </a>
+</div>
+
+<h4 class="section">Tooling and integration</h4>
+<p class="section-lede">Comparing plans, bridging live feeds, and editing specs by hand.</p>
+<div class="grid">
+  <a class="card" href="sequential-vs-parallel.html">
+    <h3>Sequential vs. parallel</h3>
+    <p>Two graphs race the same seven-step release side by side, a strict chain against a fan-out and join, then condense two manual steps into an automated gate and replay, taking the wall clock from 3h 20m to 1h 05m.</p>
+  </a>
+  <a class="card" href="websocket-bridge.html">
+    <h3>Live WebSocket bridge</h3>
+    <p>A build and deploy run streamed over a mock WebSocket into a live-mode run: the socket drops mid-deploy, reconnects with backoff, replays the frames it missed, and fast-forwards back to the frontier.</p>
+  </a>
+  <a class="card" href="spec-editor.html">
+    <h3>Interactive spec editor</h3>
+    <p>Edit the graph&#x27;s JSON spec and a storyboard in place, then watch Apply diff it against the live graph and animate only the difference through one batch, no remount.</p>
+  </a>
+</div>
+<!-- use-case demos: end -->
+
+<h4 class="section">Library internals</h4>
 <div class="grid">
   <a class="card" href="pipeline.html">
     <h3>Pipeline story</h3>
