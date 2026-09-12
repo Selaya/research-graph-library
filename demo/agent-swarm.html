@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — multi-agent research swarm</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --good: #1f8f5f;
+    --bad: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --good: #46c48b; --bad: #e0685a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+  p.lede code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  ul.lookfor { margin: 12px 0 0; padding: 0 0 0 20px; color: var(--muted); max-width: 74ch; }
+  ul.lookfor li { margin: 3px 0; }
+  ul.lookfor b { color: var(--ink); }
+  ul.lookfor code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* The mount point. The library injects its own stylesheet; this is only the frame. */
+  #pipe {
+    height: 560px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .rail { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .rail b {
+    font: 600 11px/1 inherit; letter-spacing: .04em; text-transform: uppercase;
+    padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: var(--card); white-space: nowrap;
+  }
+  .rail b[data-on] { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .rail b[data-past] { color: var(--ink); border-color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+
+  .swatches { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+  .swatches span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatches i { width: 11px; height: 11px; border-radius: 3px; display: inline-block; border: 1px solid rgba(0,0,0,.15); }
+
+  .legend { margin-top: 10px; color: var(--muted); font-size: 12.5px; max-width: 90ch; }
+  .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  footer { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+  footer a { color: var(--accent); }
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Multi-agent research swarm <small>— fan-out, a count-join, and a bounded revision loop</small></h1>
+  <p class="lede">
+    A planner agent fans out to five worker agents — literature search, code search, data
+    pull, expert interviews and a benchmark run — each running at its own declared
+    duration. One worker (data pull) hits a rate limit and fails outright
+    (<code>data.fail</code>), so the synthesizer is declared <code>join:{count:4}</code>:
+    it fires once the four surviving branches land, never waiting on the fifth. A critic
+    then reviews the synthesis and can bounce the plan back to the planner for revision —
+    a bounded loop, <code>maxIterations:3</code> — before the swarm hands off a reviewed
+    final report. Zoom is ctrl/⌘&nbsp;+&nbsp;wheel; plain scroll pans.
+  </p>
+  <ul class="lookfor">
+    <li><b>Fan-out</b> — one planner token spawns five worker tokens at once.</li>
+    <li><b>The failing worker</b> — data pull turns red and fails; the <code>workers</code> container rolls up to failed too, even though the other four keep going.</li>
+    <li><b>The count-join firing</b> — synthesizer needs only 4 of 5 arrivals to fire.</li>
+    <li><b>The loop iteration badge</b> — <code>revise plan</code> ticks on the planner, up to 3 times.</li>
+    <li><b>The final report</b> — the critic's forward edge hands off once revisions are spent.</li>
+  </ul>
+</header>
+
+<div class="controls">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="reset" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="rail" id="rail"></div>
+
+<div class="grid">
+  <div class="tile"><i>chapter</i><span id="m-chapter">—</span></div>
+  <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
+  <div class="tile"><i>live tokens</i><span id="m-tokens">0</span></div>
+  <div class="tile"><i>join · synth</i><span id="m-join">—</span></div>
+  <div class="tile"><i>revise loop</i><span id="m-loop">iter 0/3</span></div>
+</div>
+
+<p class="swatches">
+  <span><i style="background:#efe9ff;border-color:#6d5bd0"></i> planner</span>
+  <span><i style="background:#e6f1fb;border-color:#2f7dc9"></i> worker</span>
+  <span><i style="background:#e3f7f2;border-color:#159a83"></i> synthesizer</span>
+  <span><i style="background:#fdf0dc;border-color:#c9821f"></i> critic</span>
+  <span><i style="background:#e6f6ec;border-color:#1f8f5f"></i> final report</span>
+  <span><i style="background:#fbe4e1;border-color:#c0392b"></i> failed</span>
+</p>
+
+<p class="legend">
+  Legend — node fill/stroke is a <code>g.props()</code> override colored by agent role
+  (swatches above); chip = declared duration; pips under <em>Synthesize findings</em> =
+  join slots (<code>join:{count:4}</code> of 5 non-loop in-edges); dashed arc = the
+  <code>revise plan</code> back edge (<code>loop:true, maxIterations:3</code>) from
+  <em>Critic review</em> to <em>Plan research</em>; the <em>Worker agents</em> box is a
+  compound/container node holding all five workers.
+</p>
+
+<div id="report"></div>
+
+<footer>
+  ← back to the <a href="index.html">demo index</a> · built with
+  <code>sparkle-motion-visualizer</code>
+</footer>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ===========================================================================
+  // 1. The graph. Fixed shape, present in full at mount: a planner, a "workers"
+  // container holding five leaf agents, a count-join synthesizer, a critic with a
+  // bounded revision loop back to the planner, and a final report. Edges always run
+  // leaf-to-leaf (never through the container itself) — the token engine only ever
+  // schedules executable steps (D5).
+  // ===========================================================================
+
+  var WORKER_IDS = ["worker.lit", "worker.code", "worker.data", "worker.interviews", "worker.bench"];
+
+  var SPEC = {
+    nodes: [
+      { id: "planner", label: "Plan research", data: { duration: "20m" } },
+      { id: "workers", label: "Worker agents", collapsed: false },
+      { id: "worker.lit", parent: "workers", label: "Literature search", data: { duration: "6h" } },
+      { id: "worker.code", parent: "workers", label: "Code search", data: { duration: "3h" } },
+      { id: "worker.data", parent: "workers", label: "Data pull", data: { duration: "4h", fail: "rate-limited" } },
+      { id: "worker.interviews", parent: "workers", label: "Expert interviews", data: { duration: "2d" } },
+      { id: "worker.bench", parent: "workers", label: "Benchmark run", data: { duration: "8h" } },
+      { id: "synth", label: "Synthesize findings", join: { count: 4 }, data: { duration: "2h" } },
+      { id: "critic", label: "Critic review", data: { duration: "45m" } },
+      { id: "report", label: "Final report", data: { duration: "3h" } },
+    ],
+    edges: [
+      { id: "e-p-lit", source: "planner", target: "worker.lit" },
+      { id: "e-p-code", source: "planner", target: "worker.code" },
+      { id: "e-p-data", source: "planner", target: "worker.data" },
+      { id: "e-p-int", source: "planner", target: "worker.interviews" },
+      { id: "e-p-bench", source: "planner", target: "worker.bench" },
+      { id: "e-lit-s", source: "worker.lit", target: "synth" },
+      { id: "e-code-s", source: "worker.code", target: "synth" },
+      { id: "e-data-s", source: "worker.data", target: "synth" },
+      { id: "e-int-s", source: "worker.interviews", target: "synth" },
+      { id: "e-bench-s", source: "worker.bench", target: "synth" },
+      { id: "e-s-critic", source: "synth", target: "critic" },
+      { id: "revise", source: "critic", target: "planner", loop: true, maxIterations: 3, label: "revise plan" },
+      { id: "e-critic-report", source: "critic", target: "report" },
+    ],
+  };
+
+  // Colored by role, not by run status — a g.props() override sits over the theme's own
+  // status colors (it wins, inline), so an agent keeps its identity color while it works.
+  // "workers" (the container) and the failing "worker.data" are deliberately left out so
+  // the built-in failed-status styling shows through unobstructed for those two.
+  var PLANNER_PROPS = { "--smv-fill": "#efe9ff", "--smv-stroke": "#6d5bd0" };
+  var WORKER_PROPS = { "--smv-fill": "#e6f1fb", "--smv-stroke": "#2f7dc9" };
+  var SYNTH_PROPS = { "--smv-fill": "#e3f7f2", "--smv-stroke": "#159a83" };
+  var CRITIC_PROPS = { "--smv-fill": "#fdf0dc", "--smv-stroke": "#c9821f" };
+  var REPORT_PROPS = { "--smv-fill": "#e6f6ec", "--smv-stroke": "#1f8f5f" };
+  var FAIL_PROPS = { "--smv-fill": "#fbe4e1", "--smv-stroke": "#c0392b" };
+
+  var ROLE_PROPS = { planner: PLANNER_PROPS, synth: SYNTH_PROPS, critic: CRITIC_PROPS, report: REPORT_PROPS };
+  WORKER_IDS.forEach(function (id) { ROLE_PROPS[id] = WORKER_PROPS; });
+
+  // props() is replace-not-accumulate (one call IS the whole layer, README/THEMING), so
+  // every later recolor merges into this same object and resends it whole, or it would
+  // wipe out every other agent's role color.
+  var propsState = Object.assign({}, ROLE_PROPS);
+  function setProps(id, patch) {
+    propsState = Object.assign({}, propsState);
+    propsState[id] = patch;
+    g.props(propsState);
+  }
+
+  function cam(target) { return { op: "camera", args: [target] }; }
+  function hi(sel) { return { op: "highlight", args: [sel] }; }
+  function clearHi() { return { op: "clearHighlight" }; }
+  function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
+  function hold(ms) { return { op: "wait", ms: AUTO ? Math.min(ms, 350) : ms }; }
+  function playUntil(id) { return { op: "run.play", until: id }; }
+
+  var STEPS = [
+    { label: "brief" },
+    cam({ fit: true, pad: 56 }),
+    cap("A planner agent drafts a research brief, then fans out to five worker agents."),
+    hold(500),
+
+    { label: "fan-out" },
+    cam({ nodes: WORKER_IDS.concat(["planner"]), pad: 60 }),
+    hi({ nodes: WORKER_IDS, variant: "focus", pulse: true }),
+    cap("Fan-out is implicit: five out-edges from the planner spawn five tokens — " +
+        "literature, code, data, interviews, benchmark — each racing at its own declared duration."),
+    playUntil("worker.data"),
+    hold(400),
+
+    { label: "rate-limited" },
+    cam({ node: "worker.data", pad: 110 }),
+    hold(900),
+    // The fail itself is narrated live off run.on("fail") below, the instant it happens.
+
+    { label: "count-join" },
+    clearHi(),
+    cam({ node: "synth", pad: 90 }),
+    cap("Synthesizer only needs 4 of the 5 branches — join:{count:4} — so the failed data pull can never stall it."),
+    playUntil("synth"),
+    hold(700),
+    // The fire itself is narrated live off run.on("join") below.
+
+    { label: "critic" },
+    clearHi(),
+    cam({ nodes: ["synth", "critic"], pad: 70 }),
+    cap("Critic reviews the synthesis for gaps before it goes out."),
+    playUntil("critic"),
+    hold(400),
+
+    { label: "revise plan" },
+    cam({ nodes: ["critic", "planner"], pad: 70 }),
+    cap("revise plan — a bounded loop back to the planner (loop:true, maxIterations:3). Watch the iter badge on the planner."),
+    playUntil("report"),
+    hold(500),
+    // Each of the 3 ticks is narrated live off run.on("loop") below.
+
+    { label: "final report" },
+    clearHi(),
+    cam({ node: "report", k: 1.6, pad: 80 }),
+    hi({ nodes: ["report"], variant: "ok", pulse: true }),
+    cap("All three revisions spent — the critic's forward edge hands off to the final report."),
+    hold(900),
+  ];
+
+  // ===========================================================================
+  // 2. Wiring
+  // ===========================================================================
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
+  var playBtn = $("#play"), resetBtn = $("#reset");
+  var mChapter = $("#m-chapter"), mTime = $("#m-time"), mTokens = $("#m-tokens");
+  var mJoin = $("#m-join"), mLoop = $("#m-loop");
+
+  var g;
+  try {
+    g = SparkleMotion.mount("#pipe", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 24, ranksep: 64 },
+      animation: { duration: 380, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.props(propsState); // role coloring, visible immediately on load, before any Play click
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed";
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  // A log curve over declared durations (200ms floor -> ~1.3s ceiling) so 20m / 3h / 4h /
+  // 6h / 8h / 2d read as visibly different speeds instead of clustering near one default.
+  var run = g.run({
+    hopMs: 240,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 420;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 200 + 1100 * f;
+    },
+  });
+
+  var sb = g.storyboard();
+  var LABELS = sb.labels();
+  LABELS.forEach(function (l) {
+    var b = document.createElement("b");
+    b.textContent = l.label;
+    b.setAttribute("data-index", String(l.index));
+    railEl.appendChild(b);
+  });
+
+  function paintRail() {
+    var pos = sb.position();
+    for (var i = 0; i < railEl.children.length; i++) {
+      var b = railEl.children[i];
+      var idx = Number(b.getAttribute("data-index"));
+      b.removeAttribute("data-on");
+      b.removeAttribute("data-past");
+      if (LABELS[i].label === pos.label) b.setAttribute("data-on", "");
+      else if (idx < pos.index) b.setAttribute("data-past", "");
+    }
+    mChapter.textContent = pos.label || "—";
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-time narration off the run's own event bus (not baked into fixed storyboard
+  // timing) — the caption/highlight/props land the instant the schedule actually
+  // reaches them, exactly like the fail/join/loop beats they describe.
+  // ---------------------------------------------------------------------------
+
+  var obs = { dataFailNarrated: false, joinNarrated: false, joinArrived: null, joinNeeded: null, loopIterSeen: 0, loopMax: 0 };
+
+  run.on("fail", function (ev) {
+    if (!ev || ev.nodeId !== "worker.data" || obs.dataFailNarrated) return;
+    obs.dataFailNarrated = true;
+    setProps("worker.data", FAIL_PROPS);
+    g.highlight({ nodes: ["worker.data"], variant: "warn", pulse: true });
+    g.caption(
+      "Data pull failed — rate-limited (data.fail: \"rate-limited\"). No token continues past it, and " +
+      "the workers container itself now rolls up to failed too — a container can't report done if any child didn't.",
+      { place: "bottom" }
+    );
+  });
+
+  run.on("join", function (ev) {
+    if (!ev || ev.nodeId !== "synth" || obs.joinNarrated) return;
+    obs.joinNarrated = true;
+    obs.joinArrived = ev.arrived;
+    obs.joinNeeded = ev.needed;
+    g.caption(
+      "Join fired: " + ev.arrived + " of " + ev.needed + " needed arrived (join:{count:4}) — literature, " +
+      "code, interviews and benchmark. Data pull's failure never blocked it.",
+      { place: "bottom" }
+    );
+    g.highlight({ nodes: ["synth"], variant: "ok", pulse: true });
+  });
+
+  run.on("loop", function (ev) {
+    if (!ev || ev.edgeId !== "revise") return;
+    obs.loopIterSeen = Math.max(obs.loopIterSeen, ev.iteration);
+    obs.loopMax = ev.max;
+    g.caption("revise plan — iteration " + ev.iteration + " of " + ev.max + ".", { place: "bottom" });
+    g.highlight({ nodes: ["planner"], edges: ["revise"], variant: "warn", pulse: true });
+  });
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  function sampleFrame() {
+    var r = g.run();
+    if (!r) return;
+    var st = r.state();
+    mTime.textContent = fmt(r.time()) + " / " + fmt(r.duration);
+    mTokens.textContent = String(st.tokens.length);
+    var j = st.joins.synth;
+    mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "—";
+    var lp = st.loops.revise;
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/3";
+  }
+  g.ticker.add(sampleFrame);
+
+  var storyDone = false;
+  sb.on("step", function (ev) {
+    paintRail();
+    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+  });
+  sb.on("seek", paintRail);
+  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+
+  // ---------------------------------------------------------------------------
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(fn, ms) {
+    var t0 = Date.now();
+    return new Promise(function (resolve, reject) {
+      (function poll() {
+        if (fn()) return resolve(true);
+        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
+        setTimeout(poll, 30);
+      })();
+    });
+  }
+
+  var started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    sb.play();
+  }
+
+  playBtn.addEventListener("click", start);
+  resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
+
+  function writeReport() {
+    reportEl.textContent =
+      "story steps               " + STEPS.length + "\n" +
+      "final chapter              " + (sb.position().label || "(none)") + "\n" +
+      "data pull failed, narrated " + obs.dataFailNarrated + "\n" +
+      "synth join fired           " + obs.joinArrived + "/" + obs.joinNeeded + "\n" +
+      "revise loop iterations     " + obs.loopIterSeen + " of max " + obs.loopMax + "\n" +
+      "errors                     " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  async function auto() {
+    if (run) run.speed(4);
+    await sleep(250);
+    start();
+    await waitFor(function () { return storyDone; }, 40000);
+    await sleep(400);
+    writeReport();
+    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+    window.__smvExit = { done: true, errors: errors };
+  }
+
+  paintRail();
+  if (AUTO) {
+    auto().catch(function (err) {
+      errors.push("auto: " + String((err && err.message) || err));
+      writeReport();
+      window.__smvExit = { done: true, errors: errors };
+    });
+  }
+})();
+</script>
+
+</body>
+</html>
