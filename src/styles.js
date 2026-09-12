@@ -219,6 +219,7 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-caption[data-place="top"]{top:12px; bottom:auto}
 .smv-caption[data-variant="note"]{color:var(--smv-muted); font-style:italic}
 .smv-root.smv-has-transport .smv-caption{bottom:46px}
+.smv-root.smv-has-transport .smv-caption[data-place="top"]{bottom:auto}
 
 /* D15 — record mode: the affordance transitions above run on the wall clock, so two
    captures of one frame would differ. Kill every one of them. */
