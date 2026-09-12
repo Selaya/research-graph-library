@@ -32,10 +32,7 @@
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
   #pipe { height: 540px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
   /* Captions sit at the pane's bottom edge, which the transport bar and the preset's
-     total-duration bar already own; lift them clear of both. (place:"top" is not the way
-     out: the transport rule `.smv-root.smv-has-transport .smv-caption{bottom:46px}` is
-     more specific than `[data-place="top"]{top:12px}`, so a top caption gets BOTH and
-     stretches to the full height of the pane — see demo/seq-basics.html's last frame.) */
+     total-duration bar already own; lift them clear of both. */
   #pipe .smv-caption { bottom: 64px; }
   /* A lifeline whose first activation has not landed yet is still a childless leaf to the
      renderer, so it paints as one big filled node. Draw it as the empty column it is. */

@@ -42,12 +42,6 @@
   ul.watch li { margin: 0 0 4px; }
   footer { margin-top: 20px; color: var(--muted); font-size: 12.5px; }
   footer a { color: inherit; }
-  /* Workaround for a library CSS-specificity bug: .smv-root.smv-has-transport .smv-caption
-     (3 classes) beats .smv-caption[data-place="top"] (1 class + 1 attribute), so with
-     controls:true a top-placed caption inherits bottom:46px alongside its own top:12px and
-     stretches into a full-height box that hides the diagram behind it. Same bug is latent
-     in demo/seq-basics.html; this page just needs top captions to actually sit at the top. */
-  #pipe .smv-caption[data-place="top"] { bottom: auto !important; }
 </style>
 </head>
 <body>
