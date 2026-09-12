@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>smv — Streaming pipeline (Kafka)</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8;
+    --card: #ffffff;
+    --ink: #1b2230;
+    --muted: #6b7488;
+    --line: rgba(128,138,160,.32);
+    --accent: #5b6ef5;
+    --warm: #b97400;
+    --bad: #c23b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+      --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a; --bad: #ef6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 44px;
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page); color: var(--ink);
+  }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 19px; letter-spacing: -.01em; margin: 0 0 6px; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+  p.lede { margin: 0; color: var(--muted); max-width: 76ch; }
+
+  .controls { display: flex; align-items: center; gap: 10px; margin: 16px 0 10px; flex-wrap: wrap; }
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .45; cursor: default; border-color: var(--line); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #phase { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  #pipe {
+    height: 400px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--card); overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16,20,32,.05), 0 12px 32px rgba(16,20,32,.06);
+  }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .tile i { display: block; font-style: normal; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 3px; font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 600; }
+  .tile span em { font-style: normal; font-weight: 500; font-size: 12px; color: var(--muted); }
+  .tile span.warn { color: var(--warm); }
+
+  ul.watch { margin: 16px 0 0; padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+  ul.watch li { margin: 3px 0; }
+  ul.watch code, .legend code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+  .legend { margin-top: 14px; color: var(--muted); font-size: 12.5px; max-width: 84ch; }
+
+  #report { margin-top: 14px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+            white-space: pre-wrap; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Streaming pipeline (Kafka) <small>— live mode: a real event feed, not a simulation</small></h1>
+  <p class="lede">
+    Two producers write to the <em>orders</em> topic; a three-partition consumer group polls
+    it, enriches each batch, fans out to <em>fraud check</em> and <em>inventory hold</em>,
+    AND-joins on a risk decision and notifies the customer. Nothing here is compiled from
+    declared durations — a mock producer calls
+    <code>run.start/finish/spawn</code> on a <code>{mode:"live"}</code> run every 330&nbsp;ms,
+    exactly as a WebSocket feed would. Partition&nbsp;1's consumer stalls, its occupancy
+    badge climbs while the others stay flat, and a group rebalance drains the backlog in one
+    burst. The whole log is scrubbable: go back in time, then jump back to live.
+  </p>
+</header>
+
+<div class="controls">
+  <button id="feed" class="primary" type="button">Pause producer</button>
+  <button id="back" type="button">◀ 6s back in time</button>
+  <button id="live" type="button">Follow live</button>
+  <button id="restart" type="button">Restart feed</button>
+  <span id="phase">connecting…</span>
+</div>
+
+<div id="pipe"></div>
+
+<div class="grid">
+  <div class="tile"><i>view clock / frontier</i><span id="m-clock">0.0s <em id="m-clock-sub">/ 0.0s</em></span></div>
+  <div class="tile"><i>topic depth</i><span id="m-depth">0 <em id="m-depth-sub">batches unpolled</em></span></div>
+  <div class="tile"><i>consumer lag · p0 · p1 · p2</i><span id="m-lag">0 · 0 · 0</span></div>
+  <div class="tile"><i>group state</i><span id="m-state">starting</span></div>
+</div>
+
+<ul class="watch">
+  <li><b>Occupancy badges climb and drain.</b> Each pulse is one poll batch. When
+    <code>partition 1</code> stops committing, tokens pile up on it — <code>×2</code>,
+    <code>×5</code>, past <code>×10</code> — while <code>partition 0</code> and
+    <code>partition 2</code> stay at zero or one. That badge <em>is</em>
+    <code>state().nodes[id].occupancy</code>.</li>
+  <li><b>Runtime fan-out.</b> <code>run.spawn("topic", 2)</code> drops a produce spike
+    straight onto the topic, and <code>run.spawn("cg.p1", 2)</code> models a hot partition
+    key — tokens minted by the feed, not by a compiled schedule.</li>
+  <li><b>The group opens up.</b> The consumer group <code>fulfil-svc</code> starts collapsed (its
+    in/out edges aggregated into meta-edges, <code>×3</code> on the box) and
+    <code>g.expand()</code> reveals the three partition consumers just before the lag
+    starts.</li>
+  <li><b>The rebalance beat.</b> A camera move, a <code>warn</code> highlight with a pulse,
+    a <code>--smv-fill</code> override via <code>g.props()</code> and a caption call it out;
+    then one bulk <code>run.finish("cg.p1")</code> flushes the whole backlog downstream at
+    once and you can watch the wave travel.</li>
+  <li><b>Time travel.</b> <code>◀ 6s back</code> is <code>run.seek()</code> — the tiles and
+    the graph re-draw the past while the frontier keeps running underneath;
+    <code>Follow live</code> is <code>run.follow()</code>. The transport bar under the graph
+    scrubs the same log (it can never scrub past "now").</li>
+</ul>
+
+<p class="legend">
+  Legend — dashed pips under a node = live occupancy, <code>×N</code> = several batches
+  queued on one node, chip = the stage's declared <code>data.duration</code> (its typical
+  processing latency), two pips under <em>risk decision</em> = the implicit AND-join's two
+  slots, slim bar under the graph = the pipeline preset's total of those declared latencies.
+  The graph stays interactive: Tab into it, arrow between stages,
+  Enter/Space toggles the consumer group, ctrl/⌘ + wheel zooms.
+</p>
+
+<div id="report"></div>
+
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) {
+    errors.push(String((e && e.message) || (e && e.error) || e));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    errors.push("unhandledrejection: " + String(e && e.reason));
+  });
+
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+
+  // ---------------------------------------------------------------------------
+  // The topology. `topic` and `enrich` declare join:"any" because neither is a barrier —
+  // a topic takes whichever producer writes first, and the enricher processes whichever
+  // partition delivered — while `decide` keeps its implicit AND-join over fraud+inventory.
+  // Durations are per-stage processing latencies: in Mode B they only drive the progress
+  // fill and the preset's chips, never the schedule (there isn't one — the log is truth).
+  // ---------------------------------------------------------------------------
+  var SPEC = {
+    nodes: [
+      { id: "api",    label: "orders-api",    data: { duration: "15ms" } },
+      { id: "web",    label: "checkout-web",  data: { duration: "15ms" } },
+      { id: "topic",  label: "topic: orders", join: "any" },
+      { id: "cg",     label: "fulfil-svc", collapsed: true },
+      { id: "cg.p0",  parent: "cg", label: "partition 0" },
+      { id: "cg.p1",  parent: "cg", label: "partition 1" },
+      { id: "cg.p2",  parent: "cg", label: "partition 2" },
+      { id: "enrich", label: "enrich", join: "any", data: { duration: "120ms" } },
+      { id: "fraud",  label: "fraud check",    data: { duration: "260ms" } },
+      { id: "inv",    label: "inventory hold", data: { duration: "90ms" } },
+      { id: "decide", label: "risk decision",  data: { duration: "20ms" } },
+      { id: "notify", label: "notify",         data: { duration: "70ms" } },
+    ],
+    edges: [
+      { id: "pa", source: "api",   target: "topic" },
+      { id: "pw", source: "web",   target: "topic" },
+      { id: "t0", source: "topic", target: "cg.p0" },
+      { id: "t1", source: "topic", target: "cg.p1" },
+      { id: "t2", source: "topic", target: "cg.p2" },
+      { id: "c0", source: "cg.p0", target: "enrich" },
+      { id: "c1", source: "cg.p1", target: "enrich" },
+      { id: "c2", source: "cg.p2", target: "enrich" },
+      { id: "f1", source: "enrich", target: "fraud" },
+      { id: "f2", source: "enrich", target: "inv" },
+      { id: "j1", source: "fraud",  target: "decide" },
+      { id: "j2", source: "inv",    target: "decide" },
+      { id: "n1", source: "decide", target: "notify" },
+    ],
+  };
+
+  var ALL = ["api", "web", "topic", "cg.p0", "cg.p1", "cg.p2",
+             "enrich", "fraud", "inv", "decide", "notify"];
+  var PARTS = ["cg.p0", "cg.p1", "cg.p2"];
+
+  var $ = function (sel) { return document.querySelector(sel); };
+  var phaseEl = $("#phase"), reportEl = $("#report");
+  var feedBtn = $("#feed"), backBtn = $("#back"), liveBtn = $("#live"), restartBtn = $("#restart");
+  var mClock = $("#m-clock"), mDepth = $("#m-depth"), mLag = $("#m-lag"), mState = $("#m-state");
+  var mClockSub = $("#m-clock-sub"), mDepthSub = $("#m-depth-sub");
+  var setPhase = function (t) { phaseEl.textContent = t; };
+
+  var g, run;
+  try {
+    g = SparkleMotion.mount("#pipe", SPEC, {
+      theme: "auto",
+      layout: { dir: "LR", nodesep: 24, ranksep: 48 },
+      animation: { duration: 340, easing: "cubic-out" },
+      controls: true,
+      preset: "pipeline",
+    });
+    // Mode B. hopMs is how long a batch takes to cross an edge on screen — the only
+    // timing knob live mode has, because everything else is real elapsed time.
+    run = g.run({ mode: "live", hopMs: 260 });
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    setPhase("mount failed");
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // The mock producer. One setInterval "beat" plays the part of the socket: it samples the
+  // frontier state once, then appends log entries for the beat. Every finish() is guarded
+  // by that sample, so the feed never fires a zero-occupancy no-op.
+  // ---------------------------------------------------------------------------
+
+  var BEAT = 330;
+  var EXPAND_AT = 12, BURST1 = 18, LAG_AT = 26, BURST2 = 29, SKEW_AT = 31,
+      ZOOM_AT = 34, REBAL_AT = 38, CLEAR_AT = 44, STOP_AT = 52, MAX_BEAT = 70;
+
+  var beat = 0, timer = null, producing = true, phase = "steady", finished = false;
+  var occ = {}, act = {};
+  var stats = { produced: 0, committed: 0, polls: 0, maxLag: 0, burst: 0 };
+  for (var i = 0; i < ALL.length; i++) { occ[ALL[i]] = 0; act[ALL[i]] = 0; }
+
+  /** A source stage: ship the batch it was building, then start the next one. */
+  function produce(id) {
+    if (occ[id] > 0 && act[id] > 0) { run.finish(id); stats.produced++; occ[id] = 0; act[id] = 0; }
+    run.start(id);
+    act[id] = 1;
+  }
+
+  /** A worker stage: commit everything it is holding (one log entry, any number of
+   *  batches — that is what a Kafka commit is), then pick up whatever is queued. */
+  function pump(id) {
+    if (occ[id] > 0 && act[id] > 0) {
+      run.finish(id);
+      if (id.indexOf("cg.") === 0) stats.committed += occ[id];
+      occ[id] = 0; act[id] = 0;
+    }
+    if (occ[id] > 0 && act[id] === 0) { run.start(id); act[id] = 1; }
+  }
+
+  /** The stalled consumer: one batch stays 'active' forever, the rest queue behind it. */
+  function stall(id) {
+    if (occ[id] > 0 && act[id] === 0) { run.start(id); act[id] = 1; }
+  }
+
+  function caption(text, o) { g.caption(text, o || {}); }
+
+  function story(b) {
+    if (b === 2) {
+      caption("Steady state — three partition consumers keeping up with the produce rate.");
+      setPhase("live · steady");
+    } else if (b === EXPAND_AT) {
+      g.expand("cg");
+      caption("Opening the consumer group: one consumer instance per partition.");
+    } else if (b === BURST1 || b === BURST2) {
+      run.spawn("topic", 2);                    // a produce spike lands straight on the log
+      stats.produced += 2;
+      stats.burst++;
+    } else if (b === LAG_AT) {
+      phase = "lag";
+      setPhase("live · partition 1 lagging");
+      g.props({ "cg.p1": { "--smv-fill": "#fdf0d8", "--smv-stroke": "#b97400" } });
+      g.highlight({ nodes: ["cg.p1"], edges: ["t1"], variant: "warn", pulse: true });
+      caption("partition 1's consumer blocks on a slow enrichment call and stops committing offsets.");
+    } else if (b === SKEW_AT) {
+      run.spawn("cg.p1", 2);                    // hot key: two extra batches on one partition
+      stats.produced += 2;
+    } else if (b === ZOOM_AT) {
+      g.camera({ nodes: ["topic", "cg", "enrich"], pad: 64, dur: 700 });
+      caption("Consumer lag: " + occ["cg.p1"] + " batches queued on partition 1, the others at " +
+              occ["cg.p0"] + " and " + occ["cg.p2"] + ".");
+    } else if (b === REBAL_AT) {
+      phase = "rebalance";
+      setPhase("live · rebalancing");
+      var drained = occ["cg.p1"];
+      g.props(null);
+      g.highlight({ nodes: ["cg", "cg.p0", "cg.p1", "cg.p2"], variant: "focus", pulse: true });
+      caption("Rebalance — a second consumer instance joins the group; partition 1's backlog is " +
+              "reassigned and flushed downstream in one burst (" + drained + " batches).");
+      if (drained > 0) {
+        run.finish("cg.p1");                    // bulk commit: the whole queue fans out at once
+        stats.committed += drained;
+        occ["cg.p1"] = 0; act["cg.p1"] = 0;
+      }
+      g.camera({ fit: true, pad: 44, dur: 700 });
+    } else if (b === CLEAR_AT) {
+      phase = "steady";
+      setPhase("live · steady");
+      g.clearHighlight();
+      caption("Lag back to zero — all three consumers committing again.", { variant: "note" });
+    } else if (b === STOP_AT) {
+      producing = false;
+      feedBtn.disabled = true;
+      phase = "draining";
+      setPhase("producer stopped · draining");
+      caption("Producer stopped — the batches still in flight drain through the pipeline.");
+    }
+  }
+
+  function beatTick() {
+    var st;
+    try {
+      st = run.sim().stateAt(run.now());   // the FRONTIER, never the scrubbed view clock
+    } catch (err) {
+      errors.push("stateAt: " + String((err && err.message) || err));
+      return;
+    }
+    for (var i = 0; i < ALL.length; i++) {
+      var id = ALL[i];
+      var n = st.nodes[id];
+      occ[id] = n ? n.occupancy : 0;
+      if (act[id] > occ[id]) act[id] = occ[id];
+    }
+    var lag = Math.max(occ["cg.p0"], occ["cg.p1"], occ["cg.p2"]);
+    if (lag > stats.maxLag) stats.maxLag = lag;
+
+    if (!producing && beat > STOP_AT + 2 && st.tokens.length === 0) { finishStory(); return; }
+    if (beat > MAX_BEAT) { finishStory(); return; }
+
+    try {
+      story(beat);
+
+      if (producing) {
+        if (beat % 4 === 0) produce("api");
+        if (beat % 4 === 2) produce("web");
+      }
+      // The poll cycle: one batch off the log to EVERY assigned partition consumer (the
+      // topic's three out-edges ARE the assignment). Falls back to every beat when the
+      // topic is running a backlog of its own, which is what a catching-up group does.
+      if (occ.topic > 0 && (beat % 2 === 1 || occ.topic > 1)) {
+        run.finish("topic", { n: 1 });
+        occ.topic--;
+        stats.polls++;
+      }
+
+      if (phase === "lag") { pump("cg.p0"); stall("cg.p1"); pump("cg.p2"); }
+      else for (var p = 0; p < PARTS.length; p++) pump(PARTS[p]);
+
+      pump("enrich"); pump("fraud"); pump("inv"); pump("decide"); pump("notify");
+    } catch (err) {
+      errors.push("beat " + beat + ": " + String((err && err.message) || err));
+    }
+    beat++;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Readouts — sampled off the SHARED ticker at the VIEW clock, so scrubbing back in time
+  // re-draws the tiles with the past they belong to, not with "now".
+  // ---------------------------------------------------------------------------
+
+  var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  function sampleFrame() {
+    var st = run.state();
+    mClock.firstChild.nodeValue = fmt(run.time()) + " ";
+    mClockSub.textContent = "/ " + fmt(run.now()) + (run.following ? " · following" : " · scrubbed");
+
+    var depth = st.nodes.topic ? st.nodes.topic.occupancy : 0;
+    mDepth.firstChild.nodeValue = depth + " ";
+    mDepthSub.textContent = depth === 1 ? "batch unpolled" : "batches unpolled";
+
+    var l0 = st.nodes["cg.p0"].occupancy, l1 = st.nodes["cg.p1"].occupancy, l2 = st.nodes["cg.p2"].occupancy;
+    mLag.textContent = l0 + " · " + l1 + " · " + l2;
+    mLag.className = Math.max(l0, l1, l2) > 2 ? "warn" : "";
+
+    mState.textContent = finished ? "stopped" : phase;
+    mState.className = (phase === "lag" && !finished) ? "warn" : "";
+  }
+  g.ticker.add(sampleFrame);
+
+  // ---------------------------------------------------------------------------
+
+  function writeReport() {
+    reportEl.textContent =
+      "batches written        " + stats.produced + "  (" + stats.burst + " spawn() bursts)\n" +
+      "poll cycles             " + stats.polls + "\n" +
+      "partition commits      " + stats.committed + "  (every poll hands one batch to each of the 3 consumers)\n" +
+      "peak consumer lag       " + stats.maxLag + " batches on one partition\n" +
+      "live log                " + run.log().length + " events, frontier " + fmt(run.now()) + "\n" +
+      "errors                  " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  }
+
+  function finishStory() {
+    if (finished) return;
+    finished = true;
+    if (timer) { clearInterval(timer); timer = null; }
+    producing = false;
+    phase = "stopped";
+    feedBtn.disabled = true;
+    g.clearHighlight();
+    g.props(null);
+    g.camera({ fit: true, pad: 44, dur: 600 });
+    caption("Feed stopped · " + stats.produced + " batches written, " + stats.committed +
+            " partition commits, peak lag " + stats.maxLag + ". The log is still scrubbable.");
+    setPhase("feed stopped · " + run.log().length + " events logged");
+    writeReport();
+    if (AUTO) autoOutro();
+  }
+
+  /** Headless path: prove time travel, then come back to the frontier and exit. */
+  function autoOutro() {
+    setTimeout(function () {
+      run.seek(Math.max(0, run.now() - 9000));
+      caption("Time travel — the same live run re-drawn 9s back, with the backlog still on " +
+              "partition 1. run.seek() can never scrub past now().", { variant: "note" });
+      setTimeout(function () {
+        run.follow();
+        caption("Followed back to live · " + stats.produced + " batches written · " +
+                stats.committed + " partition commits · peak lag " + stats.maxLag + " batches.");
+        setTimeout(function () {
+          writeReport();
+          setPhase(errors.length === 0 ? "done — clean" : "done — see report");
+          window.__smvExit = {
+            done: true,
+            errors: errors,
+            checks: {
+              produced: stats.produced, committed: stats.committed, polls: stats.polls,
+              maxLag: stats.maxLag, logEvents: run.log().length, following: run.following,
+            },
+          };
+        }, 1200);
+      }, 2200);
+    }, 800);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Controls
+  // ---------------------------------------------------------------------------
+
+  feedBtn.addEventListener("click", function () {
+    if (finished) return;
+    producing = !producing;
+    feedBtn.textContent = producing ? "Pause producer" : "Resume producer";
+    setPhase(producing ? "live · " + phase : "producer paused");
+  });
+  backBtn.addEventListener("click", function () {
+    run.seek(Math.max(0, run.time() - 6000));
+    setPhase("scrubbed to " + fmt(run.time()) + " of " + fmt(run.now()));
+  });
+  liveBtn.addEventListener("click", function () {
+    run.follow();
+    setPhase(finished ? "feed stopped · following live" : "live · " + phase);
+  });
+  restartBtn.addEventListener("click", function () {
+    window.location.href = window.location.pathname;
+  });
+
+  timer = setInterval(beatTick, BEAT);
+  setPhase("live · connecting");
+})();
+</script>
+
+</body>
+</html>
