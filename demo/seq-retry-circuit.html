@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Timeouts, retries and a circuit breaker — sparkle-motion-visualizer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f4f5f8; --card: #ffffff; --ink: #1b2230; --muted: #6b7488;
+    --line: rgba(128,138,160,.32); --accent: #5b6ef5; --warm: #b97400;
+    --good: #1a8a5e; --bad: #c23b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --page: #0c0f14; --card: #141922; --ink: #e6e9f0; --muted: #98a1b3;
+            --line: rgba(128,138,160,.28); --accent: #8b9bff; --warm: #e0a53a;
+            --good: #3ecb92; --bad: #ef6b6b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 20px 40px; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--page); color: var(--ink); }
+  main { max-width: 1120px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: -.01em; }
+  h1 small { font-weight: 500; color: var(--muted); font-size: 13px; }
+  p.lede { margin: 0 0 14px; color: var(--muted); max-width: 80ch; }
+  code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+  button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #phase { color: var(--muted); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  #pipe { height: 600px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  /* Library CSS quirk, fixed at page level (src/ untouched): with `controls: true` the rule
+     `.smv-root.smv-has-transport .smv-caption{bottom:46px}` out-specifies
+     `.smv-caption[data-place="top"]{bottom:auto}`, so a top caption stretches from top:12px
+     all the way to bottom:46px and curtains the diagram. Re-assert `bottom:auto`. */
+  #pipe .smv-caption[data-place="top"] { bottom: auto; }
+  aside { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 14px 16px; }
+  aside h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  aside ol { margin: 0; padding-left: 18px; }
+  aside li { margin: 0 0 6px; color: var(--muted); }
+  aside li.now { color: var(--ink); font-weight: 600; }
+  aside li.done { color: var(--ink); }
+  aside li.done::marker { color: #2f9e6a; }
+  aside li.failed { color: var(--bad); }
+  aside li.failed::marker { color: var(--bad); }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 12px; }
+  .tile { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; }
+  .tile i { display: block; font-style: normal; font-size: 10.5px; letter-spacing: .05em;
+            text-transform: uppercase; color: var(--muted); }
+  .tile span { display: block; margin-top: 2px; font-size: 14px; font-weight: 600;
+               font-variant-numeric: tabular-nums; }
+  .tile span.bad { color: var(--bad); } .tile span.good { color: var(--good); }
+  .tile span.warn { color: var(--warm); }
+  ul.watch { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
+  ul.watch li { margin: 0 0 4px; }
+  footer { margin-top: 20px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+<h1>Timeouts, retries and a circuit breaker <small>— one search request, five lifelines</small></h1>
+<p class="lede">
+  The <a href="seq-basics.html">seq-basics</a> seam — actors as lifeline columns, activations
+  on an <em>(actor, time)</em> grid, messages as edges the ball rides — with the happy path
+  broken. The index lookup never answers, the gateway's 2&nbsp;s timer wins the race, a bounded
+  <code>loop:true</code> edge burns three retries with backoff, the breaker opens onto stale
+  cache, and a half-open probe closes it 30&nbsp;s later.
+</p>
+
+<div class="bar">
+  <button id="play" class="primary" type="button">Play the story</button>
+  <button id="step" type="button">Step ⏭</button>
+  <button id="restart" type="button">Restart</button>
+  <span id="phase">ready</span>
+</div>
+
+<div class="layout">
+  <div id="pipe"></div>
+  <aside>
+    <h3>Breaker</h3>
+    <div class="tiles">
+      <div class="tile"><i>circuit</i><span id="t-circuit" class="good">CLOSED</span></div>
+      <div class="tile"><i>attempt</i><span id="t-attempt">1 of 4</span></div>
+      <div class="tile"><i>last call</i><span id="t-latency">—</span></div>
+      <div class="tile"><i>served from</i><span id="t-source">—</span></div>
+    </div>
+    <h3>Messages</h3>
+    <ol id="msgs"></ol>
+    <h3 style="margin-top:14px">What to look for</h3>
+    <ul class="watch">
+      <li><b>Two balls leave the gateway at once.</b> “call search · 2s timer” fans out to the
+        RPC <em>and</em> to its own timeout — that is what a client-side timeout really is, a
+        race, so both activations share one row.</li>
+      <li><b>The red activation is terminal.</b> <code>data.fail</code> runs the full 2&nbsp;s
+        dwell and then stops the branch: no finish event, no fan-out, no loop.</li>
+      <li><b>The big arc on the right is the retry edge</b> — <code>loop:true</code>,
+        <code>maxIterations&nbsp;3</code>, backoff 200&nbsp;→&nbsp;400&nbsp;→&nbsp;800&nbsp;ms.
+        Attempt&nbsp;2 re-flies it; attempts 3 and 4 tick in place on “call search”, and the
+        <code>iter n/3</code> badge on the arc is the visible count.</li>
+      <li><b>The duration chips are the point.</b> The pipeline preset prints the declared
+        duration on every activation — two <code>2s</code> timeouts against the probe's
+        <code>38ms</code>.</li>
+      <li><b>The blank row before “tap Search again”</b> is a <code>gap</code>: thirty seconds
+        of nothing, drawn as empty lifeline.</li>
+      <li><b>The Search lifeline stays red</b> even after the probe succeeds: a container
+        inherits the <em>earliest</em> failure among its descendants, so the column carries
+        the timeout for the rest of the run.</li>
+      <li>Scrub the transport bar backwards — structural steps are snapshotted, so the diagram
+        folds back up and the breaker re-opens.</li>
+    </ul>
+  </aside>
+</div>
+<footer>Part of the <a href="index.html">sparkle-motion-visualizer demos</a>. The solver is ~150 lines of plain JS; see the page source.</footer>
+</main>
+
+<script src="../dist/smv.iife.min.js"></script>
+<script src="sequence-solver.js"></script>
+<script>
+(function () {
+  "use strict";
+  var errors = [];
+  window.__smvExit = { done: false, errors: errors };
+  window.addEventListener("error", function (e) { errors.push(String((e && e.message) || e)); });
+  window.addEventListener("unhandledrejection", function (e) { errors.push("unhandledrejection: " + String(e && e.reason)); });
+  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  var P = AUTO ? 0.5 : 1; // pace multiplier
+
+  // ---- actors and the message script -----------------------------------------------
+  var ACTORS = [
+    { id: "app", label: "Mobile app" },
+    { id: "gw", label: "API gateway" },
+    { id: "search", label: "Search service" },
+    { id: "cache", label: "Cache" },
+    { id: "metrics", label: "Metrics" },
+  ];
+
+  // One entry per activation: which lifeline it sits on, which row (= time), which earlier
+  // activation sent the message that starts it, the message text, what the actor does, and
+  // the real-world duration the pipeline preset prints as a chip.
+  //   `with: true` -> same row as the entry above it: a real fan-out, two things at once.
+  //   row 7 is deliberately skipped — an empty row is the 30s wait.
+  var MSGS = [
+    { id: "app.1",     actor: "app",      row: 0,   from: null,        msg: null,              node: "tap “Search”",             dur: "0.4s" },
+    { id: "gw.call",   actor: "gw",       row: 1,   from: "app.1",     msg: "GET /search",     node: "call search · 2s timer",   dur: "2ms" },
+    { id: "search.1",  actor: "search",   row: 2,   from: "gw.call",   msg: "search(q)",       node: "index lookup",             dur: "2s", fail: "timeout after 2s" },
+    { id: "gw.timer",  actor: "gw",       row: 2,   from: "gw.call",   msg: "arm timeout",     node: "timer fires · no reply",   dur: "2s", with: true },
+    { id: "gw.open",   actor: "gw",       row: 3,   from: "gw.timer",  msg: "4× failed",       node: "open circuit · 30s",       dur: "1ms" },
+    { id: "cache.1",   actor: "cache",    row: 4,   from: "gw.open",   msg: "GET stale",       node: "stale results · 4m old",   dur: "6ms" },
+    { id: "metrics.1", actor: "metrics",  row: 4,   from: "gw.open",   msg: "open +1",         node: "breaker → OPEN",           dur: "2ms", with: true },
+    { id: "gw.2",      actor: "gw",       row: 5,   from: "cache.1",   msg: "20 hits · 4m",    node: "add stale header",         dur: "1ms" },
+    { id: "app.2",     actor: "app",      row: 6,   from: "gw.2",      msg: "200 · stale",     node: "render stale + banner",    dur: "0.3s" },
+    { id: "app.3",     actor: "app",      row: 8,   from: "app.2",     msg: "30s later",       node: "tap “Search” again",       dur: "0.3s" },
+    { id: "gw.3",      actor: "gw",       row: 9,   from: "app.3",     msg: "GET /search",     node: "half-open · 1 probe",      dur: "2ms" },
+    { id: "search.2",  actor: "search",   row: 10,  from: "gw.3",      msg: "probe ×1",        node: "index lookup",             dur: "38ms" },
+    { id: "gw.4",      actor: "gw",       row: 11,  from: "search.2",  msg: "20 hits 38ms",    node: "close circuit",            dur: "1ms" },
+    { id: "app.4",     actor: "app",      row: 12,  from: "gw.4",      msg: "200 · fresh",     node: "render fresh results",     dur: "0.25s" },
+    { id: "metrics.2", actor: "metrics",  row: 12,  from: "gw.4",      msg: "closed +1",       node: "breaker → CLOSED",         dur: "2ms", with: true },
+  ];
+
+  // The retry. `data.fail` never fires a loop edge of its own (docs/RUN.md, "Declared
+  // failure"), so the loop's SOURCE is the activation that *succeeds*: the gateway's 2s
+  // timer. Its target is "call search", which is what a retry actually re-enters.
+  var RETRY = {
+    id: "retry", source: "gw.timer", target: "gw.call",
+    loop: true, maxIterations: 3, label: "retry ×3",
+  };
+
+  var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
+  MSGS.forEach(function (m) { seq.place(m.id, m.actor, m.row); });
+  var BY_ID = {};
+  MSGS.forEach(function (m) { BY_ID[m.id] = m; });
+
+  function nodeOf(m) {
+    var data = { duration: m.dur };
+    if (m.fail) data.fail = m.fail;
+    return { id: m.id, parent: m.actor, label: m.node, data: data };
+  }
+  function edgeOf(m) { return { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id, label: m.msg }; }
+
+  var SEED = {
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    edges: [],
+  };
+
+  // ---- the storyboard ---------------------------------------------------------------
+  // Same shape as seq-basics: add the next activation(s) a beat BEFORE the ball gets there,
+  // move the camera onto the hop, then let the run play until it lands.
+  var STEPS = [];
+  function push(s) { STEPS.push(s); }
+  function say(text) { push({ op: "caption", args: [text, { place: "top" }] }); }
+
+  // Group the script into "arrivals": entries flagged `with` join the group above them.
+  var GROUPS = [];
+  MSGS.slice(1).forEach(function (m) {
+    if (m.with && GROUPS.length) GROUPS[GROUPS.length - 1].push(m);
+    else GROUPS.push([m]);
+  });
+  function group(i) { return GROUPS[i]; }
+
+  function advance(grp) {
+    var adds = grp.map(function (m) { return { op: "addNode", args: [nodeOf(m)] }; })
+      .concat(grp.map(function (m) { return { op: "addEdge", args: [edgeOf(m)] }; }));
+    var cam = [grp[0].from].concat(grp.map(function (m) { return m.id; }));
+    push({ op: "batch", steps: adds, dur: 260 * P });
+    push({ op: "camera", args: [{ nodes: cam, k: 1, pad: 110, dur: 300 * P }] });
+    // One `until` per member: the first is the real wait, the rest resolve instantly.
+    grp.forEach(function (m) { push({ op: "run.play", until: m.id }); });
+  }
+
+  push({ label: "request" });
+  say("A search request. The gateway calls Search and arms a 2 s timeout at the same instant.");
+  advance(group(0));                       // gw.call
+  advance(group(1));                       // search.1 + gw.timer, one row, two balls
+
+  push({ label: "timeout" });
+  push({ op: "highlight", args: [{ nodes: ["search.1"], variant: "warn", pulse: true }] });
+  say("No reply. data.fail: “timeout after 2s” — the activation runs its full dwell, goes red, and that branch stops.");
+  push({ op: "wait", ms: 1400 * P });
+  push({ op: "clearHighlight" });
+
+  push({ label: "retry ×3" });
+  push({ op: "batch", steps: [{ op: "addEdge", args: [RETRY] }], dur: 320 * P });
+  push({ op: "camera", args: [{ nodes: ["gw.call", "gw.timer", "search.1"], k: 1, pad: 80, dur: 520 * P }] });
+  say("The timer branch survives, so it carries the retry: a loop:true edge back to “call search”, maxIterations 3 — backoff 200 → 400 → 800 ms.");
+  push({ op: "highlight", args: [{ nodes: ["gw.call"], edges: ["retry"], variant: "focus", pulse: true }] });
+  push({ op: "run.play" });
+  push({ op: "wait", ms: 900 * P });
+  say("Attempt 2 re-flies the arc; attempts 3 and 4 tick in place on the target — the iter 3/3 badge is the count.");
+  push({ op: "wait", ms: 1400 * P });
+  push({ op: "clearHighlight" });
+
+  push({ label: "circuit OPEN" });
+  advance(group(2));                       // gw.open
+  push({ op: "highlight", args: [{ nodes: ["gw.open"], variant: "warn", pulse: true }] });
+  say("Four failures in a row trip the breaker: circuit OPEN for 30s — no further calls to Search.");
+  push({ op: "wait", ms: 1400 * P });
+  push({ op: "clearHighlight" });
+  say("Open circuit, so the gateway answers from cache instead and records the trip.");
+  advance(group(3));                       // cache.1 + metrics.1
+  advance(group(4));                       // gw.2
+  advance(group(5));                       // app.2
+  push({ op: "highlight", args: [{ nodes: ["app.2", "cache.1"], variant: "warn" }] });
+  say("The user still gets results in ~8 ms — four minutes stale, behind a banner. Degraded, not down.");
+  push({ op: "wait", ms: 1400 * P });
+  push({ op: "clearHighlight" });
+
+  push({ label: "half-open" });
+  say("30 s later — the empty row is the wait. The breaker goes half-open and lets exactly one probe through.");
+  advance(group(6));                       // app.3
+  advance(group(7));                       // gw.3
+  advance(group(8));                       // search.2
+  push({ op: "highlight", args: [{ nodes: ["search.2"], variant: "ok", pulse: true }] });
+  say("The probe answers in 38 ms. Compare the duration chips on the Search lifeline: 2s, then 38ms.");
+  push({ op: "wait", ms: 1400 * P });
+  push({ op: "clearHighlight" });
+  advance(group(9));                       // gw.4
+  advance(group(10));                      // app.4 + metrics.2
+
+  push({ label: "circuit CLOSED" });
+  push({ op: "highlight", args: [{ nodes: ["gw.4", "app.4", "metrics.2"], variant: "ok", pulse: true }] });
+  // pad 60 leaves the top caption, the preset's total bar and the transport bar all clear.
+  push({ op: "camera", args: [{ fit: true, pad: 60, dur: 620 * P }] });
+  say("One timeout, three retries, an open breaker — closed again by one 38 ms probe.");
+  push({ op: "wait", ms: 1100 * P });
+
+  // ---- pacing ----------------------------------------------------------------------
+  // A sqrt curve so 2ms / 38ms / 2s stay visibly different without the timeouts dragging.
+  // `iterations` caps the retry edge at its own maxIterations: attempt 2 is the arc-cross,
+  // attempts 3 and 4 are the in-place ticks (docs/RUN.md, "Bounded retry loops").
+  var RUN_OPTS = {
+    hopMs: 520 * P,
+    iterations: { retry: 3 },
+    dwell: function (sec) {
+      return sec == null ? 300 * P : (240 + 700 * Math.min(1, Math.sqrt(sec / 2))) * P;
+    },
+  };
+
+  // ---- mount ------------------------------------------------------------------------
+  var $ = function (s) { return document.querySelector(s); };
+  var phaseEl = $("#phase"), msgsEl = $("#msgs");
+  var g, sb;
+  try {
+    g = SparkleMotion.mount("#pipe", SEED, {
+      theme: "auto",
+      preset: "pipeline",
+      layout: { dir: "TB", solver: seq.solver, nodesep: 30, ranksep: 26, marginx: 24, marginy: 16, minColWidth: 150 },
+      animation: { duration: 360 * P, easing: "cubic-out" },
+      controls: true,
+      storyboard: STEPS,
+      autoplay: false,
+    });
+    g.run(RUN_OPTS);
+    sb = g.storyboard();
+  } catch (err) {
+    errors.push("mount: " + String((err && err.message) || err));
+    phaseEl.textContent = "mount failed: " + err.message;
+    window.__smvExit = { done: true, errors: errors };
+    return;
+  }
+  window.__g = g;
+
+  // ---- side panel --------------------------------------------------------------------
+  function actorLabel(id) {
+    for (var i = 0; i < ACTORS.length; i++) if (ACTORS[i].id === id) return ACTORS[i].label;
+    return id;
+  }
+  MSGS.forEach(function (m) {
+    var li = document.createElement("li");
+    li.id = "li-" + m.id.replace(".", "-");
+    li.textContent = (m.msg ? m.msg + " → " : "") + actorLabel(m.actor) + ": " + m.node;
+    msgsEl.appendChild(li);
+  });
+
+  var tCircuit = $("#t-circuit"), tAttempt = $("#t-attempt"), tLatency = $("#t-latency"), tSource = $("#t-source");
+  function setTile(el, text, cls) { el.textContent = text; el.className = cls || ""; }
+  var CIRCUIT = {
+    "gw.open": ["OPEN · 30s", "bad"],
+    "gw.3": ["HALF-OPEN", "warn"],
+    "gw.4": ["CLOSED", "good"],
+  };
+  var SOURCE = { "cache.1": ["cache (stale)", "warn"], "search.2": ["search index", "good"] };
+
+  var run = g.run();
+  run.on("start", function (ev) {
+    var m = BY_ID[ev.nodeId];
+    if (!m) return;
+    var li = document.getElementById("li-" + m.id.replace(".", "-"));
+    if (li) {
+      msgsEl.querySelectorAll("li.now").forEach(function (x) { x.classList.remove("now"); x.classList.add("done"); });
+      li.classList.add("now");
+    }
+    if (CIRCUIT[m.id]) setTile(tCircuit, CIRCUIT[m.id][0], CIRCUIT[m.id][1]);
+    if (SOURCE[m.id]) setTile(tSource, SOURCE[m.id][0], SOURCE[m.id][1]);
+  });
+  run.on("finish", function (ev) {
+    var m = BY_ID[ev.nodeId];
+    if (m && (m.actor === "search" || m.actor === "cache")) setTile(tLatency, m.dur, "good");
+  });
+  run.on("fail", function (ev) {
+    var m = BY_ID[ev.nodeId];
+    if (!m) return;
+    var li = document.getElementById("li-" + m.id.replace(".", "-"));
+    if (li) { li.classList.remove("now"); li.classList.add("failed"); }
+    setTile(tLatency, String(ev.reason || m.dur), "bad");
+  });
+  run.on("loop", function (ev) {
+    if (ev.edgeId !== "retry") return;
+    setTile(tAttempt, (ev.iteration + 1) + " of " + (ev.max + 1), "warn");
+  });
+
+  // ---- controls ----------------------------------------------------------------------
+  var playing = false;
+  function finish() {
+    playing = false;
+    phaseEl.textContent = "story complete — scrub the bar or Restart";
+    window.__smvExit = { done: true, errors: errors };
+  }
+  $("#play").addEventListener("click", function () {
+    if (playing) return;
+    playing = true;
+    phaseEl.textContent = "playing…";
+    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+  });
+  $("#step").addEventListener("click", function () {
+    Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
+  });
+  $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
+
+  if (AUTO) $("#play").click();
+})();
+</script>
+</body>
+</html>
