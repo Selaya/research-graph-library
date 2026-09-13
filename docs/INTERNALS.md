@@ -920,6 +920,19 @@ vp.target                                 // getter: where a live tween is headi
   attribute); `.smv-caption` with `data-place`/`data-variant` and a `.smv-has-transport`
   bottom offset mirroring `.smv-totalbar`; the `[data-smv-record] *` transition/animation
   kill-switch (D15). No transitions on any of it (D14).
+  - **Lesson (API-FRICTIONS.md F20, fixed):** the transport-aware bottom offset
+    (`.smv-has-transport .smv-caption{bottom:46px}`) used to outrank
+    `.smv-caption[data-place="top"]{bottom:auto}` by specificity, so a top-placed caption
+    under `controls: true` kept both `top` and `bottom` set and stretched over the whole
+    pane. The fix is an equally-specific transport-aware rule per placement, guarded by
+    `test/caption-place.test.js`. The general lesson: the caption strip, the transport bar
+    and the total-duration bar (`.smv-totalbar`) each position themselves independently
+    against the pane, with no single source of truth for how much chrome is stacked at top
+    or bottom — the same gap `fitView()`/`camera({ fit })` hit not accounting for that
+    chrome (F15). A single "pane chrome" layout — one place that knows the stacked heights
+    at each edge and hands them out to captions, `fitView`, and anything else that needs to
+    avoid them — would prevent the next collision instead of another rule fixed one
+    property pair at a time.
 - storyboard.js: `"camera" | "highlight" | "clearHighlight" | "caption"` join OPS and
   NAMED — method-shaped, so applyStep's default branch dispatches them.
 
