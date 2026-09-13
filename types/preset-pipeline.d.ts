@@ -2,6 +2,8 @@
 // entry — the pipeline preset ships as a separate module (own stylesheet, own marker) so a
 // core-only page never has to load it.
 
+import type { MeasureCtx } from "./index.js";
+
 /** The minimal shape applyPipelinePreset needs — a full `Graph` satisfies this structurally
  *  (see index.d.ts). */
 export interface PipelinePresetGraph {
@@ -11,17 +13,48 @@ export interface PipelinePresetGraph {
     add(fn: (now: number) => void): void;
     remove(fn: (now: number) => void): void;
   };
-  renderer?: { node?(id: string): unknown };
-  spec(): { nodes: { id: string; parent?: string; data?: Record<string, unknown>; durationAgg?: "sum" | "max" }[] };
+  renderer?: { node?(id: string): unknown; edge?(id: string): unknown };
+  spec(): {
+    nodes: { id: string; parent?: string; data?: Record<string, unknown>; durationAgg?: "sum" | "max" }[];
+    edges?: { id: string; source?: string; target?: string; loop?: boolean; data?: Record<string, unknown> }[];
+  };
   on(type: string, fn: (payload: unknown) => void): (() => void) | void;
   off?(type: string, fn: (payload: unknown) => void): void;
 }
 
+export interface PipelinePresetOpts {
+  /** What the total-duration bar reports (F24). `'sum'` adds up the declared work,
+   *  `'critical'` is the longest chain through the graph, `'both'` (the default) shows the
+   *  sum with the critical path named beside it — and falls back to the bare sum when the
+   *  two are equal. */
+  total?: "sum" | "critical" | "both";
+}
+
 /** `opts.preset: 'pipeline'` inline, or `applyPipelinePreset(g)` after the fact (also
  *  exposed from the main entry as `SparkleMotion.presetPipeline`). Decorates a mounted
- *  instance with duration chips, status/mode glyph badges, a total-duration bar and the
- *  condense reveal payoff (odometer roll + transient delta badge). */
-export function applyPipelinePreset(g: PipelinePresetGraph): { destroy(): void };
+ *  instance with duration chips, status/mode glyph badges, edge-duration chips, a
+ *  total-duration bar and the condense reveal payoff (odometer roll + delta badge). */
+export function applyPipelinePreset(g: PipelinePresetGraph, opts?: PipelinePresetOpts): { destroy(): void };
+
+/** The longest chain of declared work through the spec — the other half of what the total
+ *  bar can report (F24). Edge-collapsed onto top-level ancestors, `loop: true` excluded.
+ *  `null` when the spec has no top-level nodes. */
+export function criticalPathSec(
+  spec: { nodes?: unknown[]; edges?: unknown[] },
+  cache?: Map<string, number | null>,
+): number | null;
+
+/** What the preset needs reserved on every node it decorates. With the measure `ctx` the
+ *  core hands it, a container's `durationAgg` rollup chip is measured too, in the shape
+ *  `opts.layout.measure` takes (F22/F23). `mount(..., {preset: 'pipeline'})` installs it
+ *  unless the caller supplied their own; pass it by hand alongside `presetPipeline(g)`. */
+export const PIPELINE_MEASURE: {
+  extraWidth(node: { id?: string; data?: Record<string, unknown> }, ctx?: MeasureCtx): number;
+  extraHeight(node: { id?: string; data?: Record<string, unknown> }, ctx?: MeasureCtx): number;
+};
+
+/** The edge-label truncation cap the preset installs when the caller set none (F26). */
+export const PIPELINE_EDGE_LABEL_MAX_W: number;
 
 /** Injects the preset's own deduped stylesheet into `doc` (a no-op past the first call, or
  *  when `doc` has no `<head>`). Returns the `<style>` element, or `null`. */
@@ -42,5 +75,7 @@ declare const _default: {
   formatDuration: typeof formatDuration;
   aggregateDuration: typeof aggregateDuration;
   deltaBadgeText: typeof deltaBadgeText;
+  criticalPathSec: typeof criticalPathSec;
+  PIPELINE_MEASURE: typeof PIPELINE_MEASURE;
 };
 export default _default;

@@ -102,6 +102,13 @@ async function settle(promise, maxFrames = 400) {
   assert.ok(ok, "awaited work settled within the frame budget");
 }
 
+/** Every element under `root` matching `fn` (the DOM shim has no querySelectorAll). */
+function findAllEls(root, fn, out = []) {
+  if (fn(root)) out.push(root);
+  for (const c of root.children) findAllEls(c, fn, out);
+  return out;
+}
+
 const { mount } = await import("../src/index.js");
 
 // ---------------------------------------------------------------------------
@@ -301,5 +308,54 @@ test("run-render: statusAgg 'none' never paints the container from its children 
   await pump(2);
   assert.equal(g.renderer.node("svc").getAttribute("data-run"), "done");
   assert.equal(g.renderer.node("hit").getAttribute("data-run"), "failed");
+  g.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F21 — the occupancy badge and the preset's duration chip have separate slots, including
+// in the gutter above a short box, where the chip row lifts to clear a centred label.
+// ---------------------------------------------------------------------------
+
+test("run-render: the ×N occupancy badge and the preset's duration chip never share a slot", async () => {
+  const { textWidth } = await import("../src/measure.js");
+  const BADGE_FONT = "600 10px system-ui,-apple-system,'Segoe UI',sans-serif";
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, {
+    nodes: [
+      { id: "A", label: "A", data: { duration: "1s" } },
+      // Explicit w/h opts out of the measure hook, so the box stays 36px tall and the
+      // preset lifts its chip row into the gutter the badge also lives in.
+      { id: "M", label: "M", w: 120, h: 36, data: { duration: "300ms" } },
+    ],
+    edges: [{ id: "e1", source: "A", target: "M" }],
+  }, { animation: { duration: 40 }, preset: "pipeline" });
+
+  const run = g.run({ mode: "live" });
+  run.start("A");
+  await pump(2);
+  run.finish("A");
+  await pumpUntil(() => run.state().nodes.M.occupancy > 0, 200);
+  run.spawn("M", 3);
+  await pumpUntil(() => run.state().nodes.M.occupancy === 4, 200);
+  await pump(2);
+
+  const badge = findAllEls(root, (n) => (n.attrs.class || "") === "smv-token-badge" && n.textContent === "×4")[0];
+  assert.ok(badge, "the occupancy badge is drawn");
+  const chip = findAllEls(g.renderer.node("M"), (n) => (n.attrs.class || "") === "smv-chip")[0];
+  assert.ok(chip && chip.textContent === "300ms", "the preset chip is drawn");
+
+  const rect = g.layoutResult().nodes.M;
+  const left = rect.x - rect.w / 2;
+  const chipRight = left + Number(chip.attrs.x); // .smv-chip is text-anchor:end
+  assert.equal(Number(chip.attrs.y), -7, "sanity: the short box lifted its chip row");
+  assert.equal(Number(badge.attrs.y), rect.y - rect.h / 2 - 7, "badge and chip share the gutter");
+  // .smv-token-badge is text-anchor:start from the box's left edge; .smv-chip runs
+  // leftwards from the right edge. The two spans must not meet.
+  assert.ok(
+    Number(badge.attrs.x) + textWidth("×4", BADGE_FONT) < chipRight - textWidth("300ms", BADGE_FONT),
+    "the badge's span ends before the chip's begins",
+  );
+
   g.destroy();
 });

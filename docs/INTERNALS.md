@@ -20,8 +20,18 @@ decorates from `stateAt(t)` inside the same rAF loop, never mutates the graph.
 - `src/store.js` — `Store` (validated spec, mutations, `condense`, `snapshot/restore`),
   `GraphError(code, msg)`, `isConvex`.
 - `src/cycles.js` — `breakCycles(nodes, edges, pinned:Set)→Set<edgeId>`, `isAcyclic`.
-- `src/measure.js` — `textWidth`, `truncate`, `sizeNode(node)→{w,h}` (deterministic
-  estimator under Node), constants `NODE_H`, etc.
+- `src/measure.js` — `textWidth`, `truncate`, `sizeNode(node, measure?, ctx?)→{w,h,reserve}`
+  (deterministic estimator under Node, scaled by the font's px size), constants `NODE_H`,
+  etc. `measure` is `opts.layout.measure` = `{extraWidth, extraHeight}`, each a number or
+  `(node, ctx)=>number`, where `ctx = {nodes: Map<id,specNode>, cache}` is the whole node
+  set (a hook whose chrome depends on other nodes — a durationAgg rollup chip — needs it).
+  `extraWidth` widens the derived box **inside** the `NODE_MAX_W` clamp (a measured node
+  still never exceeds 220px; past that the label gives way) AND comes back as `reserve`,
+  which render.js subtracts from the label's room, so reserved chrome is never label room.
+  A node that declares both `w` and `h` opts out entirely (`reserve: 0`); one that declares
+  only `w` keeps that width and still gets the reserve. `viewstate.view().sizes[id]` carries
+  `{w, h, reserve}`; `createViewState(store, measureOf)` takes a live getter for it so
+  `g.layout({measure})` re-measures without rebuilding the view state.
 - `src/layout.js` — **frozen seam (D2)**:
   `layout(view, opts) → { nodes:{id:{x,y,w,h}}, edges:{id:{points,reversed?}}, bounds:{x,y,w,h}, reversedEdgeIds:Set }`.
   `view = {nodes:[{id,w,h,parent?}], edges:[{id,source,target,loop?,maxIterations?}]}`.
@@ -575,12 +585,21 @@ makeQuery(store) → { nodes(filter?), edges(filter?), children(id), descendants
 ## `src/render.js` + `src/styles.js` + `src/viewstate.js` — edge labels, collapseAll (render-extras agent)
 
 - **Edge labels:** `edge.label` renders as `<text class="smv-edge-label">` inside the
-  edge group, positioned per frame at `pointAt(clippedPoints, 0.5)` with a small
+  edge group, positioned per frame at `pointAt(clippedPoints, t)` with a small
   perpendicular offset; content/truncation set at styleCommit only (D7). Labels do NOT
   affect layout (documented simplification — record in DEVIATIONS if judged material).
   Meta-edges: when a collapsed boundary edge aggregates ≥2 labeled edges the label drops
   (weight badge already carries the story). CSS: `.smv-edge-label` muted, 10px, paint-order
   stroke halo for readability, in styles.js.
+- **Rich edge labels (F25/F26):** `edge.label` may instead be
+  `{text, place:'mid'|'start'|'end', rotate, pill, maxW}`. styleCommit normalizes it to
+  `{text, t, rotate, pill, w}` (`t` = the path fraction: .15/.5/.85) and caches it on the
+  element record as `e.lab`, so `frame()` reads no Map. `rotate` writes a
+  `rotate(deg,x,y)` transform normalized into ±90° (never upside down); `pill` adds a
+  `<rect class="smv-edge-pill">` inserted BEFORE the text (paints behind), sized from the
+  text measured in the label's own 10px font, and flags the group `data-pill` so CSS drops
+  the halo. Truncation cap: per-edge `maxW`, else `styleCommit({edgeLabelMaxW})` from
+  `opts.layout.edgeLabelMaxW`, else 90px.
 - **`vs.containers()`** → array of container ids in containment-depth order (parents
   first). `vs.expandAll()` / `vs.collapseAll()` mutate the set only and return the ids
   that changed (index.js drives the single relayout).
@@ -698,14 +717,17 @@ export/a11y-table via `../src/`) + `test/e2e-m2.mjs` (playwright-core, chromium 
 - **no regression**: zero console errors; `npm test`, `npm run size`, e2e-m0, e2e-m1 all
   green.
 
-## `src/interact.js` — tap-to-toggle (post-review M2 addition)
+## `src/interact.js` — tap-to-toggle + click events (post-review M2 addition; F27)
 
-`attachTapToggle(g, {svg}) → {destroy}` — pointerdown resolves the `.smv-node[data-id]`
-under the finger (before the viewport's setPointerCapture retargets the gesture);
-pointerup toggles the container through public `g.expand/collapse` ONLY when the pointer
-stayed within a 6px slop and no second pointer joined (pinch). Wired by index.js unless
-`opts.interaction.tapToggle === false`; containers get `cursor: pointer`. Ships in the
-IIFE.
+`attachTapToggle(g, {svg, toggle=true, emit}) → {destroy}` — pointerdown resolves the
+enclosing `.smv-node[data-id]` or `.smv-edge[data-id]` under the finger (before the
+viewport's setPointerCapture retargets the gesture); pointerup publishes
+`emit('nodeclick'|'edgeclick', {id, event})` and then toggles the container through public
+`g.expand/collapse` ONLY when the pointer stayed within a 6px slop and no second pointer
+joined (pinch) — one guard, both behaviours. index.js wires `emit` to the instance bus, so
+`g.on('nodeclick', …)` is the public surface; `opts.interaction.tapToggle === false` drops
+the toggle and `opts.interaction.click === false` drops the events (either alone still
+attaches the listeners). Containers get `cursor: pointer`. Ships in the IIFE.
 
 ---
 

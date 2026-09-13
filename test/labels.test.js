@@ -191,6 +191,9 @@ test(".smv-edge-label CSS: muted fill, small size, paint-order stroke halo (both
   assert.match(CSS, /\.smv-edge\s+text\.smv-edge-label\s*\{[^}]*fill:var\(--smv-muted\)/);
   assert.match(CSS, /\.smv-edge-label\s*\{[^}]*paint-order:stroke fill/);
   assert.match(CSS, /\.smv-edge-label\s*\{[^}]*stroke:var\(--smv-bg\)/, "halo uses the themed bg token, so it works in light and dark");
+  // F27 — the label is part of the edge's hit area: a 1.25px stroke is not a click target.
+  assert.ok(!/\.smv-edge text\.smv-edge-label\{[^}]*pointer-events:none/.test(CSS));
+  assert.ok(!/\.smv-edge rect\.smv-edge-pill\{[^}]*pointer-events:none/.test(CSS));
 });
 
 // ---------------------------------------------------------------------------
@@ -285,4 +288,132 @@ test("a weight-1 meta-edge keeps the hidden edge's label; aggregating a 2nd sour
   const v2 = vs.view();
   const m2 = v2.edges.find((e) => e.meta);
   assert.equal(m2.weight, 2);
+});
+
+// ---------------------------------------------------------------------------
+// F25/F26 — rich edge labels: place / rotate / pill, and a configurable cap
+// ---------------------------------------------------------------------------
+
+/** Commit + frame one straight A->B edge, returning the renderer and the label element. */
+function labeled(label, commitExtra = {}) {
+  const { root, doc } = makeRoot();
+  const r = createRenderer(root, doc);
+  r.styleCommit({
+    nodes: { A: {}, B: {} },
+    edges: { e1: { source: "A", target: "B", label } },
+    sizes: { A: { w: 40, h: 20 }, B: { w: 40, h: 20 } },
+    ...commitExtra,
+  });
+  r.frame(visualOf(
+    { A: { x: 0, y: 0, w: 40, h: 20 }, B: { x: 100, y: 100, w: 40, h: 20 } },
+    { e1: { points: [{ x: 0, y: 0 }, { x: 100, y: 100 }] } },
+  ));
+  return { r, g: r.edge("e1"), label: byClass(r.edge("e1"), "smv-edge-label")[0] };
+}
+
+test("edge label object form: {text} alone renders exactly like the string form", () => {
+  const a = labeled("ships to");
+  const b = labeled({ text: "ships to" });
+  assert.equal(b.label.textContent, "ships to");
+  assert.equal(b.label.attrs.x, a.label.attrs.x);
+  assert.equal(b.label.attrs.y, a.label.attrs.y);
+  assert.equal(b.label.attrs.transform, undefined, "upright by default — no rotation");
+});
+
+test("edge label place: 'start'/'end' move it along the path, 'mid' is the default", () => {
+  const mid = labeled({ text: "m" }).label;
+  const start = labeled({ text: "m", place: "start" }).label;
+  const end = labeled({ text: "m", place: "end" }).label;
+  assert.ok(Number(start.attrs.x) < Number(mid.attrs.x), "start sits nearer the source");
+  assert.ok(Number(end.attrs.x) > Number(mid.attrs.x), "end sits nearer the target");
+  assert.equal(labeled({ text: "m", place: "nonsense" }).label.attrs.x, mid.attrs.x, "unknown place falls back to mid");
+});
+
+test("edge label rotate: true lays it along the line, and never upside down", () => {
+  const down = labeled({ text: "m", rotate: true }).label;
+  assert.match(down.attrs.transform, /^rotate\(45,/, "a 45° descent carries the label with it");
+
+  // Same edge drawn backwards: the angle flips past vertical, the text must stay readable.
+  const { root, doc } = makeRoot();
+  const r = createRenderer(root, doc);
+  r.styleCommit({
+    nodes: { A: {}, B: {} },
+    edges: { e1: { source: "A", target: "B", label: { text: "m", rotate: true } } },
+    sizes: { A: { w: 40, h: 20 }, B: { w: 40, h: 20 } },
+  });
+  r.frame(visualOf(
+    { A: { x: 100, y: 0, w: 40, h: 20 }, B: { x: 0, y: 0, w: 40, h: 20 } },
+    { e1: { points: [{ x: 100, y: 0 }, { x: 0, y: 0 }] } },
+  ));
+  const back = byClass(r.edge("e1"), "smv-edge-label")[0];
+  assert.match(back.attrs.transform, /^rotate\(0,/, "180° is flipped back to upright");
+});
+
+test("edge label pill: true adds a backing rect sized to the text, behind it, flagged on the group", () => {
+  const { g, label } = labeled({ text: "GET /reviews", pill: true });
+  const pills = byClass(g, "smv-edge-pill");
+  assert.equal(pills.length, 1);
+  assert.ok(Number(pills[0].attrs.width) > 12, "sized from the measured text");
+  assert.ok(g.children.indexOf(pills[0]) < g.children.indexOf(label), "paints behind the text");
+  assert.equal(g.attrs["data-pill"], "", "the group is flagged so CSS can drop the halo");
+  assert.equal(byClass(labeled({ text: "no pill" }).g, "smv-edge-pill").length, 0);
+});
+
+test("edge label pill and rotation are dropped again when the label loses them", () => {
+  const { root, doc } = makeRoot();
+  const r = createRenderer(root, doc);
+  const commit = (label) => r.styleCommit({
+    nodes: { A: {}, B: {} },
+    edges: { e1: { source: "A", target: "B", label } },
+    sizes: { A: { w: 40, h: 20 }, B: { w: 40, h: 20 } },
+  });
+  const paint = () => r.frame(visualOf(
+    { A: { x: 0, y: 0, w: 40, h: 20 }, B: { x: 100, y: 100, w: 40, h: 20 } },
+    { e1: { points: [{ x: 0, y: 0 }, { x: 100, y: 100 }] } },
+  ));
+  commit({ text: "one", pill: true, rotate: true });
+  paint();
+  assert.equal(byClass(r.edge("e1"), "smv-edge-pill").length, 1);
+  commit("one");
+  paint();
+  assert.equal(byClass(r.edge("e1"), "smv-edge-pill").length, 0, "pill removed");
+  assert.equal(r.edge("e1").attrs["data-pill"], undefined);
+  assert.equal(byClass(r.edge("e1"), "smv-edge-label")[0].attrs.transform, undefined, "rotation removed");
+});
+
+test("F26: layout.edgeLabelMaxW raises the cap for the drawing, label.maxW for one edge", () => {
+  const long = "retry ×3 · backoff 200ms → 800ms";
+  const capped = labeled(long).label.textContent;
+  assert.ok(capped.endsWith("…"), "the 90px default still truncates it");
+
+  const wide = labeled(long, { edgeLabelMaxW: 400 }).label.textContent;
+  assert.equal(wide, long, "a raised drawing-wide cap fits the whole message");
+
+  const perEdge = labeled({ text: long, maxW: 400 }).label.textContent;
+  assert.equal(perEdge, long, "a per-edge maxW does the same without touching the drawing");
+
+  const beats = labeled({ text: long, maxW: 40 }, { edgeLabelMaxW: 400 }).label.textContent;
+  assert.ok(beats.length < wide.length, "the per-edge cap wins over the drawing-wide one");
+});
+
+test("F22: a node label truncates to the box MINUS the reserve a preset asked measurement for", () => {
+  const { root, doc } = makeRoot();
+  const r = createRenderer(root, doc);
+  const commit = (reserve) => r.styleCommit({
+    nodes: { A: { label: "Reconcile ledger entries" } },
+    edges: {},
+    sizes: { A: { w: 200, h: 44, reserve } },
+  });
+  commit(0);
+  r.frame(visualOf({ A: { x: 0, y: 0, w: 200, h: 44 } }, {}));
+  const text = byClass(r.node("A"), "smv-node-label")[0];
+  const full = text.textContent;
+  commit(80);
+  assert.ok(text.textContent.length < full.length, "the reserved gutters come out of the label's room");
+  assert.ok(text.textContent.endsWith("…"));
+});
+
+test(".smv-edge-pill CSS: themed plate, and the halo comes off the text it backs", () => {
+  assert.match(CSS, /\.smv-edge rect\.smv-edge-pill\{[^}]*fill:var\(--smv-container\)/);
+  assert.match(CSS, /\.smv-edge\[data-pill\] text\.smv-edge-label\{[^}]*stroke:none/);
 });

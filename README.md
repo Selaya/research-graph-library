@@ -114,10 +114,13 @@ then `import { dagreSolver } from "sparkle-motion-visualizer/adapters/dagre"`.
   overrides, and per-step pacing via `dur` — the declared timeline the scrubber and cue
   sheet both read. See `docs/RECORDING.md` for the full recipe, including recording a
   story as video and fitting its holds to a recorded voice-over.
-- **Pipeline preset** — duration chips, sum/max rollups, manual/auto badges, the
-  `2h → 8s` odometer + delta badge when automation lands, a total-duration bar.
-  `presetPipeline(g)` called after mount back-fills whatever's already on screen instead of
-  waiting for the next mutation. Writing your own preset: docs/PRESETS.md.
+- **Pipeline preset** — duration chips (nodes *and* edges), sum/max rollups, manual/auto
+  badges, the `2h → 8s` odometer + delta badge when automation lands, and a total-duration
+  bar that names both totals it could mean: the summed work and the critical path.
+  Applied at mount it also tells layout to reserve room for what it draws, so a long label
+  never runs under a chip. `presetPipeline(g)` called after mount back-fills whatever's
+  already on screen instead of waiting for the next mutation. Writing your own preset:
+  docs/PRESETS.md.
 - **Sane viewport** — anchored (the focal node holds still; the graph reflows around
   it), zoom only on ctrl/cmd+scroll, `fitView()` when *you* ask. Past 150 elements,
   groups fully outside the visible rect stop being drawn at all.
@@ -135,6 +138,11 @@ marginx, marginy, solver}` — see **Layout** below),
 `a11y: false` to opt out of the ARIA layer, and `interaction: { tapToggle: false }` to
 turn off tap/click-to-toggle on container nodes (on by default; a tap that travels past
 a small slop radius counts as a pan and never toggles — touch-friendly by construction).
+`interaction: { click: false }` turns off the `nodeclick`/`edgeclick` events below, which
+are otherwise on whether or not `tapToggle` is.
+
+`preset` is `"pipeline"`, or an object when the preset takes options:
+`{ name: "pipeline", total: "sum" | "critical" | "both" }`.
 
 Every mutation returns an awaitable, cancelable handle that resolves `{canceled, applied}` —
 `applied` says whether the structural change actually landed in the store (`cancel()` only
@@ -286,6 +294,36 @@ g.children(id)   g.descendants(id)   g.roots()
 
 `g.node(id)` / `g.edge(id)` singular return the same kind of plain copy — mutating what
 they hand back never touches the store.
+
+**Click / select.** A clean tap or click publishes on the instance bus, with the raw
+pointer event attached. The same slop that keeps a pan from toggling a container keeps it
+from reading as a click, so these never fire mid-drag; a pinch kills the gesture outright.
+
+```js
+g.on("nodeclick", ({ id, event }) => inspector.show(id));
+g.on("edgeclick", ({ id }) => console.log("edge", id));   // stroke AND label are the hit area
+```
+
+Enter/Space on a focused node publishes the same `nodeclick`, so an inspector wired to it
+is reachable without a pointer.
+
+**Edge labels.** `edge.label` is a string, or an object when the message *is* the content
+(a sequence diagram, say) rather than a hint on a line:
+
+```js
+{ id: "e1", source: "api", target: "db", label: {
+    text: "SELECT … FOR UPDATE",
+    place: "start",   // 'mid' (default) | 'start' | 'end' — where along the path it rides
+    rotate: true,     // lay it along the line; default upright, and never upside down
+    pill: true,       // opaque backing plate instead of the background-colored halo
+    maxW: 220,        // truncation cap in px for this one label
+} }
+```
+
+Labels truncate at 90px by default. `mount(el, spec, { layout: { edgeLabelMaxW: 200 } })`
+moves that for the whole drawing (`preset: "pipeline"` raises it to 180 when you set none),
+and a per-edge `maxW` beats both. With the pipeline preset, `edge.data.duration` is drawn
+as a chip on the wire next to the label.
 
 **Director ops / storytelling.** Storyboards (and the same methods called directly)
 drive the presentation, not just the graph:
@@ -563,6 +601,25 @@ coordinate pass that repairs every relaxation move with isotonic regression, so
 mount(el, spec, { layout: { dir: "LR", nodesep: 28, ranksep: 56, marginx: 20, marginy: 20 } });
 g.layout({ dir: "TB" });    // relayout + animate into the new direction
 ```
+
+A node's box is measured from its label. `layout.measure` lets whatever decorates a node
+contribute to that measurement, so a corner chip and a long label stop fighting for the
+same pixels:
+
+```js
+mount(el, spec, { layout: { measure: {
+  extraWidth: (node, ctx) => (node.data && node.data.owner ? 44 : 0), // number, or a fn
+  extraHeight: 8,
+} } });
+```
+
+`extraWidth` is reserved **chrome**, not label room: it widens the box *and* comes out of
+what the label may fill, so the label truncates before it reaches your decoration. It grows
+the box only up to the usual 220px maximum — past that the label gives way instead. A node
+that declares both `w` and `h` opts out; one that declares only `w` keeps its width and
+still gets the reserve. `ctx` is `{nodes, cache}` — the whole node set, for chrome whose
+size depends on more than the node itself. `preset: "pipeline"` installs its own unless you
+set one, which is why a preset mount sizes nodes slightly larger than a bare one.
 
 All four directions (`LR`/`RL`/`TB`/`BT`) are solved top-to-bottom internally and
 transposed on the way out, so they are exactly as good as each other. Order stability

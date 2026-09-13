@@ -27,6 +27,25 @@ mkdirSync(metricdir, { recursive: true });
 // A metric bundle left in dist by an older checkout would still be published.
 rmSync(join(outdir, 'smv.core.esm.js'), { force: true });
 
+// The stylesheets ship as template literals, so esbuild's minifier never sees them as CSS
+// and their /* ... */ comments ride into every bundle — ~2KB gzip of prose that only the
+// source needs. This strips comments out of the `…CSS = `…`` constants for the MINIFIED
+// bundles (the unminified dist/smv.esm.js keeps them, same as it keeps JS comments).
+const stripCssComments = {
+  name: 'strip-css-comments',
+  setup(b) {
+    b.onLoad({ filter: /src[\\/].*\.js$/ }, (args) => {
+      const text = readFileSync(args.path, 'utf8');
+      if (!/CSS\s*=\s*`/.test(text)) return null;
+      return {
+        loader: 'js',
+        contents: text.replace(/(CSS\s*=\s*`)([^`]*)(`)/g, (m, open, css, close) =>
+          open + css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{2,}/g, '\n') + close),
+      };
+    });
+  },
+};
+
 async function build() {
   // full ESM bundle, dagre included, unminified
   await esbuild.build({
@@ -47,6 +66,7 @@ async function build() {
     globalName: 'SparkleMotion',
     minify: true,
     platform: 'browser',
+    plugins: [stripCssComments],
   });
   // index.js has named + default exports; esbuild assigns the whole module
   // namespace to the IIFE global. Unwrap so SparkleMotion.mount is callable.
@@ -70,6 +90,7 @@ async function build() {
     format: 'esm',
     minify: true,
     platform: 'browser',
+    plugins: [stripCssComments],
     external: ['./engine.js'],
   });
 }

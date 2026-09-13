@@ -83,6 +83,73 @@ function injectStyles(doc) {
 }
 ```
 
+## Reserving room for what you draw
+
+A node's box is measured from its label alone, which is how a chip parked in the corner
+ends up on top of a long one. `opts.layout.measure` is the seam that fixes it: a preset
+declares what it needs, layout hands it back as a wider/taller box, and the renderer
+truncates the label to the box **minus** that reserve, so the two can never collide.
+
+```js
+const OWNER_MEASURE = {
+  extraWidth: (node) => (node.data && node.data.owner ? 44 : 0),  // number, or per-node fn
+  extraHeight: 6,
+};
+
+mount(el, spec, { layout: { measure: OWNER_MEASURE } });
+```
+
+`extraWidth` is reserved chrome on BOTH sides (the label is centred, so it has to be), and
+a node that declares both `w` and `h` opts out of measurement entirely. The pipeline preset
+exports its own as `PIPELINE_MEASURE`, and `mount(..., { preset: "pipeline" })` installs it
+unless you set one; a preset applied after mount cannot retro-fit measurement, so pass it
+yourself if you need it:
+
+```js
+import { presetPipeline, PIPELINE_MEASURE } from "sparkle-motion-visualizer/preset-pipeline";
+const g = mount(el, spec, { layout: { measure: PIPELINE_MEASURE } });
+const preset = presetPipeline(g);
+```
+
+## The slots a node already has
+
+Four decorations can sit on one node, and they are kept out of each other's way by
+convention rather than by luck:
+
+| slot | what | drawn by |
+| --- | --- | --- |
+| top row, left gutter | status glyph (`data.status`) | the preset |
+| top row, right gutter | mode glyph, then the duration chip | the preset |
+| above the box, left end | the run's `×N` occupancy badge | the core run layer |
+| below the bottom edge | join pips | the core run layer |
+
+The chip row moves into the header strip of an expanded container, and on a plain box too
+short to hold it next to a vertically centred label it lifts into the gutter above — where
+it still clears the occupancy badge, which keeps that gutter's left end. A **container**
+never lifts: its chip is the rollup the condense odometer and delta badge animate, and that
+has to stay in the box. Put your own decoration somewhere else (the bottom row is free), or
+reserve for it with `layout.measure` above.
+
+`PIPELINE_MEASURE`'s hooks take `(node, ctx)`; with the `ctx` the core passes them they
+measure the duration the chip will actually show — including a `durationAgg` rollup, which
+lives on a container's children rather than on the container.
+
+## The pipeline preset's own options
+
+```js
+mount(el, spec, { preset: { name: "pipeline", total: "critical" } });
+presetPipeline(g, { total: "both" });        // the same options, after the fact
+```
+
+- `total: 'sum' | 'critical' | 'both'` — what the bottom bar reports. `'sum'` adds up every
+  root's declared work (the historical behaviour, a bare number). `'critical'` is the
+  longest chain through the graph, which is what a simulated run's `sim().duration` measures.
+  `'both'` is the default: the sum, with the critical path named beside it — and just the
+  sum when the two are equal, because a straight pipeline has nothing to disambiguate.
+
+The preset also draws `edge.data.duration` as a chip on the edge itself, and raises the
+edge-label truncation cap to 180px (`layout.edgeLabelMaxW`) unless the mount set one.
+
 ## Back-filling current state
 
 A preset applied *after* mount used to only see *future* commits: whatever was already on

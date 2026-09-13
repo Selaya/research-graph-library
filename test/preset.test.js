@@ -5,7 +5,8 @@ import { createTicker } from "../src/anim.js";
 import {
   formatDuration, aggregateDuration, effectiveDurationSec, deltaBadgeText,
   odometerValueAt, runOdometer, injectPresetStyles, applyPipelinePreset,
-  PRESET_STYLE_MARKER,
+  criticalPathSec, PIPELINE_MEASURE, PIPELINE_EDGE_LABEL_MAX_W,
+  PRESET_STYLE_MARKER, PRESET_CSS,
 } from "../src/preset-pipeline.js";
 
 // ---------------------------------------------------------------------------
@@ -271,6 +272,7 @@ function fakeInstance(initialSpec) {
   const bus = emitter();
   const ticker = createTicker({ manual: true });
   const nodeEls = new Map();
+  const edgeEls = new Map();
   let spec = initialSpec;
   let lastCommit = null; // mirrors g.layoutResult() — the real index.js keeps this in sync
 
@@ -289,6 +291,14 @@ function fakeInstance(initialSpec) {
           nodeEls.set(id, el);
         }
         return nodeEls.get(id);
+      },
+      edge(id) {
+        if (!edgeEls.has(id)) {
+          const el = fakeSvgEl("g");
+          el.setAttribute("data-id", id);
+          edgeEls.set(id, el);
+        }
+        return edgeEls.get(id);
       },
     },
     on: (type, fn) => bus.on(type, fn),
@@ -543,4 +553,243 @@ test("applyPipelinePreset: re-applying without destroying first reuses the exist
 
   h2.destroy();
   h1.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F21/F22/F23 — decoration slots and the measurement hook
+// ---------------------------------------------------------------------------
+
+const clsOf = (host, cls) => host.children.find((c) => c.attrs.class === cls);
+const xy = (el) => ({ x: Number(el.attrs.x), y: Number(el.attrs.y) });
+
+test("F21: the mode glyph is placed off the chip's measured width, so a wide chip never covers it", () => {
+  const spec = {
+    nodes: [
+      { id: "wide", data: { duration: "300ms", mode: "manual" } },
+      { id: "narrow", data: { duration: "2h", mode: "manual" } },
+    ],
+    edges: [],
+  };
+  const g = fakeInstance(spec);
+  const handle = applyPipelinePreset(g);
+  g.emit("commit", { nodes: rectsFrom(spec, 160) });
+
+  for (const id of ["wide", "narrow"]) {
+    const host = g.renderer.node(id);
+    const chip = clsOf(host, "smv-chip"), mode = clsOf(host, "smv-mode-badge");
+    // Both are text-anchor:end, so the mode glyph's own right edge must clear the chip's
+    // left edge — the chip text starts at (chip.x - its width).
+    assert.ok(xy(mode).x < xy(chip).x, `${id}: mode sits left of the chip`);
+    assert.equal(xy(mode).y, xy(chip).y, `${id}: one shared row`);
+  }
+  const wide = xy(clsOf(g.renderer.node("wide"), "smv-mode-badge")).x;
+  const narrow = xy(clsOf(g.renderer.node("narrow"), "smv-mode-badge")).x;
+  assert.ok(wide < narrow, "a wider chip pushes the mode glyph further left");
+  handle.destroy();
+});
+
+test("F23: a box too short for the chip row wears it above the box; a measured box keeps it inside", () => {
+  const spec = { nodes: [{ id: "a", data: { duration: "2h" } }], edges: [] };
+  const g = fakeInstance(spec);
+  const handle = applyPipelinePreset(g);
+
+  g.emit("commit", { nodes: { a: { x: 0, y: 0, w: 90, h: 36 } } });
+  assert.ok(xy(clsOf(g.renderer.node("a"), "smv-chip")).y < 0, "short box: the row lifts out of the way");
+
+  g.emit("commit", { nodes: { a: { x: 0, y: 0, w: 90, h: 44 } } });
+  assert.ok(xy(clsOf(g.renderer.node("a"), "smv-chip")).y > 0, "a measured box keeps the row inside");
+  handle.destroy();
+});
+
+test("F22/F23: PIPELINE_MEASURE reserves gutters for the chip/glyphs and a row of height", () => {
+  const plain = { id: "a" };
+  assert.equal(PIPELINE_MEASURE.extraWidth(plain), 0, "a node with nothing to decorate is untouched");
+  assert.equal(PIPELINE_MEASURE.extraHeight(plain), 0);
+
+  const chipped = { id: "b", data: { duration: "300ms" } };
+  assert.ok(PIPELINE_MEASURE.extraWidth(chipped) > 0);
+  assert.ok(PIPELINE_MEASURE.extraHeight(chipped) > 0);
+
+  // Both gutters are as wide as the wider side, because the label is centred.
+  assert.equal(PIPELINE_MEASURE.extraWidth(chipped) % 2, 0);
+  const withMode = { id: "c", data: { duration: "300ms", mode: "manual" } };
+  assert.ok(PIPELINE_MEASURE.extraWidth(withMode) > PIPELINE_MEASURE.extraWidth(chipped),
+    "a mode glyph widens the right gutter further");
+  assert.ok(PIPELINE_EDGE_LABEL_MAX_W > 90, "the preset raises the edge-label cap (F26)");
+});
+
+test("F21/F23: a container's rollup chip keeps its in-box slot — it never lifts out of the node", () => {
+  const spec = {
+    nodes: [
+      { id: "chassis", label: "Chassis", collapsed: true, durationAgg: "sum" },
+      { id: "weld", parent: "chassis", data: { duration: "20m" } },
+      { id: "paint", parent: "chassis", data: { duration: "10m" } },
+    ],
+    edges: [],
+  };
+  const g = fakeInstance(spec);
+  const host = g.renderer.node("chassis");
+  host.setAttribute("data-container", "");
+  host.setAttribute("data-collapsed", "");
+  const handle = applyPipelinePreset(g);
+
+  // A collapsed container is 36px tall by construction (viewstate sizes it like a plain
+  // node), but its chip is the rollup the condense odometer and delta badge anchor to.
+  g.emit("commit", { nodes: { chassis: { x: 0, y: 0, w: 140, h: 36 } } });
+  const chip = clsOf(host, "smv-chip");
+  assert.equal(chip.textContent, "30m", "the chip shows the durationAgg rollup");
+  assert.ok(xy(chip).y > 0, "collapsed container: the chip stays INSIDE the box");
+
+  host.removeAttribute("data-collapsed");
+  g.emit("commit", { nodes: { chassis: { x: 0, y: 0, w: 240, h: 120 } } });
+  assert.equal(xy(chip).y, 14, "expanded container: the chip rides the header strip");
+  handle.destroy();
+});
+
+test("F22: PIPELINE_MEASURE reserves for the rollup chip a container actually draws", () => {
+  const nodes = new Map([
+    ["chassis", { id: "chassis", label: "Chassis", durationAgg: "sum" }],
+    ["weld", { id: "weld", parent: "chassis", data: { duration: "20m" } }],
+    ["paint", { id: "paint", parent: "chassis", data: { duration: "10m" } }],
+  ]);
+  const chassis = nodes.get("chassis");
+  const ctx = { nodes, cache: new Map() };
+  // Without the graph context all a bare node can offer is its own (absent) duration...
+  assert.equal(PIPELINE_MEASURE.extraWidth(chassis), 0);
+  // ...with it, the rollup the chip will show is measured, so the label clears the chip.
+  assert.ok(PIPELINE_MEASURE.extraWidth(chassis, ctx) > 0, "a rollup container reserves width");
+  assert.ok(PIPELINE_MEASURE.extraHeight(chassis, ctx) > 0, "and a chip row of height");
+  // A leaf with its own duration is measured the same either way.
+  assert.equal(
+    PIPELINE_MEASURE.extraWidth(nodes.get("weld"), ctx),
+    PIPELINE_MEASURE.extraWidth(nodes.get("weld")),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// F24 — the total-duration bar reports sum vs critical path
+// ---------------------------------------------------------------------------
+
+function forkSpec() {
+  // ingest -> (slow | fast) : sum = 30+120+10 = 160s, critical path = 30+120 = 150s
+  return {
+    nodes: [
+      { id: "ingest", data: { duration: "30s" } },
+      { id: "slow", data: { duration: "120s" } },
+      { id: "fast", data: { duration: "10s" } },
+    ],
+    edges: [
+      { id: "e1", source: "ingest", target: "slow" },
+      { id: "e2", source: "ingest", target: "fast" },
+    ],
+  };
+}
+
+test("criticalPathSec: the heaviest chain, not the sum; loop edges are excluded", () => {
+  assert.equal(criticalPathSec(forkSpec()), 150);
+
+  const withLoop = forkSpec();
+  withLoop.edges.push({ id: "back", source: "slow", target: "ingest", loop: true, maxIterations: 3 });
+  assert.equal(criticalPathSec(withLoop), 150, "a back edge is not a longer path");
+
+  assert.equal(criticalPathSec({ nodes: [], edges: [] }), null);
+});
+
+test("criticalPathSec: a child's edges count against its top-level ancestor", () => {
+  const spec = {
+    nodes: [
+      { id: "grp" },
+      { id: "grp.a", parent: "grp", data: { duration: "1m" } },
+      { id: "grp.b", parent: "grp", data: { duration: "1m" } },
+      { id: "after", data: { duration: "30s" } },
+    ],
+    edges: [{ id: "e", source: "grp.b", target: "after" }],
+  };
+  assert.equal(criticalPathSec(spec), 2 * 60 + 30); // the container rolls up to 2m, then 30s
+});
+
+test("F24: total defaults to 'both' — the label stays the sum, the alt names the critical path", () => {
+  const spec = forkSpec();
+  const g = fakeInstance(spec);
+  const handle = applyPipelinePreset(g);
+  g.emit("commit", { nodes: rectsFrom(spec) });
+
+  const bar = g.el.children.find((c) => c.attrs.class === "smv-totalbar");
+  assert.equal(clsOf(bar, "smv-totalbar-label").textContent, formatDuration(160));
+  assert.equal(clsOf(bar, "smv-totalbar-key").textContent, "sum");
+  assert.equal(clsOf(bar, "smv-totalbar-alt").textContent, `critical ${formatDuration(150)}`);
+  handle.destroy();
+});
+
+test("F24: total:'critical' reports the path, total:'sum' is exactly the old bare number", () => {
+  const spec = forkSpec();
+  const crit = fakeInstance(spec);
+  const h1 = applyPipelinePreset(crit, { total: "critical" });
+  crit.emit("commit", { nodes: rectsFrom(spec) });
+  const cbar = crit.el.children.find((c) => c.attrs.class === "smv-totalbar");
+  assert.equal(clsOf(cbar, "smv-totalbar-label").textContent, formatDuration(150));
+  assert.equal(clsOf(cbar, "smv-totalbar-key").textContent, "critical");
+  assert.equal(clsOf(cbar, "smv-totalbar-alt").textContent, "");
+  h1.destroy();
+
+  const sum = fakeInstance(spec);
+  const h2 = applyPipelinePreset(sum, { total: "sum" });
+  sum.emit("commit", { nodes: rectsFrom(spec) });
+  const sbar = sum.el.children.find((c) => c.attrs.class === "smv-totalbar");
+  assert.equal(clsOf(sbar, "smv-totalbar-label").textContent, formatDuration(160));
+  assert.equal(clsOf(sbar, "smv-totalbar-key").textContent, "", "no key: one number, nothing to disambiguate");
+  assert.equal(clsOf(sbar, "smv-totalbar-alt").textContent, "");
+  h2.destroy();
+});
+
+test("F24: 'both' says nothing extra when the two totals agree (a straight pipeline)", () => {
+  const spec = {
+    nodes: [{ id: "a", data: { duration: "1m" } }, { id: "b", data: { duration: "2m" } }],
+    edges: [{ id: "e", source: "a", target: "b" }],
+  };
+  const g = fakeInstance(spec);
+  const handle = applyPipelinePreset(g);
+  g.emit("commit", { nodes: rectsFrom(spec) });
+  const bar = g.el.children.find((c) => c.attrs.class === "smv-totalbar");
+  assert.equal(clsOf(bar, "smv-totalbar-label").textContent, formatDuration(180));
+  assert.equal(clsOf(bar, "smv-totalbar-key").textContent, "");
+  assert.equal(clsOf(bar, "smv-totalbar-alt").textContent, "");
+  handle.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F26 — edge.data.duration as an edge chip
+// ---------------------------------------------------------------------------
+
+test("F26: edge.data.duration renders a chip on the edge, offset off the line", () => {
+  const spec = {
+    nodes: [{ id: "a" }, { id: "b" }],
+    edges: [
+      { id: "hop", source: "a", target: "b", data: { duration: "400ms" } },
+      { id: "plain", source: "a", target: "b" },
+    ],
+  };
+  const g = fakeInstance(spec);
+  const handle = applyPipelinePreset(g);
+  g.emit("commit", {
+    nodes: rectsFrom(spec),
+    edges: { hop: { points: [{ x: 0, y: 0 }, { x: 100, y: 0 }] }, plain: { points: [] } },
+  });
+
+  const chip = clsOf(g.renderer.edge("hop"), "smv-edge-chip");
+  assert.equal(chip.textContent, "400ms");
+  assert.equal(xy(chip).x, 50, "midpoint of the bend chain");
+  assert.notEqual(xy(chip).y, 0, "pushed off the line so it does not sit on the stroke");
+  assert.equal(clsOf(g.renderer.edge("plain"), "smv-edge-chip"), undefined, "no duration, no element");
+
+  // The chip goes away with its edge, and destroy() takes the rest.
+  g.setSpec({ nodes: spec.nodes, edges: [] });
+  g.emit("commit", { nodes: rectsFrom(spec), edges: {} });
+  assert.equal(g.renderer.edge("hop").children.length, 0, "chip removed when the edge loses its duration");
+  handle.destroy();
+});
+
+test("PRESET_CSS carries the new slots: edge chip + the total bar's key/alt spans", () => {
+  assert.match(PRESET_CSS, /\.smv-edge-chip\{/);
+  assert.match(PRESET_CSS, /\.smv-totalbar-key,\.smv-totalbar-alt\{/);
 });

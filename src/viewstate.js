@@ -13,7 +13,12 @@ import { sizeNode, textWidth } from "./measure.js";
 
 const BADGE_PAD = 10; // gutter reserved next to a collapsed container's ×N badge
 
-export function createViewState(store) {
+/**
+ * `measureOf` (F22/F23) is a live getter for `opts.layout.measure` — the hook that lets a
+ * preset reserve room for the chrome it parks on a node. Absent (every call before this
+ * existed) it measures exactly as it always did.
+ */
+export function createViewState(store, measureOf) {
   const collapsed = new Set();
   const pendingCollapse = new Set(); // spec said collapsed:true before children existed
   const seen = new Set();
@@ -116,6 +121,10 @@ export function createViewState(store) {
 
     const nodes = [];
     const sizes = {};
+    // F22/F23 — the measure hooks see the whole node set (a rollup chip's text is not on
+    // the node itself), with one cache shared across the pass.
+    const measure = typeof measureOf === "function" ? measureOf() : null;
+    const mctx = { nodes: store.nodes, cache: new Map() };
     for (const n of visible) {
       // F33 — `container: true` on the spec makes a node a container BEFORE its first
       // child exists: it draws as a header-only box and reaches the solver flagged, instead
@@ -123,11 +132,11 @@ export function createViewState(store) {
       const hasKids = kids.has(n.id);
       const container = hasKids || n.container === true;
       const isCollapsed = hasKids && collapsed.has(n.id);
-      const base = sizeNode(n);
+      const base = sizeNode(n, measure, measure && mctx);
       const count = isCollapsed ? descendants(n.id) : 0;
       // A collapsed container is a plain node that also has to carry its ×N badge.
       const w = isCollapsed ? base.w + Math.ceil(textWidth(`×${count}`)) + BADGE_PAD : base.w;
-      sizes[n.id] = { w, h: base.h };
+      sizes[n.id] = { w, h: base.h, reserve: base.reserve || 0 };
       nodes.push({
         ...n,
         id: n.id, w, h: base.h,
