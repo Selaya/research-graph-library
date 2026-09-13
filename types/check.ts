@@ -218,6 +218,12 @@ const steps: StoryboardStep[] = [
   { op: "condense", args: [["build.compile", "build.link"], { id: "build" }] },
   { op: "run.play", until: "deploy" },
   { op: "batch", steps: [{ op: "run.step" }, { op: "run.seek", ms: 0 }] },
+  // F5 — the run-shaped and structural ops.
+  { op: "run", args: [{ iterations: { retry: 2 }, hopMs: 120 }] },
+  { op: "run.reset" },
+  { op: "expandAll" },
+  { op: "collapseAll" },
+  { op: "layout", args: [{ dir: "TB" }] },
 ];
 const sb = g.storyboard(steps);
 sb.play();
@@ -272,6 +278,15 @@ g.renderer.dim("build", null);
 
 const recordOpts: MountOpts = { ticker: "manual", motion: "full", captions: false, autoplay: true };
 void recordOpts;
+
+// ---- F36: the "story finished" convention ---------------------------------------------
+const autoOpts: MountOpts = { autoplay: "auto" };
+void autoOpts;
+g.finished.then((r) => r.reason);
+g.finish().finish("live-done");
+g.on("finish", (e) => e.reason);
+// F6 — run events mirrored onto the instance bus outlive a g.run(opts) recompile.
+g.on("run:finish", (payload) => void payload);
 
 // ---- destroy --------------------------------------------------------------------------
 g.destroy();

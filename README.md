@@ -126,7 +126,8 @@ then `import { dagreSolver } from "sparkle-motion-visualizer/adapters/dagre"`.
 `mount(el, spec, opts) → g`. `el` is an element or a selector; `opts` takes
 `theme` (`auto`/`light`/`dark`), `layout` (`{dir:"LR"|"RL"|"TB"|"BT", nodesep, ranksep,
 marginx, marginy, solver}` — see **Layout** below),
-`animation` (`{duration, easing}`), `controls`, `preset`, `storyboard`, `autoplay`,
+`animation` (`{duration, easing}`), `controls`, `preset`, `storyboard`, `autoplay`
+(`true`, or `'auto'` to play only when the page URL carries `?auto=1`),
 `a11y: false` to opt out of the ARIA layer, and `interaction: { tapToggle: false }` to
 turn off tap/click-to-toggle on container nodes (on by default; a tap that travels past
 a small slop radius counts as a pan and never toggles — touch-friendly by construction).
@@ -152,7 +153,7 @@ g.addNode(node, { after })  g.addEdge(edge)  g.removeNode(id)  g.removeEdge(id)
 g.update(id, patch)         g.batch(fn)      g.style(fn)       g.theme(t)
 g.expand(id)   g.collapse(id)   g.expandAll()   g.collapseAll()
 g.condense([ids], newNode)   g.split(id, { nodes, edges })
-g.run(opts)    g.storyboard(steps)   g.timeline()
+g.run(opts)    g.storyboard(steps)   g.timeline()   g.finished   g.finish()
 g.camera(target)   g.highlight(sel)   g.clearHighlight()   g.caption(text, o)   g.cues()
 g.props({ id: { "--smv-fill": "#7c5cff" } })   // per-step overrides; null clears
 g.layout(opts) g.fitView()   g.bounds()  g.layoutResult()  g.spec()  g.destroy()
@@ -241,8 +242,10 @@ g.caption("Three manual steps become one.", { place: "bottom" });  g.caption(nul
 g.cues();   // every label + caption with its absolute ms offset — the voice-over sheet
 ```
 
-Every storyboard step — a mutation op name (the set mirrors `g`'s own methods, `condense`
-and `split` both included) or a director op — is validated when the storyboard is *built*,
+Every storyboard step — a mutation op name (the set mirrors `g`'s own methods:
+`condense`, `split`, `expandAll`, `collapseAll` and `layout` included), a run op
+(`run` to recompile like `g.run(opts)`, `run.reset`, `run.play`, `run.step`, `run.seek`) or
+a director op — is validated when the storyboard is *built*,
 not when it plays: an unknown op throws `GraphError('storyboard-op')` at the step's own
 index, recursing into `batch` children too (a typo three levels into a nested `batch`
 throws as step `"1.2.0"`, not a bare `TypeError` mid-playback), and a malformed `props`
@@ -264,10 +267,26 @@ frame renderer all agree on. Mount opts: `captions: false` hides the caption ove
 (cues stay truthful); `motion: "full"` and `ticker: "manual"` are recording mode.
 The full script-writing and video-recording guide is `docs/RECORDING.md`.
 
+**Knowing when the story ended.** `g.finished` is one promise per instance, resolving
+`{reason}` when the storyboard runs out of steps (`"storyboard"`), when the page calls
+`g.finish()` — the explicit end for a live-mode or hand-driven story, which has no last
+step to reach — or when the instance is destroyed (`"destroy"`, so awaiting it can never
+hang). `g.on("finish", …)` is the same beat as an event. With `autoplay: 'auto'` (plays
+only when the page URL has `?auto=1`) it is the whole unattended-playback convention:
+
+```js
+const g = mount("#pipe", spec, { storyboard: steps, autoplay: "auto" });
+window.smv = g;              // what npm run check-demos looks for
+await g.finished;            // { reason: "storyboard" }
+```
+
 `g.run()` (no args) returns the current run — compiling a default Mode A one on first call
 if none exists. `g.run(opts)`, with **any** opts object, even `{}`, destroys the current
 run and replaces it with a fresh one built from `opts`; call it bare unless you actually
-mean to restart the run.
+mean to restart the run. Your subscriptions survive that recompile — everything registered
+with `run.on(...)` is carried onto the new transport (`run.off()` still drops it), and
+every run event is mirrored onto the instance bus as `g.on("run:finish", …)` /
+`g.on("run:end", …)`, which outlives any number of recompiles.
 
 **Simulated runs (Mode A).** The default: `g.run()` compiles the whole schedule from
 declared `data.duration`s once, up front, so everything after that — seek, scrub, `step()`,
@@ -533,9 +552,12 @@ IIFE's 50KB budget held.
   approval, Kafka streaming, A/B experiments, onboarding, a kitchen ticket, an assembly
   line, a recipe, sequential-vs-parallel, a WebSocket bridge, and a live spec editor. Each
   is one self-contained page over `dist/smv.iife.min.js`, and each supports `?auto=1`, which
-  runs the whole story unattended and sets `window.__smvExit.done` at the end so
-  `npm run check-demos` can drive every page in headless chromium and fail on any console
-  error, `[smv:` misuse warning, or empty render.
+  runs the whole story unattended and signals the end so `npm run check-demos` can drive
+  every page in headless chromium and fail on any console error, `[smv:` misuse warning, or
+  empty render. The signal is `g.finished` — mount with `autoplay: 'auto'` (which honours
+  that `?auto=1`), park the instance on `window.smv`, and the checker awaits
+  `window.smv.finished`; a live page marks its own end with `g.finish()`. The older
+  page-rolled `window.__smvExit = {done, errors}` hook these demos ship is still honoured.
 - `demo/seq-*.html` — nine **animated sequence diagrams** (login, checkout with a 3-D Secure
   detour, OAuth PKCE, retries and a circuit breaker, a saga with compensations, group chat
   fan-out, cache-aside, a live distributed trace, GraphQL federation). They share

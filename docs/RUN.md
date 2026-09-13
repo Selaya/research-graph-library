@@ -18,11 +18,27 @@ g.run(opts);   // ALWAYS tear down the current transport and create a fresh one
 
 `g.run()` with **no argument** returns the transport already attached to `g`, creating one
 with default options only if none exists yet. `g.run(opts)` — even `g.run({})` — always
-destroys whatever transport is attached and builds a new one from `opts`, at time 0. This
-matters because destroying the old transport removes its ticker hook and abandons its
-listeners: anything you registered with `run.on(...)` on the old object stops firing, and
-you have to re-register on the object `g.run(opts)` hands back. If you just want to keep
-playing the run that already exists, call `g.run()`.
+destroys whatever transport is attached and builds a new one from `opts`, at time 0. If you
+just want to keep playing the run that already exists, call `g.run()`.
+
+**Your listeners survive the recompile.** Everything you registered with `run.on(type, fn)`
+is carried onto the fresh transport — the handle is conceptually the same run, and
+re-attaching after every `g.run(opts)` was pure ceremony. `run.off(type, fn)` (and the
+unsubscriber `on()` hands back) still drops it for good, from either handle. Methods are
+not carried: the *old* object is destroyed, so call `play()`/`seek()` on the one
+`g.run(opts)` returned (or just on `g.run()`).
+
+Every run event is also mirrored onto the instance bus under a `run:` prefix, so a listener
+registered on `g` outlives any number of recompiles — including ones a storyboard's own
+`run` op does:
+
+```js
+g.on("run:finish", ({ nodeId }) => console.log(nodeId, "done"));
+g.on("run:end", () => console.log("schedule over"));
+```
+
+`g.on("runstatus")` is the older, narrower channel (per-node status transitions, what the
+ARIA layer listens to); `run:*` is the whole vocabulary below, verbatim.
 
 `opts` (all optional): `{ iterations, rates, hopMs, dwell, mode }`. Omit `mode` (or pass
 `"simulate"`) for Mode A; `mode: "live"` switches to Mode B (`docs/LIVE.md`). The Mode A
@@ -235,6 +251,33 @@ exactly once, the moment it *enters* a node the rate applies to — already-elap
 never retroactively changes, and children spawned after inherit the rate their parent had.
 `step({token})` is built on this: it sets that token's rate to 0, isolating it. Mode B has no
 equivalent — `branch` is a documented no-op there (see `docs/LIVE.md`).
+
+## Driving a run from a storyboard
+
+Five storyboard ops reach the run, so the whole arc can live in the declared timeline
+(`g.cues()` and `smv-fit` see it) instead of in an `sb.on("step")` handler:
+
+| step | equals |
+|---|---|
+| `{ op: "run", args: [opts] }` | `g.run(opts)` — recompile. Omit `args` to recompile with the opts the run already has. Listeners survive it. |
+| `{ op: "run.reset", args: [opts?] }` | `run.reset(opts ?? run.options(), 0)` — the SAME transport, back at t = 0, keeping its identity, its listeners and (Mode B) its log. |
+| `{ op: "run.play", until? }` | `run.play({until})` — the only op the sequencer awaits. |
+| `{ op: "run.step", token? }` | `run.step({token})` |
+| `{ op: "run.seek", ms }` | `run.seek(ms)` |
+
+`run` and `run.reset` are discrete flips: zero duration on the cumulative timeline, and
+they put the run's clock back to 0, so the next `run.play` step is priced from there.
+
+```json
+{ "op": "run", "args": [{ "iterations": { "retry": 1 } }] },
+{ "op": "run.play", "until": "deploy" },
+{ "op": "caption", "args": ["Retry once more, with the flag flipped."] },
+{ "op": "run", "args": [{ "iterations": { "retry": 3 } }] },
+{ "op": "run.play" }
+```
+
+The fluent builder spells these `runCompile(opts)`, `runReset()`, `run({until})` (kept as
+`run.play`, which is what it has always meant), `runStep()` and `runSeek(ms)`.
 
 ## Event vocabulary
 

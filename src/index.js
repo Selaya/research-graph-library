@@ -66,6 +66,15 @@ function hasCameraOp(steps) {
   });
 }
 
+/** F36 — `autoplay: "auto"` defers to the page's own URL (`?auto=1`, or `auto=true`), which
+ *  is what every demo page hand-rolled; `true` always plays, anything else never does. */
+function wantsAutoplay(v, doc) {
+  if (v !== "auto") return !!v;
+  const view = doc && doc.defaultView;
+  const loc = (view && view.location) || (typeof location !== "undefined" ? location : null);
+  return /[?&]auto=(1|true)(&|$)/.test((loc && loc.search) || "");
+}
+
 /** Awaitable + cancelable handle handed back by every mutation (§5.3). */
 function thenable(promise, cancel) {
   const p = Promise.resolve(promise);
@@ -396,17 +405,55 @@ export function mount(el, spec = {}, opts = {}) {
   const tbus = emitter(); // transport-facing "something moved" channel
   const notify = () => tbus.emit("change", null);
 
+  // F36 — the "story finished" signal every page used to hand-roll as `window.__smvExit`.
+  // ONE promise per instance, settled the first time the storyboard runs out of steps, a
+  // page calls g.finish() (live mode has no declared end to reach), or the instance is
+  // destroyed — so awaiting it can never hang a headless checker.
+  const finishedD = deferred();
+  let finishedWith = null;
+  function markFinished(reason) {
+    if (finishedWith) return;
+    finishedWith = { reason };
+    bus.emit("finish", finishedWith);
+    finishedD.resolve(finishedWith);
+  }
+
   function disposeRun() {
     if (runRender) { runRender.destroy(); runRender = null; }
     if (runCtl) { runCtl.destroy(); runCtl = null; }
   }
+
+  /** F6 — every `run.on(type, fn)` registered through the handle, so a `g.run(opts)`
+   *  recompile can re-seat them on the fresh transport. The handle is conceptually the
+   *  SAME run (that is what `g.run()` returns), so its subscriptions outlive the compile
+   *  that replaced it — pages used to re-attach after every recompile. `off()` (and the
+   *  unsubscriber `on()` hands back) drops the entry, so nothing is resurrected. */
+  const runSubs = new Set();
 
   function createRun(o) {
     disposeRun();
     runOpts = o || {};
     runCtl = createRunTransport(internals, runOpts);
     runRender = createRunRender(internals, runCtl);
-    runCtl.on("*", notify);
+    // Raw handles, captured BEFORE the wrappers below: the run layer's own subscriptions
+    // (run-render's, and this one) belong to this transport and are rebuilt per compile —
+    // only what a CALLER registered is carried forward.
+    const rawOn = runCtl.on, rawOff = runCtl.off;
+    // One wildcard hop does both jobs: keep the transport bar in step, and mirror every
+    // run event onto the instance bus as `run:<type>` (F6) — `g.on("run:finish", …)`
+    // outlives any number of recompiles, the same way `g.on("runstatus")` always has.
+    rawOn("*", (type, payload) => { notify(); bus.emit("run:" + type, payload); });
+    for (const sub of runSubs) rawOn(sub.type, sub.fn);
+    runCtl.on = (type, fn) => {
+      const sub = { type, fn };
+      runSubs.add(sub);
+      const undo = rawOn(type, fn);
+      return () => { runSubs.delete(sub); undo(); };
+    };
+    runCtl.off = (type, fn) => {
+      for (const sub of runSubs) if (sub.type === type && sub.fn === fn) runSubs.delete(sub);
+      rawOff(type, fn);
+    };
     notify();
     return runCtl;
   }
@@ -457,6 +504,20 @@ export function mount(el, spec = {}, opts = {}) {
     switch (step.op) {
       case "wait":
         return waitMs(step.ms ?? args[0] ?? 0);
+      case "run": {
+        // Exactly g.run(opts): tear down and recompile. Listeners survive it (F6), so a
+        // story can recompile mid-play without the page re-attaching anything.
+        createRun(args[0] || runOpts);
+        return null;
+      }
+      case "run.reset": {
+        // The SAME transport, back at t=0 — identity, listeners and (in live mode) the
+        // event log all intact; `args[0]` overrides the compile inputs if given.
+        const r = ensureRun();
+        r.reset(args[0] || r.options(), 0);
+        notify();
+        return null;
+      }
       case "run.play": {
         const r = ensureRun();
         const u = untilOf(step);
@@ -571,7 +632,7 @@ export function mount(el, spec = {}, opts = {}) {
     sb = createStoryboard(host, sbSteps);
     sb.on("step", notify);
     sb.on("seek", notify);
-    sb.on("done", () => { sbPlaying = false; notify(); });
+    sb.on("done", () => { sbPlaying = false; notify(); markFinished("storyboard"); });
     return sb;
   }
 
@@ -596,7 +657,8 @@ export function mount(el, spec = {}, opts = {}) {
       case "wait": return Math.max(0, step.ms ?? a0 ?? 0);
       case "camera": return Math.max(0, (a0 && a0.dur) ?? CAMERA_MS);
       case "highlight": case "clearHighlight": case "caption": case "props":
-      case "run.step": case "run.seek": return 0;      // discrete state flips, D14/D16
+      case "run.step": case "run.seek":
+      case "run": case "run.reset": return 0;          // discrete state flips, D14/D16
       case "condense": case "split": return CHOREO_MS;
       case "batch": {
         const list = Array.isArray(step.steps) ? step.steps : (Array.isArray(a0) ? a0 : []);
@@ -615,6 +677,9 @@ export function mount(el, spec = {}, opts = {}) {
   function stepSlices() {
     let base = 0; // absolute run time at the start of the step being measured
     return (sbSteps || []).map((s) => {
+      // A recompile or a reset puts the run's own clock back to 0, so the next run.play
+      // step's share is measured from there — not from where the previous one stopped.
+      if (s.op === "run" || s.op === "run.reset") { base = 0; return { dur: 0, base }; }
       if (s.op === "run.play" && runCtl) {
         const u = untilOf(s);
         const end = u != null ? runCtl.timeOf(u) : runCtl.duration;
@@ -959,6 +1024,17 @@ export function mount(el, spec = {}, opts = {}) {
     /** The transport-facing view of where the story is (also what the bar renders from). */
     timeline,
 
+    /** F36 — the story's end, as one promise resolving `{reason}`: `"storyboard"` when the
+     *  script ran out of steps, `"finish"` (or whatever `g.finish(reason)` was given) when
+     *  a page marked it done by hand, `"destroy"` when the instance was torn down. Never
+     *  rejects, never re-arms; a second story on the same instance does not re-open it. */
+    finished: finishedD.promise,
+
+    /** Mark the story finished — the explicit end for a live-mode or hand-driven page,
+     *  which has no last storyboard step to reach. Idempotent: the first call wins, and it
+     *  also emits `"finish"` on the instance bus. */
+    finish(reason) { markFinished(reason || "finish"); return g; },
+
     /** One relayout for many ops. An op that throws mid-batch still has to leave through
      *  the drain: the ops that DID land are in the store and must be rendered, the
      *  awaitables already handed out must settle, and batchDefer/batchFocal/batchExtra
@@ -1076,6 +1152,7 @@ export function mount(el, spec = {}, opts = {}) {
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      markFinished("destroy");
       if (a11y) { a11y.destroy(); a11y = null; }
       if (tap) { tap.destroy(); tap = null; }
       if (transport) { transport.destroy(); transport = null; }
@@ -1127,7 +1204,7 @@ export function mount(el, spec = {}, opts = {}) {
     root.classList.add("smv-has-transport"); // the preset's total bar steps up out of the way
     transport = createTransport(root, controller);
   }
-  if (opts.autoplay && sb) { sbPlaying = true; sb.play(); }
+  if (wantsAutoplay(opts.autoplay, doc) && sb) { sbPlaying = true; sb.play(); }
 
   return g;
 }

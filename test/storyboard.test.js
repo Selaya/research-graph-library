@@ -376,3 +376,63 @@ test("timeline().build() returns a copy: chaining more steps after build() never
   assert.equal(first.length, 1, "the array already handed back is untouched by later chaining");
   assert.equal(t.build().length, 2);
 });
+
+// ---------------------------------------------------------------------------
+// F5 — `run` (compile), `run.reset`, `expandAll`, `collapseAll`, `layout` join the op
+// table, so a story can declare the beats pages used to drive from an sb.on("step") hook.
+// ---------------------------------------------------------------------------
+
+test("the F5 ops validate and are handed to the host like every other step", async () => {
+  const host = fakeHost();
+  const steps = [
+    { op: "run", args: [{ hopMs: 120 }] },
+    { op: "run.reset" },
+    { op: "expandAll" },
+    { op: "collapseAll" },
+    { op: "layout", args: [{ dir: "TB" }] },
+  ];
+  assert.doesNotThrow(() => createStoryboard(host, steps));
+  await createStoryboard(host, steps).play();
+  assert.deepEqual(
+    host.calls.filter((c) => c.type === "apply").map((c) => c.step.op),
+    ["run", "run.reset", "expandAll", "collapseAll", "layout"],
+  );
+});
+
+test("an options-shaped op given something that isn't an options object fails at build time", () => {
+  const host = fakeHost();
+  for (const bad of [{ op: "run", args: ["deploy"] }, { op: "run.reset", args: [5] }, { op: "layout", args: [["TB"]] }]) {
+    assert.throws(
+      () => createStoryboard(host, [bad]),
+      (err) => err instanceof GraphError && err.code === "storyboard-step" && /step 0/.test(err.message),
+      `${bad.op} rejects ${JSON.stringify(bad.args)}`,
+    );
+  }
+  // Nested in a batch it still names its own index, like every other build-time check.
+  assert.throws(
+    () => createStoryboard(host, [{ op: "batch", steps: [step("a"), { op: "run", args: [7] }] }]),
+    (err) => err instanceof GraphError && err.code === "storyboard-step" && /step 0\.1/.test(err.message),
+  );
+  // An absent/undefined options argument is fine — that is "reuse what the run has".
+  assert.doesNotThrow(() => createStoryboard(host, [{ op: "run" }, { op: "layout" }]));
+});
+
+test("the fluent builder spells the new ops runCompile/runReset/expandAll/collapseAll/layout", () => {
+  const built = timeline()
+    .runCompile({ iterations: { retry: 2 } })
+    .run({ until: "deploy" })
+    .runReset()
+    .expandAll()
+    .collapseAll()
+    .layout({ dir: "TB" })
+    .build();
+  assert.deepEqual(built, [
+    { op: "run", args: [{ iterations: { retry: 2 } }] },
+    { op: "run.play", args: [{ until: "deploy" }] },   // `.run()` still means run.play
+    { op: "run.reset" },
+    { op: "expandAll" },
+    { op: "collapseAll" },
+    { op: "layout", args: [{ dir: "TB" }] },
+  ]);
+  assert.doesNotThrow(() => createStoryboard(fakeHost(), built));
+});

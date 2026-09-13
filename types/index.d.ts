@@ -297,7 +297,10 @@ export interface MountOpts {
    *  by default; pass `{ tapToggle: false }` to opt out. */
   interaction?: { tapToggle?: boolean };
   storyboard?: StoryboardStep[];
-  autoplay?: boolean;
+  /** `true` plays the storyboard as soon as it is mounted; `'auto'` plays it only when the
+   *  page URL carries `?auto=1` (or `auto=true`) — the headless-verification convention
+   *  `g.finished` completes (F36). */
+  autoplay?: boolean | "auto";
   /** D15 (M4) — `'manual'` drives the shared ticker by hand (`g.ticker.tick(ms)`) instead
    *  of rAF, and stamps `data-smv-record` on the root to kill every CSS transition. What
    *  the deterministic frame renderer mounts with. */
@@ -535,6 +538,17 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "condense"; args: [string[], NodeSpec] }
   | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }] }
   | { op: "batch"; steps: StoryboardStep[] }
+  /** Every container open / closed in one commit — `g.expandAll()` / `g.collapseAll()`. */
+  | { op: "expandAll"; args?: [] }
+  | { op: "collapseAll"; args?: [] }
+  /** Re-lay the graph out with new layout opts — `g.layout(o)`. */
+  | { op: "layout"; args?: [LayoutOpts?] }
+  /** (Re)compile the run with these opts — `g.run(opts)`. Subscriptions survive it (F6).
+   *  Omit the argument to recompile with the opts the run already has. */
+  | { op: "run"; args?: [(SimRunOpts | LiveRunOpts)?] }
+  /** Re-seat the SAME transport (identity, listeners, live log) back at t = 0 —
+   *  `run.reset(opts, 0)`. Omit the argument to keep the current compile inputs. */
+  | { op: "run.reset"; args?: [(SimRunOpts | LiveRunOpts)?] }
   | { op: "run.play"; until?: string; args?: [{ until?: string }?] }
   | { op: "run.step"; token?: string; args?: [{ token?: string }?] }
   | { op: "run.seek"; ms?: number; args?: [number] }
@@ -605,7 +619,16 @@ export interface GraphEventMap {
    *  a run is not a spec mutation, so no `commit` announces it. a11y.js uses it to keep the
    *  accessible name in step with the live/simulated run. */
   runstatus: { id: string; status: "pending" | "active" | "done" };
+  /** F36 — the story ended: the storyboard ran out of steps (`"storyboard"`), a page called
+   *  `g.finish(reason)`, or the instance was destroyed (`"destroy"`). Fires at most once,
+   *  alongside `g.finished` resolving. */
+  finish: { reason: string };
 }
+
+/** F6 — every run event (`docs/RUN.md` "Event vocabulary") is also mirrored onto the
+ *  instance bus under a `run:` prefix — `g.on("run:finish", …)`, `g.on("run:end", …)` —
+ *  so a listener registered on `g` outlives any number of `g.run(opts)` recompiles. */
+export type RunMirrorEvent = `run:${string}`;
 
 // ---------------------------------------------------------------------------
 // Opaque low-level handles exposed on `g` for advanced use (export.js reads
@@ -771,6 +794,16 @@ export interface Graph {
 
   /** The transport-facing view of where the story is (also what `.smv-transport` renders from). */
   timeline(): Timeline;
+
+  /** F36 — the "story finished" signal, as ONE promise per instance: it resolves when the
+   *  storyboard runs out of steps (`{reason: "storyboard"}`), when a page calls
+   *  `g.finish()`, or when the instance is destroyed (`{reason: "destroy"}`), so awaiting
+   *  it can never hang. It never rejects and never re-arms. */
+  readonly finished: Promise<{ reason: string }>;
+  /** F36 — mark the story finished by hand: the explicit end for a live-mode or otherwise
+   *  hand-driven page, which has no last storyboard step to reach. Idempotent (the first
+   *  call wins) and it also emits `"finish"` on the instance bus. */
+  finish(reason?: string): Graph;
 
   /** M4/D13 — the scripted camera. The first call hands the viewport to the script, so
    *  relayout stops auto-refitting over composed shots and viewport state joins the G2
