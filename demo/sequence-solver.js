@@ -22,7 +22,10 @@
 //     mount(el, spec, { layout: { solver: seq.solver, dir: "TB", nodesep: 40, ranksep: 28 } });
 //
 // `seq.place(id, actor, row)` registers a placement (call it before addNode); `seq.forget(id)`
-// drops one; `seq.placement(id)` reads it back. Ids the solver has no placement for land in
+// drops one; `seq.placement(id)` reads it back. A node can also carry its own placement in
+// its spec data — `data: { seq: { actor, row } }` — which the shell passes through to the
+// solver, so nothing has to be registered out of band. Declare an actor that has no
+// activations yet with `container: true` and it still gets its own column. Ids the solver has no placement for land in
 // an extra column on the right, one per row, with a console.warn naming them. Opts read from
 // the layout opts: `nodesep` = horizontal gap between actor columns, `ranksep` = vertical gap
 // between rows, `marginx` / `marginy`, and `containerPad` (defaults mirror the shell's
@@ -68,14 +71,21 @@
       var byId = new Map();
       nodes.forEach(function (n) { byId.set(n.id, n); });
       var isContainer = new Set();
-      nodes.forEach(function (n) { if (n.parent !== undefined && byId.has(n.parent)) isContainer.add(n.parent); });
+      nodes.forEach(function (n) {
+        if (n.parent !== undefined && byId.has(n.parent)) isContainer.add(n.parent);
+        // An actor declared `container: true` is a lifeline from the start, even with no
+        // activations yet — it is not a leaf to park in the spare column.
+        if (n.container) isContainer.add(n.id);
+      });
 
       // 1. resolve every leaf to (col, row); unknown ids go to a spare column, stacked.
       var cells = new Map(); // id -> {col,row}
       var spareCol = actors.length, spareRow = 0, unknown = [];
       nodes.forEach(function (n) {
         if (isContainer.has(n.id)) return;
-        var p = placements.get(n.id);
+        // A placement registered through place(), or one the node carries in its own
+        // data (`data.seq = {actor, row}`), which the shell now hands the solver.
+        var p = placements.get(n.id) || fromData(n.data);
         if (p) { cells.set(n.id, { col: colOf(p.actor), row: p.row }); return; }
         if (n.parent !== undefined && actors.indexOf(n.parent) >= 0) {
           // A child of an actor with no explicit row: after the last row of that actor.
@@ -170,6 +180,11 @@
       solver: solver,
     };
     return api;
+  }
+
+  function fromData(d) {
+    var s = d && d.seq;
+    return s && typeof s.actor === "string" && typeof s.row === "number" ? s : null;
   }
 
   function num(v, d) { return typeof v === "number" && isFinite(v) ? v : d; }

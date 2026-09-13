@@ -135,6 +135,8 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-node[data-container]:not([data-collapsed]) rect.smv-node-stack{display:none}
 .smv-node[data-container]:not([data-collapsed]) text.smv-node-label{text-anchor:start}
 .smv-node[data-container][data-collapsed] rect.smv-node-header{display:none}
+/* A container with no children yet: a header-only box, outlined dashed. */
+.smv-node[data-container][data-empty] rect.smv-node-box{stroke-dasharray:4 3}
 
 /* Condense phase markers (D6). Static state deltas — the sequencing is on our clock (D1). */
 .smv-node[data-condense="src"]{--smv-stroke:var(--smv-condense)}

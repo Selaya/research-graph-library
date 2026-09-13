@@ -782,6 +782,22 @@ Everything else in the shell (breakCycles
 + pinning, back-edge/self-loop arcs, `padContainers`, bounds) is UNCHANGED. The dagre
 import is REMOVED from this file.
 
+**What the solver sees (F32/F33).** Input nodes are `{id, w, h, parent?, container?, data?}`.
+`data` is the view node's own spec data, or `opts.hint(node)`'s return when `hint` is a
+function (return `undefined` to pass nothing) — the channel a placement-driven solver reads
+per-node hints from, instead of an out-of-band map the page must fill before every
+`addNode`. `container: true` marks any container, including one a spec declared with
+`container: true` before anything parents to it (viewstate.js ORs `kids.has(id)` with the
+flag and marks the childless case `empty`, which render.js turns into `data-empty`). Both
+keys are additive: a solver that reads neither is unaffected, and every custom key on the
+opts still reaches the solver untouched by the spread.
+
+**An omitted container rect (F35).** `layout()` collects the ids the solver returned no rect
+for and hands them to `padContainers`, which then computes those containers from the
+children's bbox + `containerPad` ALONE. Unioning with the `{x:0,y:0}` placeholder would drag
+the container (and the drawing's bounds) towards the origin; a solver that places children
+and leaves containers to the shell is a supported way to write one.
+
 ## `src/adapters/dagre.js` — optional ESM adapter (integration agent)
 
 Exports `dagreSolver(input, opts)` (same solver contract, delegating to

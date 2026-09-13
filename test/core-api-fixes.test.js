@@ -277,3 +277,56 @@ test("g.condense()/g.split() resolve created/removed ids once the merge/split la
   assert.deepEqual(splitR.ids.removed, ["ab"]);
   g.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// F33 — `container: true` makes a node a container BEFORE it has any children.
+// ---------------------------------------------------------------------------
+
+/** Depth-first walk for the rendered `.smv-node` group of `id`. */
+function findNode(el, id) {
+  if (el.attrs && el.attrs["data-id"] === id && el.attrs.class === "smv-node") return el;
+  for (const c of el.children) { const hit = findNode(c, id); if (hit) return hit; }
+  return null;
+}
+
+function mountSeam(nodes, opts = {}) {
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, { nodes, edges: [] }, { ticker: "manual", layout: { dir: "LR" }, animation: { duration: 40 }, ...opts });
+  return { root, g };
+}
+
+test("F33: a childless node with container:true draws as an empty container", () => {
+  const { root, g } = mountSeam([{ id: "act", label: "auth", container: true }, { id: "n1", label: "N1" }]);
+  const el = findNode(root, "act");
+  assert.ok(el, "the container node is rendered");
+  assert.equal(el.hasAttribute("data-container"), true);
+  assert.equal(el.hasAttribute("data-empty"), true, "flagged empty so the theme can outline it");
+  assert.equal(el.hasAttribute("data-collapsed"), false);
+  const plain = findNode(root, "n1");
+  assert.equal(plain.hasAttribute("data-container"), false);
+  assert.equal(g.node("act").container, true, "the spec field round-trips through the store");
+  g.destroy();
+});
+
+test("F33: the empty container reaches the solver flagged, and loses `empty` once a child lands", async () => {
+  const seen = [];
+  const solver = (input, o) => {
+    seen.push(input.nodes.map((n) => ({ id: n.id, container: n.container, data: n.data })));
+    const nodes = {};
+    input.nodes.forEach((n, i) => { nodes[n.id] = { x: i * 200, y: 0, w: n.w, h: n.h }; });
+    return { nodes, edges: {}, order: [input.nodes.map((n) => n.id)] };
+  };
+  const { root, g } = mountSeam([{ id: "act", label: "auth", container: true, data: { col: 2 } }], {
+    layout: { dir: "LR", solver },
+  });
+  assert.deepEqual(seen[0], [{ id: "act", container: true, data: { col: 2 } }]);
+
+  await settle(g.addNode({ id: "act.1", label: "call", parent: "act" }), g);
+  const last = seen[seen.length - 1];
+  assert.equal(last.find((n) => n.id === "act").container, true, "still a container with a child");
+  const el = findNode(root, "act");
+  assert.equal(el.hasAttribute("data-container"), true);
+  assert.equal(el.hasAttribute("data-empty"), false, "no longer empty");
+  g.destroy();
+});

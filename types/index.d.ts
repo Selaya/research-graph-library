@@ -22,6 +22,11 @@ export interface NodeSpec {
   data?: Record<string, unknown>;
   /** Container starts collapsed. */
   collapsed?: boolean;
+  /** Treat this node as a container even before anything names it as a `parent` (F33):
+   *  it draws as a header-only box (`data-container` + `data-empty`) and reaches the
+   *  layout solver flagged `container: true`, instead of being a plain leaf until its
+   *  first child arrives. Ignored (harmlessly) once the node does have children. */
+  container?: boolean;
   join?: JoinPolicy;
   type?: string;
   iterate?: unknown;
@@ -197,6 +202,12 @@ export interface LayoutViewNode {
   w?: number;
   h?: number;
   parent?: string;
+  /** True for a container — one with children, or one declared with `NodeSpec.container`
+   *  before it has any (F33). Absent on leaves. */
+  container?: true;
+  /** The node's own `data`, or whatever `LayoutOpts.hint(node)` picked instead (F32), so a
+   *  placement-driven solver can read per-node hints. Absent when there is nothing to pass. */
+  data?: unknown;
 }
 
 export interface LayoutViewEdge {
@@ -205,7 +216,9 @@ export interface LayoutViewEdge {
   target: string;
 }
 
-/** What the shell hands a solver: acyclic, and no edge incident to a node with children. */
+/** What the shell hands a solver: acyclic, and no edge incident to a node with children.
+ *  Every custom key on `LayoutOpts` reaches the solver untouched, by spread — that is the
+ *  supported channel for a solver's own options. */
 export interface SolverInput {
   nodes: LayoutViewNode[];
   edges: LayoutViewEdge[];
@@ -246,6 +259,9 @@ export interface LayoutOpts {
   prevOrder?: string[][];
   /** The bend half of the same channel (LayoutResult.layers). Persist and pass both. */
   prevLayers?: string[][];
+  /** Pick what each node carries to the solver as `LayoutViewNode.data` (F32). Defaults to
+   *  the node's own `data`; return `undefined` to pass nothing for that node. */
+  hint?: (node: NodeSpec & { w?: number; h?: number; container?: true }) => unknown;
   /**
    * Pin the order of the drawing's DISCONNECTED components (e.g. several parallel
    * pipelines), which nothing else holds in place: with no edges between them, adding or

@@ -13,7 +13,11 @@
 //
 // This file is the SHELL around a pluggable solver: `opts.solver` (default `engineSolve`)
 // is handed an acyclic, cluster-edge-free graph and returns node rects, edge bend chains
-// and the per-rank order. `src/adapters/dagre.js` supplies the same contract on top of
+// and the per-rank order. Solver input nodes are
+// `{ id, w, h, parent?, container?, data? }` — `data` is the node's own spec data (or
+// `opts.hint(node)`'s pick of it), `container: true` marks a container INCLUDING one that
+// has no children yet. Every custom key on the layout opts reaches the solver untouched,
+// by spread. `src/adapters/dagre.js` supplies the same contract on top of
 // @dagrejs/dagre for anyone who wants the old engine back — the default path (and every
 // bundle) imports no dagre at all.
 //
@@ -69,20 +73,37 @@ export function layout(view, opts = {}) {
   if (Array.isArray(o.componentOrder)) {
     o.backLinks = realEdges.filter((e) => reversed.has(e.id)).map((e) => [e.source, e.target]);
   }
+  // F32 — the solver sees each node's `data` (or `opts.hint(node)`'s pick of it) and the
+  // `container` flag, so a placement-driven solver can read per-node hints instead of
+  // keeping its own out-of-band map. Additive only: the seam's older fields are untouched,
+  // and a key is omitted entirely when the node has nothing for it.
+  const hint = typeof o.hint === "function" ? o.hint : null;
+  const toSolver = (n) => {
+    const s = { id: n.id, w: n.w, h: n.h };
+    if (hasParents) s.parent = n.parent;
+    if (n.container === true) s.container = true;
+    const d = hint ? hint(n) : n.data;
+    if (d !== undefined) s.data = d;
+    return s;
+  };
   const solved = solver(
     {
-      nodes: nodes.map((n) => (hasParents ? { id: n.id, w: n.w, h: n.h, parent: n.parent } : { id: n.id, w: n.w, h: n.h })),
+      nodes: nodes.map(toSolver),
       edges: realEdges.filter((e) => !reversed.has(e.id)).map((e) => ({ id: e.id, source: e.source, target: e.target })),
     },
     o
   );
 
   const outNodes = {};
+  // F35 — ids the solver produced no rect for. A container among them gets its rect from
+  // its children alone (see padContainers); anything else keeps the origin fallback.
+  const unsolved = new Set();
   for (const n of nodes) {
     const d = (solved.nodes && solved.nodes[n.id]) || null;
+    if (!d) unsolved.add(n.id);
     outNodes[n.id] = d ? { x: d.x, y: d.y, w: d.w, h: d.h } : { x: 0, y: 0, w: n.w || 0, h: n.h || 0 };
   }
-  if (hasParents) padContainers(nodes, outNodes, { ...CONTAINER_PAD, ...(o.containerPad || {}) });
+  if (hasParents) padContainers(nodes, outNodes, { ...CONTAINER_PAD, ...(o.containerPad || {}) }, unsolved);
 
   const outEdges = {};
   for (const e of realEdges) {
@@ -141,7 +162,7 @@ export function layout(view, opts = {}) {
  * Deepest containers first, so a nested container is already padded when its parent
  * measures it.
  */
-function padContainers(nodes, out, pad) {
+function padContainers(nodes, out, pad, unsolved) {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const kids = new Map();
   for (const n of nodes) {
@@ -165,10 +186,15 @@ function padContainers(nodes, out, pad) {
       x1 = Math.max(x1, k.x + k.w / 2); y1 = Math.max(y1, k.y + k.h / 2);
     }
     if (x0 === Infinity) continue;
-    const l = Math.min(r.x - r.w / 2, x0 - pad.side);
-    const t = Math.min(r.y - r.h / 2, y0 - pad.top);
-    const rt = Math.max(r.x + r.w / 2, x1 + pad.side);
-    const b = Math.max(r.y + r.h / 2, y1 + pad.bottom);
+    // F35: a solver that returned nothing for this container has no opinion about where it
+    // goes, and the placeholder rect it fell back to sits at the origin — unioning with that
+    // would drag the container (and the drawing's bounds) towards (0,0). Derive it from the
+    // children's bbox alone instead.
+    const own = unsolved && unsolved.has(id) ? null : r;
+    const l = own ? Math.min(own.x - own.w / 2, x0 - pad.side) : x0 - pad.side;
+    const t = own ? Math.min(own.y - own.h / 2, y0 - pad.top) : y0 - pad.top;
+    const rt = own ? Math.max(own.x + own.w / 2, x1 + pad.side) : x1 + pad.side;
+    const b = own ? Math.max(own.y + own.h / 2, y1 + pad.bottom) : y1 + pad.bottom;
     out[id] = { x: (l + rt) / 2, y: (t + b) / 2, w: rt - l, h: b - t };
   }
 }

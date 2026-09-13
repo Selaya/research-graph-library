@@ -279,6 +279,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     setData(e.g, "data-mode", d.mode);
     setData(e.g, "data-container", st.container);
     setData(e.g, "data-collapsed", st.collapsed);
+    setData(e.g, "data-empty", st.empty);
     setData(e.g, "data-count", st.count);
     setProps(e.g, st.props);
     if (e.text.textContent !== st.text) e.text.textContent = st.text;
@@ -329,6 +330,9 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
         data: n.data,
         container: n.container === true || n.collapsed !== undefined || n.type === "group" ? true : null,
         collapsed: n.collapsed ? true : null,
+        // A container declared before it has any children (F33) — drawn as a header-only
+        // box, dashed, so "no activations yet" reads differently from an empty frame.
+        empty: n.empty === true ? true : null,
         count: n.count > 0 ? n.count : null,
         depth: n.depth || 0,
         text: truncate(String(n.label ?? id), Math.max(8, w - 2 * NODE_PAD_X)),
