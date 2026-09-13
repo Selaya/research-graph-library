@@ -77,8 +77,16 @@ function createSimTransport(internals, opts = {}) {
   if (Number.isFinite(opts.hopMs)) base.hopMs = opts.hopMs;
   if (typeof opts.dwell === "function") base.dwell = opts.dwell;
   let rates = (opts.rates || []).map((r) => ({ ...r }));
+  /** Extra seeds minted by inject() — a compile input like `rates`, so they survive every
+   *  recompile and round-trip through options()/reset() with the rest of them (F3). */
+  let entries = (opts.entries || []).map((e) => ({ id: e.id, at: +e.at || 0 }));
+  /** F7 — a bare speed() is PLAYBACK, not a compile input: it scales how fast the ticker
+   *  walks the declared timeline, exactly as it does in live mode, and leaves `duration`
+   *  (what a page reports as "this pipeline takes 3h 20m") alone. Only a `{branch}` speed
+   *  is a rate event, because only that one really re-times the work. */
+  let viewSpeed = Number.isFinite(opts.playbackSpeed) && opts.playbackSpeed >= 0 ? opts.playbackSpeed : 1;
 
-  let sim = compileRun(store.spec(), { ...base, rates });
+  let sim = compileRun(store.spec(), { ...base, rates, entries });
   let t = 0;              // virtual pipeline time, ms
   let cursor = 0;         // # of events at/below t already re-emitted
   let playing = false;
@@ -95,11 +103,28 @@ function createSimTransport(internals, opts = {}) {
   }
 
   function recompile() {
-    sim = compileRun(store.spec(), { ...base, rates });
+    const prev = sim;
+    sim = compileRun(store.spec(), { ...base, rates, entries });
     dirty = false;
     if (t > sim.duration) t = sim.duration;
     syncCursor();
+    if (prev && t > 0) replayBacklog(prev);
     bus.emit("recompile", { time: t, duration: sim.duration });
+  }
+
+  /** F4 — a node whose compiled events are ALREADY behind the cursor (added mid-run, or
+   *  injected at a past instant) would otherwise never light up: forward playback only
+   *  re-emits what it crosses, and the scrub-back path is deliberately silent (D8). So
+   *  after a recompile, replay the backlog for nodes the previous schedule had nothing for
+   *  at or below `t` — new to the story, so nothing can be firing twice. */
+  function replayBacklog(prev) {
+    const seen = new Set();
+    for (const ev of prev.events) { if (ev.t > t) break; if (ev.nodeId != null) seen.add(ev.nodeId); }
+    for (const ev of sim.events) {
+      if (ev.t > t) break;
+      if (ev.nodeId == null || seen.has(ev.nodeId)) continue;
+      bus.emit(ev.type, ev);
+    }
   }
 
   /** Lazy: a graph mutation only costs a recompile when someone actually samples. */
@@ -147,7 +172,7 @@ function createSimTransport(internals, opts = {}) {
     if (!playing) return;
     const dt = now - lastNow;
     lastNow = now;
-    advanceTo(t + (dt > 0 ? dt : 0));
+    advanceTo(t + (dt > 0 ? dt * viewSpeed : 0));
     bus.emit("tick", { time: t, duration: current().duration });
     if (satisfied()) endPlay();
   }
@@ -184,11 +209,30 @@ function createSimTransport(internals, opts = {}) {
 
   function speed(factor, o = {}) {
     if (!(Number.isFinite(factor) && factor >= 0)) return t;
-    rates.push({ t, scope: o && o.branch != null ? o.branch : "*", factor });
-    recompile();
-    bus.emit("speed", { factor, branch: (o && o.branch) ?? null, time: t });
+    const branch = o && o.branch != null && o.branch !== "*" ? o.branch : null;
+    if (branch == null) viewSpeed = factor;      // playback only — the schedule is untouched
+    else { rates.push({ t, scope: branch, factor }); recompile(); }
+    bus.emit("speed", { factor, branch, time: t });
     if (playing && satisfied()) endPlay();
     return t;
+  }
+
+  /** F3 — mint a token at `nodeId` on the compiled clock. `at` defaults to now; the
+   *  schedule is recompiled (and extended) around it, and the seed is remembered, so it
+   *  survives later recompiles exactly as a `rates` entry does. A seed in the past replays
+   *  its backlog through replayBacklog above, so the node lights up rather than appearing
+   *  already finished. */
+  function inject(nodeId, o = {}) {
+    if (destroyed) return t;
+    if (!store.hasNode(nodeId)) {
+      console.warn(`[smv:run] inject("${nodeId}") — no node "${nodeId}" in the current graph; ` +
+        `the seed is kept and takes effect if "${nodeId}" is added later.`);
+    }
+    const at = Math.max(0, Number.isFinite(+(o && o.at)) ? +o.at : t);
+    entries.push({ id: nodeId, at });
+    recompile();
+    bus.emit("inject", { nodeId, at, time: t });
+    return at;
   }
 
   /** step() = next boundary across all tokens; step({token}) = that branch's next boundary.
@@ -219,6 +263,8 @@ function createSimTransport(internals, opts = {}) {
     if (Number.isFinite(o.hopMs)) base.hopMs = o.hopMs;
     if (typeof o.dwell === "function") base.dwell = o.dwell;
     rates = (o.rates || []).map((r) => ({ ...r }));
+    entries = (o.entries || []).map((e) => ({ id: e.id, at: +e.at || 0 }));
+    viewSpeed = Number.isFinite(o.playbackSpeed) && o.playbackSpeed >= 0 ? o.playbackSpeed : 1;
     t = 0;
     recompile();
     advanceTo(time, false); // silent: a restore is a state jump, not a re-run (D8)
@@ -289,7 +335,7 @@ function createSimTransport(internals, opts = {}) {
   }
 
   return {
-    play, pause, seek, speed, step, timeOf, reset,
+    play, pause, seek, speed, step, timeOf, reset, inject,
     /** Force a recompile against the live spec (used after a storyboard restore). */
     reload() { dirty = true; return current().duration; },
     get playing() { return playing; },
@@ -298,9 +344,22 @@ function createSimTransport(internals, opts = {}) {
     get promise() { return pending ? pending.promise : Promise.resolve({ canceled: false }); },
     time: () => t,
     state: () => current().stateAt(t),
-    sim: () => current(),
+    /** `declared` is the compiled timeline's own length (= `duration`, unmoved by
+     *  playback); `playback` is how long that takes on the wall clock at the current bare
+     *  speed() multiplier — Infinity at speed 0, which is a freeze (F7). */
+    sim: () => {
+      const s = current();
+      s.declared = s.duration;
+      s.playback = viewSpeed > 0 ? s.duration / viewSpeed : Infinity;
+      return s;
+    },
+    /** The playback multiplier a bare speed() set (1 = real declared time). */
+    playbackSpeed: () => viewSpeed,
     /** The live compile inputs, for a storyboard snapshot's `runOpts` (G2). */
-    options: () => ({ ...base, rates: rates.map((r) => ({ ...r })) }),
+    options: () => ({
+      ...base, rates: rates.map((r) => ({ ...r })),
+      entries: entries.map((e) => ({ ...e })), playbackSpeed: viewSpeed,
+    }),
     on: (type, fn) => bus.on(type, fn),
     off: (type, fn) => bus.off(type, fn),
     destroy() {
@@ -638,7 +697,12 @@ function createLiveTransport(internals, opts = {}) {
     now: () => frontier,
     log: () => log.map((e) => ({ ...e })),
     state: () => stateAt(t),
-    sim: () => ({ duration: frontier, events: log.map((e) => ({ ...e })), stateAt }),
+    sim: () => ({
+      duration: frontier, declared: frontier, playback: viewSpeed > 0 ? frontier / viewSpeed : Infinity,
+      events: log.map((e) => ({ ...e })), stateAt,
+    }),
+    /** The playback multiplier speed() set — the same reading as Mode A's (F7). */
+    playbackSpeed: () => viewSpeed,
     /** Carries the LOG, not just the compile inputs: a storyboard snapshot/restore pair
      *  (`reset(options(), time)`) would otherwise silently delete a live run's history. */
     options: () => ({ hopMs, mode: "live", log: log.map((e) => ({ ...e })) }),

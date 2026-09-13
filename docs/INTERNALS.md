@@ -254,7 +254,14 @@ compileRun(spec, opts) → sim
 ```
 
 - `spec` = a `store.spec()` snapshot. `opts = { iterations?: {[edgeId]: n} (≤ maxIterations),
-  rates?: [{t, scope: nodeId|'*', factor}], hopMs=300, dwell?: (sec|null, ctx) => ms }`.
+  rates?: [{t, scope: nodeId|'*', factor}], hopMs=300, dwell?: (sec|null, ctx) => ms,
+  entries?: [{id, at}] }`. `entries` are extra seed tokens (`run.inject`, F3); a node's own
+  `data.entry: true` / `data.startAt` declare the same thing in the spec (F3/F4). An edge's
+  `data.duration` is its hop time, paced by the node formula, `hopMs` otherwise (F8); a
+  container's `entry: [ids]`/`exit: [ids]` expand one spec edge into several engine edges
+  that keep its `id` and carry a unique `key` for cycle/loop bookkeeping (F9); `data.fail`
+  may be `{reason, retries, recover}` and a `loop` edge may be `onFail: true`, which makes
+  'failed' terminal only once the retry budget is spent (F1).
 - Default pacing: `dwellMs = 300 + 1200 * (sec / maxSecInGraph)`, 600 when the node has
   no `data.duration`. Rates: a token entering node X multiplies its inherited rate by
   every applicable rate event; rate divides dwell AND hop times for that token's branch

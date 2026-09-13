@@ -11,8 +11,9 @@ export class GraphError extends Error {
 const NODE_FIELDS = [
   "id", "label", "parent", "data", "collapsed", "join", "type",
   "iterate", "children", "durationAgg", "w", "h", "groups",
+  "entry", "exit",   // container ports the run engine attaches incident edges to (F9)
 ];
-const EDGE_FIELDS = ["id", "source", "target", "loop", "maxIterations", "label", "data", "weight"];
+const EDGE_FIELDS = ["id", "source", "target", "loop", "maxIterations", "label", "data", "weight", "onFail"];
 
 function pick(obj, fields) {
   const out = {};

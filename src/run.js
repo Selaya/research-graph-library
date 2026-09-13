@@ -53,7 +53,8 @@ function holds(seg, t) {
  * compileRun(spec, opts) -> sim
  *   spec = a store.spec() snapshot
  *   opts = { iterations?: {[edgeId]: n}, rates?: [{t, scope: nodeId|'*', factor}],
- *            hopMs = 300, dwell?: (sec|null, ctx) => ms }
+ *            hopMs = 300, dwell?: (sec|null, ctx) => ms,
+ *            entries?: [{ id, at }]  // extra seeds minted at `at` ms (run.inject, F3) }
  * Deterministic given (spec, opts).
  */
 export function compileRun(spec = {}, opts = {}) {
@@ -94,31 +95,62 @@ export function compileRun(spec = {}, opts = {}) {
     }
     return undefined;
   };
-  function attach(id, kind) {
+  /** F9 — declared ports: `entry: [ids]` / `exit: [ids]` on a container spec name the
+   *  children an incoming/outgoing edge attaches to, instead of the single inferred one.
+   *  Any descendant is accepted (not just a direct child); an id from outside the
+   *  container is a spec mistake, so it warns and is dropped. */
+  function declaredPorts(id, kind) {
+    const raw = nodes.get(id)[kind];
+    if (!Array.isArray(raw) || !raw.length) return null;
+    const out = [];
+    for (const pid of raw) {
+      if (nodes.has(pid) && branchOf(pid, id) !== undefined) { if (!out.includes(pid)) out.push(pid); }
+      else console.warn(`[smv:run] container "${id}" declares ${kind} "${pid}", which is not inside it — ignored`);
+    }
+    return out.length ? out : null;
+  }
+  /** Every leaf an edge incident to `id` attaches to. One entry/exit unless the container
+   *  declares several, so the historical single-port behaviour is exactly the default. */
+  function attachAll(id, kind) {
     const key = `${id} ${kind}`;
     if (attachCache.has(key)) return attachCache.get(key);
-    attachCache.set(key, id); // also stops a malformed containment cycle recursing forever
+    attachCache.set(key, [id]); // also stops a malformed containment cycle recursing forever
     const list = childrenOf.get(id) || [];
-    let out = id;
+    let out = [id];
     if (list.length) {
-      // entry = a branch nothing inside points at; exit = a branch that points at nothing inside.
-      const blocked = new Set();
-      for (const e of rawEdges) {
-        const bs = branchOf(e.source, id), bt = branchOf(e.target, id);
-        if (bs === undefined || bt === undefined || bs === bt) continue;
-        blocked.add(kind === "entry" ? bt : bs);
+      let picks = declaredPorts(id, kind);
+      if (!picks) {
+        // entry = a branch nothing inside points at; exit = a branch that points at nothing inside.
+        const blocked = new Set();
+        for (const e of rawEdges) {
+          const bs = branchOf(e.source, id), bt = branchOf(e.target, id);
+          if (bs === undefined || bt === undefined || bs === bt) continue;
+          blocked.add(kind === "entry" ? bt : bs);
+        }
+        const pick = list.find((c) => !blocked.has(c));
+        picks = [pick !== undefined ? pick : (kind === "entry" ? list[0] : list[list.length - 1])];
       }
-      const pick = list.find((c) => !blocked.has(c));
-      out = attach(pick !== undefined ? pick : (kind === "entry" ? list[0] : list[list.length - 1]), kind);
+      out = [];
+      for (const p of picks) for (const r of attachAll(p, kind)) if (!out.includes(r)) out.push(r);
+      if (!out.length) out = [id];
     }
     attachCache.set(key, out);
     return out;
   }
-  const edges = rawEdges.map((e) => {
-    const source = attach(e.source, "exit");
-    const target = attach(e.target, "entry");
-    return source === e.source && target === e.target ? e : { ...e, source, target };
-  });
+  // One spec edge can now become SEVERAL engine edges (a fan-out into a multi-entry
+  // container, a join out of a multi-exit one). They keep the spec's `id` — so segments,
+  // `loop` events and `opts.iterations` still name the arc the reader drew — and carry a
+  // unique `key` for the structural bookkeeping (cycle cutting, consumed-loop tracking).
+  let edgeSeq = 0;
+  const edges = [];
+  for (const e of rawEdges) {
+    const srcs = attachAll(e.source, "exit");
+    const tgts = attachAll(e.target, "entry");
+    const one = srcs.length === 1 && tgts.length === 1;
+    for (const source of srcs) {
+      for (const target of tgts) edges.push({ ...e, source, target, key: one ? e.id : `${e.id}#${edgeSeq++}` });
+    }
+  }
 
   // ---- untagged cycles ----
   // The store accepts a cycle that carries no `loop: true` (cycles.js renders one as a
@@ -128,18 +160,19 @@ export function compileRun(spec = {}, opts = {}) {
   // layout does and treat the back edge as a zero-iteration loop — out of `inNonLoop`, and
   // out of the token flow. Explicit `loop: true` edges keep their own (iterating) path.
   const back = new Set();
-  for (const id of breakCycles([...nodes.values()], edges)) {
-    const e = edges.find((x) => x.id === id);
-    if (e && !e.loop) back.add(id);
+  const byKey = new Map(edges.map((e) => [e.key, e]));
+  for (const key of breakCycles([...nodes.values()], edges.map((e) => ({ id: e.key, source: e.source, target: e.target, loop: e.loop })))) {
+    const e = byKey.get(key);
+    if (e && !e.loop) back.add(key);
   }
-  for (const e of edges) if (!e.loop && e.source === e.target) back.add(e.id); // cycles.js ignores self-loops
+  for (const e of edges) if (!e.loop && e.source === e.target) back.add(e.key); // cycles.js ignores self-loops
 
   const outNormal = new Map();
   const outLoop = new Map();
   const inNonLoop = new Map();
   for (const id of nodes.keys()) { outNormal.set(id, []); outLoop.set(id, []); inNonLoop.set(id, []); }
   for (const e of edges) {
-    if (back.has(e.id)) continue;
+    if (back.has(e.key)) continue;
     (e.loop ? outLoop : outNormal).get(e.source).push(e);
     if (!e.loop) inNonLoop.get(e.target).push(e);
   }
@@ -148,6 +181,14 @@ export function compileRun(spec = {}, opts = {}) {
   // before the discrete-event queue that produces the rest of the schedule even exists) ----
   const events = [];
   const emit = (ev) => { events.push(ev); };
+  /** A duration was given but didn't parse (bad string, negative, wrong type): that's
+   *  silent data loss otherwise. Say so once per compile, both to the console and as a
+   *  'warn' event a caller on the run bus can act on (run-transport.js forwards every sim
+   *  event by its `type`, so this needs no extra plumbing there). */
+  function badDuration(kind, id, raw, fallback) {
+    console.warn(`compileRun: ${kind} "${id}" has an unparseable duration (${JSON.stringify(raw)}); falling back to ${fallback}`);
+    emit({ t: 0, type: "warn", [kind === "node" ? "nodeId" : "edgeId"]: id, message: "unparseable duration", value: raw });
+  }
 
   // ---- pacing ----
   const hopMs = Number.isFinite(opts.hopMs) && opts.hopMs >= 0 ? opts.hopMs : DEFAULT_HOP_MS;
@@ -156,16 +197,20 @@ export function compileRun(spec = {}, opts = {}) {
   for (const n of nodes.values()) {
     const raw = n.data && n.data.duration;
     const s = parseDuration(raw);
-    // A duration was given but didn't parse (bad string, negative, wrong type): that's
-    // silent data loss otherwise — it falls back to the same DWELL_NO_DURATION as a node
-    // with no duration at all. Say so once per node per compile, both to the console and
-    // as a 'warn' event a caller listening on the run bus can act on (run-transport.js
-    // forwards every sim event by its `type`, so this needs no extra plumbing there).
-    if (s == null && raw != null) {
-      console.warn(`compileRun: node "${n.id}" has an unparseable duration (${JSON.stringify(raw)}); falling back to the ${DWELL_NO_DURATION}ms default`);
-      emit({ t: 0, type: "warn", nodeId: n.id, message: "unparseable duration", value: raw });
-    }
+    if (s == null && raw != null) badDuration("node", n.id, raw, `the ${DWELL_NO_DURATION}ms default`);
     secOf.set(n.id, s);
+    if (s != null && s > maxSec) maxSec = s;
+  }
+  // F8 — an edge may declare its own crossing time in the SAME grammar, paced by the same
+  // formula as a node dwell, so a 1ms local call and a 400ms cross-region call read
+  // differently. `hopMs` stays the default for an edge that declares nothing; declared edge
+  // times count towards maxSec, so a five-minute wire compresses the boxes, not vice versa.
+  const hopSecOf = new Map();
+  for (const e of rawEdges) {
+    const raw = e.data && e.data.duration;
+    const s = parseDuration(raw);
+    if (s == null && raw != null) badDuration("edge", e.id, raw, "the hopMs default");
+    hopSecOf.set(e.id, s);
     if (s != null && s > maxSec) maxSec = s;
   }
   // ---- declared failure (Mode A's counterpart to live mode's run.fail(id)) ----
@@ -173,10 +218,35 @@ export function compileRun(spec = {}, opts = {}) {
   // declared truth this mode compiles. Truthy = this step runs its dwell and then fails;
   // a string is carried through as the `reason` on the emitted event (nothing else reads
   // it — a reason is annotation, not state).
-  const failReason = new Map(); // nodeId -> string | undefined, present iff the node fails
+  // The object form `{ reason, retries, recover }` (F1) adds the retry budget: `retries: n`
+  // means n more attempts after the first, and 'failed' only becomes terminal once they are
+  // spent. `recover: true` makes that last attempt succeed instead ("fail, retry, pass").
+  // `fail: true` / `fail: "reason"` keep exactly today's behaviour: one attempt, terminal.
+  const failSpec = new Map(); // nodeId -> {reason, retries, declared, recover}
   for (const n of nodes.values()) {
     const f = n.data && n.data.fail;
-    if (f) failReason.set(n.id, typeof f === "string" ? f : undefined);
+    if (!f) continue;
+    if (typeof f === "object") {
+      const r = Number(f.retries);
+      const declared = Number.isFinite(r) && r >= 0;
+      failSpec.set(n.id, {
+        reason: typeof f.reason === "string" ? f.reason : undefined,
+        retries: declared ? Math.floor(r) : 0, declared, recover: !!f.recover,
+      });
+    } else failSpec.set(n.id, { reason: typeof f === "string" ? f : undefined, retries: 0, declared: false, recover: false });
+  }
+  /** F4 — when a seed's token appears on the compiled clock. A number is ms; a string goes
+   *  through the duration grammar (seconds), so `startAt: "2s"` reads like everything else. */
+  function startAtOf(n) {
+    const raw = n.data && n.data.startAt;
+    if (raw == null) return 0;
+    const sec = typeof raw === "number" ? raw / 1000 : parseDuration(raw);
+    if (sec == null || !(sec >= 0)) {
+      console.warn(`[smv:run] node "${n.id}" has an unparseable startAt (${JSON.stringify(raw)}); seeding at 0`);
+      emit({ t: 0, type: "warn", nodeId: n.id, message: "unparseable startAt", value: raw });
+      return 0;
+    }
+    return sec * 1000;
   }
 
   const dwellFn = typeof opts.dwell === "function" ? opts.dwell : null;
@@ -190,6 +260,14 @@ export function compileRun(spec = {}, opts = {}) {
     }
     dwellOf.set(id, ms);
   }
+  const paced = (sec) => DWELL_BASE + DWELL_SPAN * (maxSec > 0 ? sec / maxSec : 0);
+  const hopMsOf = new Map();
+  for (const e of rawEdges) {
+    const sec = hopSecOf.get(e.id);
+    hopMsOf.set(e.id, sec == null ? hopMs : paced(sec));
+  }
+  /** This edge's crossing time in ms: its own declared duration, else the global hopMs. */
+  const hopFor = (e) => { const v = hopMsOf.get(e.id); return v == null ? hopMs : v; };
 
   // ---- rates ----
   // A rate event folds into a token's multiplier ONCE (tracked per token, inherited by
@@ -248,9 +326,17 @@ export function compileRun(spec = {}, opts = {}) {
   }
 
   function newToken(rate, applied, loopsUsed, parentId) {
-    const tk = { id: `t${tokenSeq++}`, rate, applied, loopsUsed, parentId, segments: [], endT: Infinity };
+    const tk = { id: `t${tokenSeq++}`, rate, applied, loopsUsed, parentId, segments: [], endT: Infinity, attempts: new Map() };
     tokens.push(tk);
     return tk;
+  }
+  /** An `onFail: true` loop edge is the failing node's retry arc: it fires ONLY out of a
+   *  failure (exitNode skips it), and its iteration budget is that node's retry budget. */
+  const onFailEdge = (id) => { for (const e of outLoop.get(id) || []) if (e.onFail) return e; return null; };
+  function retriesFor(nodeId, fs) {
+    if (fs.declared) return fs.retries;
+    const e = onFailEdge(nodeId);
+    return e ? iterationsFor(e) : 0;
   }
 
   function applyRates(tk, nodeId, t) {
@@ -308,30 +394,66 @@ export function compileRun(spec = {}, opts = {}) {
       // A declared failure runs the dwell in full and then ends here: no 'finish', no
       // loop, no fan-out. The token is closed rather than stranded, so a failing branch
       // reports the run 'done' instead of 'stalled' — nothing is still moving.
-      if (failReason.has(nodeId)) {
-        const ev = { t: t + d, type: "fail", tokenId: tk.id, nodeId };
-        const reason = failReason.get(nodeId);
-        if (reason !== undefined) ev.reason = reason;
-        emit(ev);
-        noteFail(nodeId, t + d);
-        endToken(tk, t + d);
-        return;
-      }
+      // With a retry budget (F1) the attempt is NOT terminal: nothing is noted on the
+      // node's status, the token goes round the retry arc (or straight back into its own
+      // dwell) and tries again. 'failed' only sticks once the budget is spent.
+      const fs = failSpec.get(nodeId);
+      if (fs) { failAttempt(tk, nodeId, t + d, fs); return; }
       emit({ t: t + d, type: "finish", tokenId: tk.id, nodeId });
       exitNode(tk, nodeId, t + d);
+    });
+  }
+
+  function failAttempt(tk, nodeId, t, fs) {
+    const attempt = (tk.attempts.get(nodeId) || 0) + 1;
+    tk.attempts.set(nodeId, attempt);
+    const retries = retriesFor(nodeId, fs);
+    const ev = { t, type: "fail", tokenId: tk.id, nodeId, attempt, retries, terminal: attempt > retries };
+    if (fs.reason !== undefined) ev.reason = fs.reason;
+    if (attempt > retries) {
+      // Out of retries. `recover: true` says the last attempt is the one that works, so it
+      // finishes and fans out normally instead — the "fail, retry, pass" story, declared.
+      if (fs.recover) {
+        emit({ t, type: "finish", tokenId: tk.id, nodeId, attempt });
+        exitNode(tk, nodeId, t);
+        return;
+      }
+      emit(ev);
+      noteFail(nodeId, t);
+      endToken(tk, t);
+      return;
+    }
+    emit(ev);
+    const e = onFailEdge(nodeId);
+    const hop = e ? scale(hopFor(e), tk.rate) : 0;
+    const to = e ? e.target : nodeId;
+    if (e) {
+      emit({ t, type: "loop", tokenId: tk.id, edgeId: e.id, nodeId: to, iteration: attempt, max: e.maxIterations });
+      loopTimeline.get(e.id).push({ iteration: attempt, t });
+      segment(tk, { kind: "edge", id: e.id, t0: t, t1: t + hop });
+    } else {
+      // No arc to hang it on: the retry still gets a `loop` event so narration has one
+      // vocabulary for "attempt i of n", with a null edgeId.
+      emit({ t, type: "loop", tokenId: tk.id, edgeId: null, nodeId, iteration: attempt, max: retries });
+    }
+    if (!Number.isFinite(hop)) return;
+    push(t + hop, () => {
+      emit({ t: t + hop, type: "enter", tokenId: tk.id, nodeId: to, edgeId: e ? e.id : undefined });
+      startDwell(tk, to, t + hop);
     });
   }
 
   /** Leaving node `nodeId`: an unconsumed loop out-edge wins, otherwise implicit fan-out. */
   function exitNode(tk, nodeId, t) {
     for (const e of outLoop.get(nodeId)) {
-      if (tk.loopsUsed.has(e.id)) continue;
-      tk.loopsUsed.add(e.id);
+      if (e.onFail) continue; // a retry arc fires out of a failure, never out of a finish
+      if (tk.loopsUsed.has(e.key)) continue;
+      tk.loopsUsed.add(e.key);
       const n = iterationsFor(e);
       if (n <= 0) continue; // capped to zero: behave as if the loop were not there
       emit({ t, type: "loop", tokenId: tk.id, edgeId: e.id, nodeId, iteration: 1, max: e.maxIterations });
       loopTimeline.get(e.id).push({ iteration: 1, t });
-      const hop = scale(hopMs, tk.rate);
+      const hop = scale(hopFor(e), tk.rate);
       segment(tk, { kind: "edge", id: e.id, t0: t, t1: t + hop });
       if (Number.isFinite(hop)) push(t + hop, () => loopTicks(tk, e, nodeId, 2, n, t + hop));
       return;
@@ -361,19 +483,33 @@ export function compileRun(spec = {}, opts = {}) {
       const e = outs[k];
       const child = k === 0 ? tk : newToken(tk.rate, new Set(tk.applied), new Set(tk.loopsUsed), tk.id);
       if (child !== tk) emit({ t, type: "spawn", tokenId: child.id, parentId: tk.id, nodeId, edgeId: e.id });
-      const hop = scale(hopMs, child.rate);
+      const hop = scale(hopFor(e), child.rate);
       segment(child, { kind: "edge", id: e.id, t0: t, t1: t + hop });
       if (Number.isFinite(hop)) push(t + hop, () => arrive(child, e.target, t + hop, e.id));
     }
   }
 
-  // ---- run the queue ----
+  // ---- seeds ----
+  // A root (no non-loop in-edges) still seeds itself, now at its declared `data.startAt`
+  // rather than unconditionally at 0 (F4). `data.entry: true` declares an EXTRA seed on a
+  // node that is not a root (F3) — the compensation branch of a saga, a token refresh —
+  // and `opts.entries` is the same thing minted imperatively by `run.inject()`.
+  const seeds = [];
   for (const n of nodes.values()) {
     if (childrenOf.has(n.id)) continue; // containers run through their children (D5)
-    if (inNonLoop.get(n.id).length === 0) {
-      const tk = newToken(1, new Set(), new Set(), null);
-      arrive(tk, n.id, 0, undefined);
-    }
+    if (inNonLoop.get(n.id).length === 0 || (n.data && n.data.entry)) seeds.push({ id: n.id, at: startAtOf(n) });
+  }
+  for (const inj of opts.entries || []) {
+    if (!inj || !nodes.has(inj.id)) continue;
+    const at = Number.isFinite(+inj.at) && +inj.at >= 0 ? +inj.at : 0;
+    for (const id of attachAll(inj.id, "entry")) seeds.push({ id, at });
+  }
+  seeds.sort((a, b) => a.at - b.at);
+  // Queued rather than called: a seed with a later `at` must not record its join arrival
+  // before an earlier token's. At the all-zero default this is byte-identical to before.
+  for (const sd of seeds) {
+    const tk = newToken(1, new Set(), new Set(), null);
+    push(sd.at, () => arrive(tk, sd.id, sd.at, undefined));
   }
   let steps = 0;
   while (queue.length && steps++ < MAX_STEPS) queue.shift().fn();
@@ -538,7 +674,9 @@ export function compileRun(spec = {}, opts = {}) {
     return null;
   }
 
-  return { duration, events, boundaries, stateAt, nextBoundary };
+  // `declared` is `duration` under its intent-revealing name: the length of the DECLARED
+  // timeline, which playback speed never moves (F7 — see run-transport's sim().playback).
+  return { duration, declared: duration, events, boundaries, stateAt, nextBoundary };
 }
 
 export default { parseDuration, compileRun };

@@ -277,11 +277,26 @@ per-branch `speed()` — is just sampling the compiled artifact:
 const run = g.run();                          // Mode A (simulate) is the default
 run.play({ until: "deploy" });                 // -> Promise<{canceled}>, also run.promise
 run.pause();   run.seek(4000);   run.step();   run.step({ token: "t3" });
-run.speed(2, { branch: "clean" });             // per-branch rate, Mode A only
+run.speed(2);                                  // PLAYBACK only — the declared timeline is unmoved
+run.speed(0.5, { branch: "clean" });           // per-branch rate: a compile input, Mode A only
+run.inject("compensate", { at: 8000 });        // mint a token mid-graph on the compiled clock
 run.state();                                    // {tokens, nodes, edges, joins, loops, done}
-run.sim();                                      // the compiled schedule: {duration, events, stateAt}
+run.sim();                                      // the compiled schedule: {duration, declared, playback, events, stateAt}
 run.timeOf("deploy");                           // first finish/fail instant — a storyboard step's worth
 ```
+
+A bare `speed(f)` is a **playback** multiplier, as in live mode: it changes how fast the
+clock walks the schedule, never the schedule, so `run.duration` (and the total a page
+prints as "3h 20m") stays put. `sim().declared` is that compiled length; `sim().playback`
+is what it costs on the wall clock at the current multiplier. Only `speed(f, { branch })`
+re-times the work, because only that is a statement about the pipeline.
+
+Tokens do not have to start at a root at t = 0. `data: { startAt: 8000 }` (ms on the
+compiled clock, or a duration string) parks a root's token until its instant;
+`data: { entry: true }` mints an extra seed at a node that already has in-edges; and
+`run.inject(id, { at })` does the same imperatively, recompiling around the new token.
+A node whose compiled start is already behind the clock — one added mid-run — still emits
+its `enter`/`start` once, so it lights up instead of appearing pre-finished.
 
 Duration grammar (`data: { duration: "2h" }`): a bare number is seconds; a string is
 `<number><unit>` with `unit ∈ ms|s|m|h|d` (case-insensitive, decimals fine — `"1.5h"`,
@@ -290,14 +305,34 @@ Duration grammar (`data: { duration: "2h" }`): a bare number is seconds; a strin
 node with no `duration` at all stays silent, that's not a mistake. An unannotated fan-in is
 an implicit AND-join; `join: "all" | "any" | { count }` overrides it. A `loop: true` edge
 needs `maxIterations > 0` or the edge throws (`unbounded-loop`) at `addEdge`/mount time.
+An **edge** may declare `data: { duration: "400ms" }` of its own — the same grammar, paced
+the same way — and that is its hop time; `hopMs` is the default for edges that declare none.
 
-**Failed steps.** `data: { duration: "3s", fail: true }` — or `fail: "exit code 137"` to
-carry a reason through onto the emitted event — runs the node's dwell in full and then
-fails: status `'failed'`, no `finish` event, no loop, no fan-out to successors; the branch
-just stops. `play({until})` and `timeOf()` treat `'failed'` as terminal exactly like
-`'done'`, so a step waiting on a branch that failed doesn't hang. A container can't declare
-`data.fail` itself (it isn't an executable step); it inherits the earliest failure among
-its descendants.
+**Failed steps, and their retries.** `data: { duration: "3s", fail: true }` — or
+`fail: "exit code 137"` to carry a reason through onto the emitted event — runs the node's
+dwell in full and then fails: status `'failed'`, no `finish` event, no fan-out to
+successors; the branch just stops. `play({until})` and `timeOf()` treat `'failed'` as
+terminal exactly like `'done'`, so a step waiting on a branch that failed doesn't hang. A
+container can't declare `data.fail` itself (it isn't an executable step); it inherits the
+earliest failure among its descendants.
+
+A failure can take its own retry loop. `fail: { reason, retries: 3 }` re-runs the dwell up
+to three more times, emitting a `fail` (`terminal: false`) and a `loop` per attempt;
+`'failed'` only sticks when the budget is spent. Add `recover: true` and the attempt that
+spends the last retry succeeds instead — "fail, retry, pass". A `loop: true` edge out of
+the failing node marked `onFail: true` is the retry's arc: its `maxIterations` is the
+budget, each retry crosses it (so `state().loops[edgeId]` badges the attempt), and it stays
+inert on a successful finish.
+
+```js
+{ id: "call", data: { duration: "2s", fail: { reason: "timeout", retries: 3 } } },
+{ id: "retry", source: "call", target: "call", loop: true, onFail: true, maxIterations: 3 }
+```
+
+**Containers with several ports.** An edge into a container attaches to its one inferred
+entry child. `entry: ["search", "calc", "sql"]` on the container spec attaches it to all of
+them instead — a fan-out like any other — and `exit: [...]` gives the downstream node one
+in-edge per exit, so its implicit AND-join waits for the whole container.
 
 | event | fires when |
 |---|---|
@@ -309,7 +344,8 @@ its descendants.
 | `enter` / `start` / `finish` / `fail` | a token entering, dwelling on, finishing, or failing a node |
 | `spawn` | implicit fan-out mints a new token |
 | `join` / `drop` | a fan-in fired, or a late arrival at an already-fired join |
-| `loop` | a retry edge ticks (carries `iteration`/`max`) |
+| `loop` | a retry edge ticks, or a failure takes a retry (carries `iteration`/`max`) |
+| `inject` | `run.inject()` seeded a token mid-graph |
 | `warn` | a compile-time diagnostic (e.g. an unparseable duration) |
 | `done` | the compiled schedule has fully played out |
 
