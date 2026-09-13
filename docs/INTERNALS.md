@@ -311,11 +311,17 @@ compileRun(spec, opts) → sim
   intra-step run time. `sb.play/pause/next/prev/seek/labels/position/on`.
 - index.js: `opts.storyboard` array + `opts.autoplay` (`true`, or `'auto'` = play only when
   the page URL carries `?auto=1`, F36); host implementation lives in index.js
-  (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed], runTime, runOpts}).
+  (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed], runTime, runOpts,
+  layout: {...layoutOpts}} — the `layout` op mutates the instance-wide options in place, so
+  they are state a step moves and a backward seek has to put back).
   `g.finished` is one deferred per instance, resolved by the storyboard's `done` event,
   `g.finish(reason)` or `destroy()` — the "story finished" signal check-demos waits on.
+  The two snippets the checker evaluates in the page (which hook is on offer, and the latch
+  that turns `g.finished` into a pollable flag) live in `scripts/finish-signal.mjs`, so they
+  are unit-tested without a browser (`test/finish-signal.test.js`).
 - `createRun()` keeps a `runSubs` set of every `run.on(type, fn)` a CALLER registered and
-  re-seats it on the fresh transport a `g.run(opts)` recompile builds (F6); the run layer's
+  re-seats it on the fresh transport a `g.run(opts)` recompile builds (F6), keeping the
+  live undo on the sub so the unsubscriber `on()` returned still works after a recompile; the run layer's
   own subscriptions (run-render's, the transport-bar notify hop) use the raw pre-wrap
   `on()` and are rebuilt per compile. That same hop mirrors every run event onto the
   instance bus as `run:<type>`.

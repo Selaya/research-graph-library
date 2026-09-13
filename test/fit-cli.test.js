@@ -107,6 +107,44 @@ test("smv-fit prices a story exactly as g.cues() does (D12 parity, record fixtur
   g.destroy();
 });
 
+test("smv-fit prices the storyboard's run/layout ops exactly as g.cues() does too (F5)", () => {
+  // The record fixture predates the run-shaped ops, so the parity above is blind to them:
+  // this script is built out of exactly the steps that fixture has none of.
+  const steps = [
+    { label: "a" },
+    { op: "layout", args: [{ dir: "TB" }] },
+    { op: "run", args: [{ hopMs: 5 }] },       // a recompile costs nothing, `dur` and all
+    { op: "run.reset", dur: 500 },
+    { op: "expandAll" },
+    { label: "b" },
+    { op: "collapseAll" },
+    { label: "c" },
+  ];
+  const spec = JSON.parse(readFileSync(join(root, "test", "fixtures", "record-demo.spec.json"), "utf8"));
+  const el = makeEl("div");
+  el.ownerDocument = doc;
+  const g = mount(el, spec, { ticker: "manual", storyboard: steps });
+
+  const fromLib = g.cues().filter((c) => c.kind === "label").map((c) => ({ label: c.label, at: c.at, index: c.index }));
+  const fromBin = labelOffsets(steps).map((l) => ({ label: l.label, at: l.at, index: l.index }));
+  assert.deepEqual(fromBin, fromLib, "the two durOf() tables agree about the run-shaped ops");
+  assert.deepEqual(fromBin, [
+    { label: "a", at: 0, index: 0 },
+    { label: "b", at: 700, index: 5 },     // layout + expandAll only; run/run.reset are 0ms
+    { label: "c", at: 1050, index: 7 },
+  ]);
+  g.destroy();
+});
+
+test("durOf: `run` and `run.reset` are zero-duration whatever `dur` they carry", () => {
+  assert.equal(durOf({ op: "run" }), 0);
+  assert.equal(durOf({ op: "run", args: [{ hopMs: 9 }] }), 0);
+  assert.equal(durOf({ op: "run.reset" }), 0);
+  assert.equal(durOf({ op: "run.reset", dur: 500 }), 0);
+  assert.equal(durOf({ op: "expandAll" }), 350);
+  assert.equal(durOf({ op: "layout", args: [{ dir: "TB" }] }), 350);
+});
+
 test("durOf: every op's default, and `dur` overriding all of them", () => {
   assert.equal(durOf({ label: "x" }), 0);
   assert.equal(durOf({ op: "wait", ms: 400 }), 400);

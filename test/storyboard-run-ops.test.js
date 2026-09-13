@@ -165,6 +165,23 @@ test("F5: a `layout` op re-lays the graph out with new opts", async () => {
   g.destroy();
 });
 
+test("F5: a backward seek past a `layout` op restores the direction it was taken with", async () => {
+  const { g } = mountG({
+    storyboard: [{ label: "start" }, { op: "layout", args: [{ dir: "TB" }] }, { label: "end" }],
+  });
+  await settle(g.storyboard().play(), g);
+  const after = g.layoutResult().nodes;
+  assert.ok(after.c.y > after.a.y, "played through: TB");
+
+  await settle(g.storyboard().seek("start"), g);
+  const back = g.layoutResult().nodes;
+  assert.ok(back.c.x > back.a.x, "seeking back before the layout step puts LR back on screen");
+
+  await settle(g.storyboard().seek("end"), g);
+  assert.ok(g.layoutResult().nodes.c.y > g.layoutResult().nodes.a.y, "…and replaying re-applies TB");
+  g.destroy();
+});
+
 test("F5: the new ops are priced on the same declared timeline cues() and the scrubber read", async () => {
   const { g } = mountG({
     animation: { duration: 400 },
@@ -254,6 +271,27 @@ test("F6: unsubscribing works across a recompile, from either handle or the retu
   await settle(fresh.play({ until: "a" }), g);
   assert.equal(viaOff, 0, "off() on the old handle really unsubscribes, not just locally");
   assert.equal(viaUnsub, 0, "…and so does the unsubscriber on() handed back");
+  g.destroy();
+});
+
+test("F6: the unsubscriber still drops the handler when it is called AFTER a recompile", async () => {
+  const { g } = mountG();
+  const run = g.run({});
+  let viaUnsub = 0, viaOff = 0;
+  const onPlay = () => { viaOff++; };
+  const unsub = run.on("play", () => { viaUnsub++; });
+  run.on("play", onPlay);
+
+  const fresh = g.run({});   // carried onto the new transport…
+  unsub();                   // …and dropped from it, not from the destroyed one
+  fresh.off("play", onPlay);
+  await settle(fresh.play({ until: "a" }), g);
+  assert.equal(viaUnsub, 0, "the unsubscriber on() handed back works after a recompile too");
+  assert.equal(viaOff, 0, "and so does off() on the fresh handle");
+
+  const again = g.run({});   // nothing resurrects on the NEXT recompile either
+  await settle(again.play({ until: "a" }), g);
+  assert.equal(viaUnsub + viaOff, 0);
   g.destroy();
 });
 

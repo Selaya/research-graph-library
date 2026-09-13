@@ -256,6 +256,13 @@ every issue found (`[smv:camera] …` / `[smv:highlight] …`), and the call sti
 best with whatever it could resolve.
 
 Camera moves ride the shared clock and cancel-and-retarget like everything else; the
+`run` and `run.reset` cost nothing on the cumulative timeline (they put the run's clock
+back to 0). `run.play` is priced off the compiled transport, and only one compile is live
+at a time — a script that recompiles *between* two `run.play` steps gets a cue sheet that
+changes as it plays, so keep one compile per script when the numbers have to be exact
+(`docs/RUN.md`, "Driving a run from a storyboard").
+
+Camera moves ride the shared clock and cancel-and-retarget like everything else; the
 first one in a script takes the viewport (auto-refit stops, the camera joins the scrub
 snapshots). A highlight *is* the emphasis state (replace, not accumulate) and survives
 relayouts and backward scrubs — and so does the `props` override layer, which sits over

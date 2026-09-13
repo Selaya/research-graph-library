@@ -279,6 +279,18 @@ they put the run's clock back to 0, so the next `run.play` step is priced from t
 The fluent builder spells these `runCompile(opts)`, `runReset()`, `run({until})` (kept as
 `run.play`, which is what it has always meant), `runStep()` and `runSeek(ms)`.
 
+**Limitation — one compile per cue sheet.** A `run.play` step is priced off the *compiled*
+transport (`run.timeOf(until)`), and only one compile is live at a time. So in a script like
+the one above, `g.cues()` and `g.timeline()` price **every** `run.play` step against
+whichever compile is current when you ask: before playback starts there is no transport at
+all and each `run.play` falls back to the mount's `animation.duration`, and after the second
+`{op:"run"}` lands every `run.play` is priced against the *second* schedule. If you need a
+cue sheet that is stable and exact — VO fitting, `smv-record`, a scrubber you trust to the
+millisecond — keep one compile per script (put the recompile in a second storyboard, or use
+`run.reset` with the same opts) and call `g.cues()` with the run already compiled.
+`bin/smv-fit` refuses any script containing a `run.play` for the same reason; `run` and
+`run.reset` themselves are priced at 0 ms there, exactly as they are here.
+
 ## Event vocabulary
 
 Every `run.on(type, fn)` call subscribes to the run's own bus. Two families of events land

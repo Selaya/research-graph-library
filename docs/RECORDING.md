@@ -187,11 +187,12 @@ await g.finished;                        // { reason: "storyboard" }
 unattended: `scripts/check-demos.mjs` opens each page with `?auto=1`, waits on
 `window.smv.finished` (or `window.__smv`, the record pack's global), and then asserts the
 render. A page that ends on its own terms — a live feed, a hand-driven tour — calls
-`g.finish()` when it is done.
+`g.finish()` when it is done. (The older `window.__smvExit = {done, errors}` hook every
+demo page still uses keeps working, and wins when a page offers both.)
 
 Scrubbing works through everything: each step is snapshotted before it runs (G2), and
-emphasis, the caption, and — once the script has a camera op — the viewport are part of
-that snapshot, so a backward seek restores the shot, not just the graph. A forward scrub
+emphasis, the caption, the layout options a `layout` step changed, and — once the script
+has a camera op — the viewport are part of that snapshot, so a backward seek restores the shot, not just the graph. A forward scrub
 replays camera/highlight/caption instantly (you asked for a position, not a screening).
 
 For a self-contained file:

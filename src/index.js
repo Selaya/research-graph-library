@@ -443,12 +443,14 @@ export function mount(el, spec = {}, opts = {}) {
     // run event onto the instance bus as `run:<type>` (F6) — `g.on("run:finish", …)`
     // outlives any number of recompiles, the same way `g.on("runstatus")` always has.
     rawOn("*", (type, payload) => { notify(); bus.emit("run:" + type, payload); });
-    for (const sub of runSubs) rawOn(sub.type, sub.fn);
+    // Re-seat onto THIS transport, keeping the live undo on the sub: the unsubscriber a
+    // caller is holding was closed over `sub`, not over any one generation's undo, so it
+    // still drops the handler after any number of recompiles.
+    for (const sub of runSubs) sub.undo = rawOn(sub.type, sub.fn);
     runCtl.on = (type, fn) => {
-      const sub = { type, fn };
+      const sub = { type, fn, undo: rawOn(type, fn) };
       runSubs.add(sub);
-      const undo = rawOn(type, fn);
-      return () => { runSubs.delete(sub); undo(); };
+      return () => { runSubs.delete(sub); sub.undo(); };
     };
     runCtl.off = (type, fn) => {
       for (const sub of runSubs) if (sub.type === type && sub.fn === fn) runSubs.delete(sub);
@@ -571,6 +573,10 @@ export function mount(el, spec = {}, opts = {}) {
         // was drawn with rather than a future drawing's.
         slots: lastSlots ? { ...lastSlots } : null,
         slotsKey,
+        // A `layout` step mutates the instance-wide options in place, so they are state a
+        // step moves (G2) — without this a backward seek past `{op:"layout",args:[{dir:"TB"}]}`
+        // would replay the older spec in the NEWER direction.
+        layout: { ...layoutOpts },
         runTime: runCtl ? runCtl.time() : 0,
         runOpts: runCtl ? runCtl.options() : null,
         // D14 — emphasis and the caption are state a step moves, so they are always here.
@@ -600,6 +606,10 @@ export function mount(el, spec = {}, opts = {}) {
       lastLayers = (snap.layers || []).map((rank) => [...rank]);
       lastSlots = snap.slots ? { ...snap.slots } : null;
       slotsKey = snap.slotsKey ?? null;
+      if (snap.layout) {
+        for (const k of Object.keys(layoutOpts)) delete layoutOpts[k];
+        Object.assign(layoutOpts, snap.layout);
+      }
       // BEFORE the relayout, unlike the camera below: the property override layer (D16) is
       // read by the style commit *inside* relayout, so restoring it afterwards would leave
       // the step's overrides on screen for a whole commit. Emphasis is re-asserted off the
@@ -651,14 +661,17 @@ export function mount(el, spec = {}, opts = {}) {
    *  read this one number, so they cannot disagree about where a step sits. */
   function durOf(step) {
     if (!step || step.op === undefined) return 0;      // labels are zero-duration positions
+    // BEFORE `dur`: a recompile/reset is instant and puts the run clock back to 0, which
+    // stepSlices() prices as a 0ms slice. Honouring a `dur` here would make durOf(), the
+    // cue sheet and bin/smv-fit disagree about a step nothing ever waits for.
+    if (step.op === "run" || step.op === "run.reset") return 0;
     if (step.dur != null) return Math.max(0, step.dur);
     const a0 = step.args && step.args[0];
     switch (step.op) {
       case "wait": return Math.max(0, step.ms ?? a0 ?? 0);
       case "camera": return Math.max(0, (a0 && a0.dur) ?? CAMERA_MS);
       case "highlight": case "clearHighlight": case "caption": case "props":
-      case "run.step": case "run.seek":
-      case "run": case "run.reset": return 0;          // discrete state flips, D14/D16
+      case "run.step": case "run.seek": return 0;      // discrete state flips, D14/D16
       case "condense": case "split": return CHOREO_MS;
       case "batch": {
         const list = Array.isArray(step.steps) ? step.steps : (Array.isArray(a0) ? a0 : []);

@@ -21,6 +21,7 @@ import { chromium } from "playwright-core";
 import { readdirSync, mkdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { findChromium, serveRoot, ROOT } from "./harness.mjs";
+import { SIGNAL_JS, LATCH_JS, LATCH_DONE_JS, EXIT_DONE_JS, waitedLabel } from "./finish-signal.mjs";
 
 const argv = process.argv.slice(2);
 const opt = { screenshot: null, wait: 4000, timeout: 60000, all: false };
@@ -43,19 +44,6 @@ if (!pages.length) {
   process.exit(2);
 }
 if (opt.screenshot) mkdirSync(opt.screenshot, { recursive: true });
-
-/** Which finish signal the page offers, as a string the poll returns once it is there. */
-const SIGNAL = `(() => {
-  if (window.__smvExit && typeof window.__smvExit === "object") return "__smvExit";
-  const g = window.smv || window.__smv;
-  return g && g.finished && typeof g.finished.then === "function" ? "finished" : false;
-})()`;
-
-/** Latch g.finished onto a plain flag so waitForFunction (and --timeout) can own the wait. */
-const LATCH = `(() => {
-  window.__smvFinished = false;
-  (window.smv || window.__smv).finished.then(() => { window.__smvFinished = true; });
-})()`;
 
 const { server, port } = await serveRoot();
 const browser = await chromium.launch({
@@ -85,15 +73,15 @@ try {
       await page.goto(url, { waitUntil: "load" });
       // Pages usually install a hook synchronously, but give a deferred install a moment.
       // `__smvExit` wins when both are present: it also carries the page's own error list.
-      hook = await page.waitForFunction(SIGNAL, null, { timeout: 1500 })
+      hook = await page.waitForFunction(SIGNAL_JS, null, { timeout: 1500 })
         .then((h) => h.jsonValue(), () => null);
       if (hook === "__smvExit") {
-        await page.waitForFunction("window.__smvExit && window.__smvExit.done === true", null, { timeout: opt.timeout });
+        await page.waitForFunction(EXIT_DONE_JS, null, { timeout: opt.timeout });
       } else if (hook === "finished") {
         // g.finished is a promise, and waitForFunction polls — so latch it onto a flag the
         // poll can read, which keeps --timeout in charge instead of hanging in evaluate().
-        await page.evaluate(LATCH);
-        await page.waitForFunction("window.__smvFinished === true", null, { timeout: opt.timeout });
+        await page.evaluate(LATCH_JS);
+        await page.waitForFunction(LATCH_DONE_JS, null, { timeout: opt.timeout });
       } else {
         await page.waitForTimeout(opt.wait);
       }
@@ -139,8 +127,7 @@ try {
 
     const ok = problems.length === 0;
     anyFail ||= !ok;
-    const waited = hook === "finished" ? "(waited for smv.finished)"
-      : hook === "__smvExit" ? "(waited for __smvExit.done)" : `(waited ${opt.wait}ms)`;
+    const waited = waitedLabel(hook, opt.wait);
     console.log(`${ok ? "PASS" : "FAIL"}  ${rel}  nodes=${info.nodes} edges=${info.edges} ${waited}`);
     for (const p of problems) console.log("      - " + p);
     await page.close();

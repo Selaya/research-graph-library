@@ -627,7 +627,9 @@ export interface GraphEventMap {
 
 /** F6 — every run event (`docs/RUN.md` "Event vocabulary") is also mirrored onto the
  *  instance bus under a `run:` prefix — `g.on("run:finish", …)`, `g.on("run:end", …)` —
- *  so a listener registered on `g` outlives any number of `g.run(opts)` recompiles. */
+ *  so a listener registered on `g` outlives any number of `g.run(opts)` recompiles. The
+ *  payload is the run event's own payload, passed through untouched — `unknown` here, the
+ *  same as `run.on()`'s, because the run bus carries two open families of events. */
 export type RunMirrorEvent = `run:${string}`;
 
 // ---------------------------------------------------------------------------
@@ -740,12 +742,15 @@ export interface Graph {
    *  not just the payload. Declared ahead of the generic `(type: string, ...)` overload
    *  below so a literal `"*"` resolves here instead of there. */
   on(type: "*", fn: (type: string, payload: unknown) => void): () => void;
+  /** F6 — a mirrored run event (`docs/RUN.md` "Event vocabulary"), e.g. `"run:finish"`. */
+  on(type: RunMirrorEvent, fn: (payload: unknown) => void): () => void;
   on(type: string, fn: (payload: unknown) => void): () => void;
   off<K extends keyof GraphEventMap>(type: K, fn: (payload: GraphEventMap[K]) => void): void;
   /** Same two-argument shape as the `on("*", ...)` overload above — `off()` only needs to
    *  match the function reference, but the type has to line up for callers that keep the
    *  listener in a typed variable. */
   off(type: "*", fn: (type: string, payload: unknown) => void): void;
+  off(type: RunMirrorEvent, fn: (payload: unknown) => void): void;
   off(type: string, fn: (payload: unknown) => void): void;
 
   /** A plain copy, like every plural query method (`nodes()`, `children()`, …) — mutating
