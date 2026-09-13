@@ -333,6 +333,19 @@ run.follow();                  // jump back to live
 run.log();                     // the event log (a copy)
 ```
 
+A fan-in honours `join` here as it does in Mode A: arrivals are counted and **one** token is
+released per group, so a bare `finish()` on a join node hands one token downstream instead of
+one per arrival (and the join re-arms for the next group). `state().nodes[id]` splits its
+occupancy into `waiting`/`active` and flags `overBudget` once a live dwell outruns the node's
+declared `data.duration` — in live mode a duration only paces the progress fill, it never
+schedules anything. A `start()` on a non-root with nothing waiting, nothing crossing towards
+it and nothing to retry mints a token out of nothing: it warns (`[smv:live]`) unless you say
+`start(id, { spawn: true })`, and `g.run({ mode: "live", spawnOnStart: false })` makes it a
+no-op instead. Two more live-mode options: `minHopMs` keeps a visible crossing when a
+`start()` is stamped at the upstream `finish()`'s own instant (real trace timestamps), and
+`reset({ log, now, replay: true })` re-seeds a saved log against an explicit frontier epoch,
+optionally re-emitting the seeded events through the handle.
+
 `fail()` is `finish()`'s terminal sibling — no `n` option (it consumes every current
 occupant; a partially-failed node isn't a coherent status) — and like `start`/`finish`/
 `spawn` it never throws: an unknown id or a zero-occupancy node gets one `console.warn` and

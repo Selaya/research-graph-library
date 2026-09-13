@@ -207,3 +207,36 @@ test("run-render: a failed node is written to the same data-run channel and anno
 
   g.destroy();
 });
+
+test("run-render: a live dwell past its declared duration is written to data-over-budget (F13)", async () => {
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, {
+    nodes: [{ id: "a", label: "A", data: { duration: "100ms" } }, { id: "b", label: "B" }],
+    edges: [{ id: "e1", source: "a", target: "b" }],
+  }, { animation: { duration: 40 } });
+
+  const run = g.run({ mode: "live" });
+  await pump(2);
+  run.start("a");
+  await pump(2);
+  assert.equal(g.renderer.node("a").getAttribute("data-over-budget"), null,
+    "inside its declared budget the node carries nothing extra");
+
+  await pumpUntil(() => run.state().nodes.a.overBudget === true, 60);
+  await pump(1);
+  assert.equal(g.renderer.node("a").getAttribute("data-over-budget"), "",
+    "the live dwell outran data.duration — its own channel, alongside data-run");
+  assert.equal(g.renderer.node("a").getAttribute("data-run"), "active");
+
+  run.finish("a");
+  await pump(1);
+  assert.equal(g.renderer.node("a").getAttribute("data-over-budget"), "",
+    "…and the finish that closed the over-long dwell does not erase it");
+
+  run.start("a"); // the retry of a done node: judged against its own dwell from scratch
+  await pump(1);
+  assert.equal(g.renderer.node("a").getAttribute("data-over-budget"), null);
+
+  g.destroy();
+});

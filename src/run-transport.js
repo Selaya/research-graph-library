@@ -20,6 +20,9 @@ function deferred() {
   return { promise, resolve };
 }
 
+/** The live log's vocabulary, for re-emitting a seeded log (reset({ replay: true })). */
+const LIVE_TYPES = new Set(["start", "finish", "fail", "spawn"]);
+
 /** Latest timestamp an event log reaches (0 for an empty one). */
 function logFloor(log) {
   let max = 0;
@@ -341,6 +344,14 @@ function createLiveTransport(internals, opts = {}) {
   const bus = emitter();
 
   const hopMs = Number.isFinite(opts.hopMs) && opts.hopMs >= 0 ? opts.hopMs : undefined;
+  /** F14 — the shortest crossing a hop may be squashed to when a start() claims it while
+   *  it is still in the air. Trace timestamps make the parent's dispatch instant the
+   *  child's start instant, which otherwise teleports the token between activations. */
+  const minHopMs = Number.isFinite(opts.minHopMs) && opts.minHopMs > 0 ? opts.minHopMs : undefined;
+  /** F11 — whether a bare start() may mint a token where nothing is waiting. Default true
+   *  (the historical behaviour, and how a root seeds itself); false makes the warned-about
+   *  phantom start a no-op instead, and `start(id, { spawn: true })` opts back in per call. */
+  const spawnOnStart = opts.spawnOnStart !== false;
   /** Edge id -> the live instant it entered the run. The log is HISTORY (D4: "time-travel
    *  into history"), so a finish written before an edge existed must not be re-resolved
    *  over it — without this, adding an edge retroactively fans a token out of a node that
@@ -348,6 +359,7 @@ function createLiveTransport(internals, opts = {}) {
   const edgeBornAt = new Map();
   const liveOpts = () => {
     const o = hopMs == null ? {} : { hopMs };
+    if (minHopMs != null) o.minHopMs = minHopMs;
     if (edgeBornAt.size) o.bornAt = edgeBornAt;
     return o;
   };
@@ -357,8 +369,12 @@ function createLiveTransport(internals, opts = {}) {
   /** The frontier is how far this run's history reaches: real elapsed ms since creation,
    *  floored by any log it was seeded with (`opts.log`/`reset`) — otherwise seeded events
    *  are unreachable, since `t` is clamped to the frontier and nothing past 0 could be
-   *  sampled. With no seed this is exactly the pinned "starts at 0". */
-  let frontier = logFloor(log);
+   *  sampled — and by `opts.now`, an explicit epoch (F12) for a run resuming a session that
+   *  has been going for a while: without it every later `{ at }` stamped from a server clock
+   *  is clamped back onto the seeded log's span. With neither this is the pinned "starts at 0".
+   */
+  const epochOf = (o) => Math.max(logFloor(o && o.log), Number.isFinite(+(o && o.now)) ? Math.max(0, +o.now) : 0);
+  let frontier = epochOf(opts);
   let t = frontier;
   let following = true;
   let playing = false;
@@ -501,10 +517,43 @@ function createLiveTransport(internals, opts = {}) {
     console.warn(`run-transport: ${fn}("${id}") — non-numeric n (${JSON.stringify(n)}); ignored.`);
   }
 
+  /** A node nothing (non-loop) points at: the only place a live run legitimately seeds a
+   *  token out of nothing, which is exactly what start() does there. */
+  function isRoot(id) {
+    for (const e of store.edges.values()) {
+      if (!e.loop && e.target === id && e.source !== id) return false;
+    }
+    return true;
+  }
+
+  /** F11 — would this start() fabricate a token? True only when the node is a non-root with
+   *  nothing waiting on it, nothing crossing towards it, and no finished attempt to retry:
+   *  a root seeding itself, a queued arrival being picked up, a hop being claimed mid-air,
+   *  and a restart of a done/failed node (the live loop iteration) are all legitimate. */
+  function phantomStart(id, at) {
+    if (!store.hasNode(id) || isRoot(id)) return false;
+    const st = stateAt(at);
+    const n = st.nodes[id];
+    if (!n || n.waiting > 0) return false;
+    if (n.status === "done" || n.status === "failed") return false;
+    for (const tk of st.tokens) {
+      if (tk.at.kind !== "edge") continue;
+      const e = store.edge(tk.at.id);
+      if (e && e.target === id) return false;
+    }
+    return true;
+  }
+
   function start(id, o) {
     if (destroyed) return t;
     if (!store.hasNode(id)) warnUnknownNode("start", id);
     const at = stampAt(o);
+    if (!(o && o.spawn) && phantomStart(id, at)) {
+      console.warn(`[smv:live] start("${id}") — nothing is waiting on "${id}" and it is not a root, ` +
+        `so this mints a token out of nothing. Pass { spawn: true } if that is what you mean` +
+        (spawnOnStart ? "." : "; ignored."));
+      if (!spawnOnStart) return at;
+    }
     log.push({ t: at, type: "start", id });
     touchLog();
     bus.emit("start", { id, t: at });
@@ -585,11 +634,24 @@ function createLiveTransport(internals, opts = {}) {
     log = (o.log || []).map((e) => ({ ...e }));
     touchLog();
     edgeBornAt.clear();
-    frontier = logFloor(log);
+    frontier = epochOf(o);
     lastNow = ticker.now();
     t = Math.max(0, Math.min(frontier, Number.isFinite(+time) ? +time : 0));
     following = t >= frontier;
     bus.emit("seek", { time: t, duration: frontier });
+    // F12 — `replay: true` pushes the seeded entries back through this handle's emitter, so
+    // UI beats that hang off run.on('fail'/'start'/…) rebuild from a restored log instead of
+    // only from the live entries that follow it. Marked `replay: true` so a listener can
+    // tell history from news.
+    if (o.replay) {
+      for (const e of log) {
+        if (!e || !LIVE_TYPES.has(e.type)) continue;
+        const ev = { id: e.id, t: e.t, replay: true };
+        if (e.n !== undefined) ev.n = e.n;
+        if (e.reason !== undefined) ev.reason = e.reason;
+        bus.emit(e.type, ev);
+      }
+    }
     return t;
   }
 
@@ -641,7 +703,12 @@ function createLiveTransport(internals, opts = {}) {
     sim: () => ({ duration: frontier, events: log.map((e) => ({ ...e })), stateAt }),
     /** Carries the LOG, not just the compile inputs: a storyboard snapshot/restore pair
      *  (`reset(options(), time)`) would otherwise silently delete a live run's history. */
-    options: () => ({ hopMs, mode: "live", log: log.map((e) => ({ ...e })) }),
+    options: () => {
+      const o = { hopMs, mode: "live", now: frontier, log: log.map((e) => ({ ...e })) };
+      if (minHopMs != null) o.minHopMs = minHopMs;
+      if (!spawnOnStart) o.spawnOnStart = false;
+      return o;
+    },
     on: (type, fn) => bus.on(type, fn),
     off: (type, fn) => bus.off(type, fn),
     destroy() {

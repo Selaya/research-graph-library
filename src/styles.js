@@ -189,6 +189,9 @@ svg.smv.smv-grabbing{cursor:grabbing}
    heavier boundary is what separates it from 'done' at a glance without relying on hue. */
 .smv-node[data-run="failed"]{--smv-fill:var(--smv-fail); --smv-stroke:var(--smv-fail-stroke)}
 .smv-node[data-run="failed"] rect.smv-node-box{stroke-width:2.25}
+/* A live dwell that outran its declared data.duration: its own channel, so it composes
+   with whatever data-run tint the node already carries (docs/LIVE.md). */
+.smv-node[data-over-budget] rect.smv-node-box{stroke:var(--smv-condense); stroke-dasharray:4 2.5}
 
 /* Director emphasis (D14): discrete state, no transition — a wall clock cannot reproduce
    byte-for-byte under frame capture. --smv-pulse (D17) is written per tick by the

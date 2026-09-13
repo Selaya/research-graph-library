@@ -76,6 +76,10 @@ Every method below is on the object `g.run(opts)` returns.
 }
 ```
 
+In live mode (`docs/LIVE.md`) each node entry carries three more keys: `waiting`/`active`
+(the occupancy split — `waiting + active === occupancy`) and `overBudget` (the live dwell
+outran the node's declared `data.duration`).
+
 A `'failed'` node reports `progress: 1` and `occupancy: 0` — terminal like `'done'`, so its
 fill never reads as "still going." A container's status/progress rolls up from its
 descendants (union window; earliest failure wins): `play({until: containerId})` means "until
