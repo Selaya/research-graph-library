@@ -71,7 +71,8 @@
     <h3 style="margin-top:14px">What to look for</h3>
     <ul class="watch">
       <li>The ball is one checkout: it dwells on every activation it reaches and always answers back to whoever called it.</li>
-      <li>Payment's answer to the authorize call isn't a result, it's a question — so the very next hop is a long one, straight back to the app, skipping over Inventory and the API.</li>
+      <li>Every actor is declared <code>container: true</code>, so a lifeline is a dashed, header-only box from the first frame and grows into a column as its activations arrive.</li>
+      <li>Payment's answer to the authorize call isn't a result, it's a question — and that hop is slow in both senses: it skips over Inventory and the API, and the edge declares its own <code>data.duration</code> of 120ms against the 1–3ms calls inside the data centre.</li>
       <li>The shopper's 0.9s inside the challenge is modeled as its own app activation — the ball just waits there.</li>
       <li>The order only exists once it lands in Orders DB — that's the moment worth pausing on.</li>
       <li>The last step fans out two ways at once: the receipt returns to the app while the email fires — nothing waits for the email, and nothing joins the two back up.</li>
@@ -103,31 +104,32 @@
     { id: "email", label: "Email service" },
   ];
 
-  // Each entry is one activation: who runs it, what the incoming message says, what the
-  // actor does while the ball dwells there, and how long that takes in the real world.
+  // Each entry is one activation: who runs it, what the incoming message says, how long that
+  // message spends on the wire, what the actor does while the ball dwells there, and how long
+  // that takes in the real world.
   // `from` names the activation the message departs FROM (usually the previous entry, but
   // the 3-D Secure answer and the final fan-out both need something other than "previous").
   // `sameRow` puts an entry on the same row as another id — the one legitimate use here is
   // the parallel fan-out to the app and the email service at the very end.
   var MSGS = [
     { id: "app.1",   actor: "app",   node: "build checkout payload",        msg: null,                        dur: "0.2s" },
-    { id: "api.1",   actor: "api",   node: "validate cart",                 msg: "POST /checkout",            dur: "8ms",   from: "app.1" },
-    { id: "inv.1",   actor: "inv",   node: "reserve stock",                 msg: "reserve(sku, qty)",         dur: "40ms",  from: "api.1" },
-    { id: "api.2",   actor: "api",   node: "hold confirmed",                msg: "200 reserved",              dur: "3ms",   from: "inv.1" },
-    { id: "pay.1",   actor: "pay",   node: "authorize + risk-check",        msg: "authorize(card, amount)",   dur: "220ms", from: "api.2",
+    { id: "api.1",   actor: "api",   node: "validate cart",                 msg: "POST /checkout {cart, card}", wire: "95ms",  dur: "8ms",   from: "app.1" },
+    { id: "inv.1",   actor: "inv",   node: "reserve stock",                 msg: "reserve(sku, qty, 15m hold)", wire: "2ms",   dur: "40ms",  from: "api.1" },
+    { id: "api.2",   actor: "api",   node: "hold confirmed",                msg: "200 reserved · hold_id",    wire: "1ms",   dur: "3ms",   from: "inv.1" },
+    { id: "pay.1",   actor: "pay",   node: "authorize + risk-check",        msg: "authorize(card, amount)",   wire: "40ms",  dur: "220ms", from: "api.2",
       highlight: { variant: "warn", pulse: true } },
-    { id: "app.2",   actor: "app",   node: "open 3DS challenge (URL)",      msg: "3DS challenge required",    dur: "0.3s",  from: "pay.1",
-      caption: "The response is a question, so the ball goes home first — straight from Payment to the app, past Inventory and the API." },
-    { id: "app.3",   actor: "app",   node: "shopper completes challenge",   msg: null,                        dur: "0.9s",  from: "app.2", gap: 1 },
-    { id: "api.3",   actor: "api",   node: "receive confirmation",          msg: "POST /checkout/confirm",    dur: "6ms",   from: "app.3" },
-    { id: "pay.2",   actor: "pay",   node: "capture the hold",              msg: "capture(auth_id, amount)",  dur: "180ms", from: "api.3" },
-    { id: "api.4",   actor: "api",   node: "capture confirmed",             msg: "captured",                  dur: "3ms",   from: "pay.2" },
-    { id: "db.1",    actor: "db",    node: "persist order",                 msg: "INSERT order",              dur: "12ms",  from: "api.4",
+    { id: "app.2",   actor: "app",   node: "open 3DS challenge (URL)",      msg: "402 · 3DS challenge required", wire: "120ms", dur: "0.3s",  from: "pay.1",
+      caption: "The response is a question, so the ball goes home first — straight from Payment to the app, past Inventory and the API, on the slowest wire in the story." },
+    { id: "app.3",   actor: "app",   node: "shopper completes challenge",   msg: null,                        wire: "1ms",   dur: "0.9s",  from: "app.2", gap: 1 },
+    { id: "api.3",   actor: "api",   node: "receive confirmation",          msg: "POST /checkout/confirm {pares}", wire: "95ms", dur: "6ms",   from: "app.3" },
+    { id: "pay.2",   actor: "pay",   node: "capture the hold",              msg: "capture(auth_id, amount)",  wire: "40ms",  dur: "180ms", from: "api.3" },
+    { id: "api.4",   actor: "api",   node: "capture confirmed",             msg: "captured · txn_id",         wire: "3ms",   dur: "3ms",   from: "pay.2" },
+    { id: "db.1",    actor: "db",    node: "persist order",                 msg: "INSERT order (paid)",       wire: "1ms",   dur: "12ms",  from: "api.4",
       highlight: { variant: "ok", pulse: true } },
-    { id: "api.5",   actor: "api",   node: "assemble response",             msg: "201 Created",               dur: "2ms",   from: "db.1" },
-    { id: "app.4",   actor: "app",   node: "show receipt",                  msg: "201 Created",               dur: "0.2s",  from: "api.5",
+    { id: "api.5",   actor: "api",   node: "assemble response",             msg: "order_id, receipt",         wire: "1ms",   dur: "2ms",   from: "db.1" },
+    { id: "app.4",   actor: "app",   node: "show receipt",                  msg: "201 Created {order}",       wire: "90ms",  dur: "0.2s",  from: "api.5",
       caption: "The response heads home to the app while a fire-and-forget branch fans out to email — no join, the email branch just ends." },
-    { id: "email.1", actor: "email", node: "send confirmation",             msg: "order.confirmed event",     dur: "90ms",  from: "api.5", sameRow: "app.4" },
+    { id: "email.1", actor: "email", node: "send confirmation",             msg: "order.confirmed event",     wire: "4ms",   dur: "90ms",  from: "api.5", sameRow: "app.4" },
   ];
 
   var byId = {};
@@ -143,14 +145,29 @@
       m.row = row++;
     }
     rowOf[m.id] = m.row;
-    seq.place(m.id, m.actor, m.row);
   });
 
-  function nodeOf(m) { return { id: m.id, parent: m.actor, label: m.node, data: { duration: m.dur } }; }
-  function edgeOf(m) { return { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id, label: m.msg }; }
+  // The node carries its own (actor, row) placement in `data.seq`; the shell hands a node's
+  // data to the solver, so nothing has to be registered out of band.
+  function nodeOf(m) {
+    return {
+      id: m.id, parent: m.actor, label: m.node,
+      data: { duration: m.dur, seq: { actor: m.actor, row: m.row } },
+    };
+  }
+  // The message is the primary text of a sequence diagram: upright, on its own pill, and the
+  // wire time is the edge's own declared duration rather than one global hop.
+  function edgeOf(m) {
+    var e = { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id, data: { duration: m.wire } };
+    if (m.msg) e.label = { text: m.msg, pill: true };
+    return e;
+  }
 
   var SEED = {
-    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    // An actor is a container from the start — a header-only lifeline box, dashed until its
+    // first activation lands in it.
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label, container: true }; })
+      .concat([nodeOf(MSGS[0])]),
     edges: [],
   };
 
@@ -184,7 +201,7 @@
         ],
         dur: 260 * P,
       });
-      STEPS.push({ op: "camera", args: [{ nodes: [prev.id, other.id, m.id], k: 0.95, pad: 130, dur: 340 * P }] });
+      STEPS.push({ op: "camera", args: [{ nodes: [prev.id, other.id, m.id], maxK: 1, pad: 130, dur: 340 * P }] });
       var fanCaption = other.caption || m.caption;
       if (fanCaption) STEPS.push({ op: "caption", args: [fanCaption, { place: "top" }] });
       STEPS.push({ op: "run.play", until: other.id });
@@ -193,8 +210,8 @@
     }
 
     STEPS.push({ op: "batch", steps: [{ op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeOf(m)] }], dur: 260 * P });
-    var wide = (m.id === "app.2"); // the 3DS answer skips two columns — zoom out a touch so both ends stay in frame
-    STEPS.push({ op: "camera", args: [{ nodes: [prev.id, m.id], k: wide ? 0.8 : 1, pad: wide ? 170 : 120, dur: (wide ? 420 : 300) * P }] });
+    var wide = (m.id === "app.2"); // the 3DS answer skips two columns — give the shot more room
+    STEPS.push({ op: "camera", args: [{ nodes: [prev.id, m.id], maxK: 1, pad: wide ? 170 : 120, dur: (wide ? 420 : 300) * P }] });
     STEPS.push({ op: "run.play", until: m.id });
     if (m.highlight) {
       var h = Object.assign({ nodes: [m.id] }, m.highlight);
@@ -207,14 +224,16 @@
     }
   }
   STEPS.push({ label: "done" });
-  STEPS.push({ op: "caption", args: [null] });
-  STEPS.push({ op: "camera", args: [{ fit: true, pad: 62, dur: 500 * P }] }); // extra top pad clears the actor headers under the closing caption
+  // Caption FIRST, then fit: the chrome-aware fit measures the caption strip only while it is
+  // actually mounted, so the closing shot has to be framed with the closing caption already up.
   STEPS.push({ op: "caption", args: ["Fourteen activations, one 3-D Secure detour, one fire-and-forget email.", { place: "top" }] });
+  STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
   STEPS.push({ op: "wait", ms: 900 * P });
   STEPS.push({ op: "clearHighlight" });
 
+  // Every edge declares its own wire time, so there is no global hop to stretch; `dwell` only
+  // paces what an actor does while the ball is parked on it.
   var RUN_OPTS = {
-    hopMs: 560 * P,                       // the message in flight — the part worth watching
     dwell: function (sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; },
   };
 
@@ -225,11 +244,15 @@
   try {
     g = SparkleMotion.mount("#pipe", SEED, {
       theme: "auto",
-      layout: { dir: "TB", solver: seq.solver, nodesep: 34, ranksep: 22, marginx: 24, marginy: 16, minColWidth: 138 },
+      layout: {
+        dir: "TB", solver: seq.solver, nodesep: 34, ranksep: 22, marginx: 24, marginy: 16,
+        minColWidth: 138,
+        edgeLabelMaxW: 180,               // the message is the content here, not a hint on a line
+      },
       animation: { duration: 360 * P, easing: "cubic-out" },
       controls: true,
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",                   // plays itself only when the URL carries ?auto=1
     });
     g.run(RUN_OPTS);
     sb = g.storyboard();
@@ -239,7 +262,7 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
-  window.__g = g;
+  window.smv = g;                         // the instance the checker (and the console) looks for
 
   // ---- side panel: the message list lights up as the ball arrives ----------------------
   MSGS.forEach(function (m) {
@@ -249,8 +272,8 @@
     li.textContent = (m.msg ? m.msg + " → " : "") + actorLabel + ": " + m.node;
     msgsEl.appendChild(li);
   });
-  var run = g.run();
-  run.on("start", function (ev) {
+  // Run events are mirrored on the instance bus, so this outlives any recompile.
+  g.on("run:start", function (ev) {
     var li = document.getElementById("li-" + String(ev.nodeId).replace(".", "-"));
     if (!li) return;
     msgsEl.querySelectorAll("li.now").forEach(function (x) { x.classList.remove("now"); x.classList.add("done"); });
@@ -258,24 +281,24 @@
   });
 
   // ---- controls -------------------------------------------------------------------
-  var playing = false;
-  function finish() {
+  var playing = AUTO;
+  if (AUTO) phaseEl.textContent = "playing…";
+  // The end of the story is the library's own signal, not page-rolled plumbing.
+  g.finished.then(function () {
     playing = false;
     phaseEl.textContent = "story complete — scrub the bar or Restart";
     window.__smvExit = { done: true, errors: errors };
-  }
+  });
   $("#play").addEventListener("click", function () {
     if (playing) return;
     playing = true;
     phaseEl.textContent = "playing…";
-    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+    Promise.resolve(sb.play()).catch(function (e) { errors.push("play: " + String(e && e.message || e)); });
   });
   $("#step").addEventListener("click", function () {
     Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
   });
   $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
-
-  if (AUTO) $("#play").click();
 })();
 </script>
 </body>

@@ -42,6 +42,7 @@
   aside li.done::marker { color: #2f9e6a; }
   aside li.failed { color: var(--bad); }
   aside li.failed::marker { color: var(--bad); }
+  aside li.sel { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
   .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 12px; }
   .tile { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; }
   .tile i { display: block; font-style: normal; font-size: 10.5px; letter-spacing: .05em;
@@ -62,9 +63,9 @@
 <p class="lede">
   The <a href="seq-basics.html">seq-basics</a> seam — actors as lifeline columns, activations
   on an <em>(actor, time)</em> grid, messages as edges the ball rides — with the happy path
-  broken. The index lookup never answers, the gateway's 2&nbsp;s timer wins the race, a bounded
-  <code>loop:true</code> edge burns three retries with backoff, the breaker opens onto stale
-  cache, and a half-open probe closes it 30&nbsp;s later.
+  broken. The index lookup never answers, the gateway's 2&nbsp;s timer wins the race, the failed
+  call takes its own <code>onFail</code> retry loop three times with backoff, the breaker opens
+  onto stale cache, and a half-open probe closes it 30&nbsp;s later.
 </p>
 
 <div class="bar">
@@ -91,20 +92,26 @@
       <li><b>Two balls leave the gateway at once.</b> “call search · 2s timer” fans out to the
         RPC <em>and</em> to its own timeout — that is what a client-side timeout really is, a
         race, so both activations share one row.</li>
-      <li><b>The red activation is terminal.</b> <code>data.fail</code> runs the full 2&nbsp;s
-        dwell and then stops the branch: no finish event, no fan-out, no loop.</li>
+      <li><b>The red activation retries itself.</b> <code>data.fail</code> carries the reason
+        and the <code>onFail</code> arc out of it carries the budget, so the lookup runs its
+        full 2&nbsp;s dwell four times — one <code>fail</code> event per attempt, and only the
+        last one terminal.</li>
       <li><b>The big arc on the right is the retry edge</b> — <code>loop:true</code>,
-        <code>maxIterations&nbsp;3</code>, backoff 200&nbsp;→&nbsp;400&nbsp;→&nbsp;800&nbsp;ms.
-        Attempt&nbsp;2 re-flies it; attempts 3 and 4 tick in place on “call search”, and the
-        <code>iter n/3</code> badge on the arc is the visible count.</li>
+        <code>onFail:true</code>, <code>maxIterations&nbsp;3</code>, backoff
+        200&nbsp;→&nbsp;400&nbsp;→&nbsp;800&nbsp;ms. Attempt&nbsp;2 re-flies it; attempts 3
+        and 4 tick in place, and the <code>iter n/3</code> badge on the arc is the count.</li>
       <li><b>The duration chips are the point.</b> The pipeline preset prints the declared
         duration on every activation — two <code>2s</code> timeouts against the probe's
-        <code>38ms</code>.</li>
-      <li><b>The blank row before “tap Search again”</b> is a <code>gap</code>: thirty seconds
-        of nothing, drawn as empty lifeline.</li>
-      <li><b>The Search lifeline stays red</b> even after the probe succeeds: a container
-        inherits the <em>earliest</em> failure among its descendants, so the column carries
-        the timeout for the rest of the run.</li>
+        <code>38ms</code> — and on every message, from a <code>1ms</code> call inside the
+        datacentre to the <code>40ms</code> hop out to the phone.</li>
+      <li><b>The blank row before “tap Search again”</b> is a <code>gap</code>, and the message
+        that crosses it declares <code>data.duration: "30s"</code> — thirty seconds of wire
+        time, drawn as a long crossing over empty lifeline.</li>
+      <li><b>The Search lifeline goes red and then clears.</b> The actor container carries
+        <code>statusAgg: "latest"</code>, so the column follows the most recent outcome of its
+        activations instead of keeping the first failure for the rest of the run.</li>
+      <li><b>Click any activation</b> — <code>g.on('nodeclick')</code> selects its line in the
+        message list.</li>
       <li>Scrub the transport bar backwards — structural steps are snapshotted, so the diagram
         folds back up and the breaker re-opens.</li>
     </ul>
@@ -135,50 +142,69 @@
   ];
 
   // One entry per activation: which lifeline it sits on, which row (= time), which earlier
-  // activation sent the message that starts it, the message text, what the actor does, and
-  // the real-world duration the pipeline preset prints as a chip.
+  // activation sent the message that starts it, the message text, what the actor does, the
+  // real-world duration the pipeline preset prints as a chip, and `wire` — the message's own
+  // `data.duration`, which the compiler paces the hop with and the preset prints on the edge.
   //   `with: true` -> same row as the entry above it: a real fan-out, two things at once.
   //   row 7 is deliberately skipped — an empty row is the 30s wait.
   var MSGS = [
-    { id: "app.1",     actor: "app",      row: 0,   from: null,        msg: null,              node: "tap “Search”",             dur: "0.4s" },
-    { id: "gw.call",   actor: "gw",       row: 1,   from: "app.1",     msg: "GET /search",     node: "call search · 2s timer",   dur: "2ms" },
-    { id: "search.1",  actor: "search",   row: 2,   from: "gw.call",   msg: "search(q)",       node: "index lookup",             dur: "2s", fail: "timeout after 2s" },
-    { id: "gw.timer",  actor: "gw",       row: 2,   from: "gw.call",   msg: "arm timeout",     node: "timer fires · no reply",   dur: "2s", with: true },
-    { id: "gw.open",   actor: "gw",       row: 3,   from: "gw.timer",  msg: "4× failed",       node: "open circuit · 30s",       dur: "1ms" },
-    { id: "cache.1",   actor: "cache",    row: 4,   from: "gw.open",   msg: "GET stale",       node: "stale results · 4m old",   dur: "6ms" },
-    { id: "metrics.1", actor: "metrics",  row: 4,   from: "gw.open",   msg: "open +1",         node: "breaker → OPEN",           dur: "2ms", with: true },
-    { id: "gw.2",      actor: "gw",       row: 5,   from: "cache.1",   msg: "20 hits · 4m",    node: "add stale header",         dur: "1ms" },
-    { id: "app.2",     actor: "app",      row: 6,   from: "gw.2",      msg: "200 · stale",     node: "render stale + banner",    dur: "0.3s" },
-    { id: "app.3",     actor: "app",      row: 8,   from: "app.2",     msg: "30s later",       node: "tap “Search” again",       dur: "0.3s" },
-    { id: "gw.3",      actor: "gw",       row: 9,   from: "app.3",     msg: "GET /search",     node: "half-open · 1 probe",      dur: "2ms" },
-    { id: "search.2",  actor: "search",   row: 10,  from: "gw.3",      msg: "probe ×1",        node: "index lookup",             dur: "38ms" },
-    { id: "gw.4",      actor: "gw",       row: 11,  from: "search.2",  msg: "20 hits 38ms",    node: "close circuit",            dur: "1ms" },
-    { id: "app.4",     actor: "app",      row: 12,  from: "gw.4",      msg: "200 · fresh",     node: "render fresh results",     dur: "0.25s" },
-    { id: "metrics.2", actor: "metrics",  row: 12,  from: "gw.4",      msg: "closed +1",       node: "breaker → CLOSED",         dur: "2ms", with: true },
+    { id: "app.1",     actor: "app",      row: 0,   from: null,        msg: null,                  wire: null,   node: "tap “Search”",             dur: "0.4s" },
+    { id: "gw.call",   actor: "gw",       row: 1,   from: "app.1",     msg: "GET /search?q=…",     wire: "40ms", node: "call search · 2s timer",   dur: "2ms" },
+    { id: "search.1",  actor: "search",   row: 2,   from: "gw.call",   msg: "search(q)",           wire: "1ms",  node: "index lookup",             dur: "2s", fail: { reason: "timeout after 2s" } },
+    { id: "gw.timer",  actor: "gw",       row: 2,   from: "gw.call",   msg: "arm 2s timeout",      wire: "1ms",  node: "timer fires · no reply",   dur: "2s", with: true },
+    { id: "gw.open",   actor: "gw",       row: 3,   from: "search.1",  msg: "4 attempts failed",   wire: "1ms",  node: "open circuit · 30s",       dur: "1ms" },
+    { id: "cache.1",   actor: "cache",    row: 4,   from: "gw.open",   msg: "GET stale",           wire: "2ms",  node: "stale results · 4m old",   dur: "6ms" },
+    { id: "metrics.1", actor: "metrics",  row: 4,   from: "gw.open",   msg: "breaker.open +1",     wire: "1ms",  node: "breaker → OPEN",           dur: "2ms", with: true },
+    { id: "gw.2",      actor: "gw",       row: 5,   from: "cache.1",   msg: "20 hits · 4m stale",  wire: "1ms",  node: "add stale header",         dur: "1ms" },
+    { id: "app.2",     actor: "app",      row: 6,   from: "gw.2",      msg: "200 · stale + banner", wire: "40ms", node: "render stale + banner",   dur: "0.3s" },
+    { id: "app.3",     actor: "app",      row: 8,   from: "app.2",     msg: "30s later · user taps again", wire: "30s", node: "tap “Search” again", dur: "0.3s" },
+    { id: "gw.3",      actor: "gw",       row: 9,   from: "app.3",     msg: "GET /search?q=…",     wire: "40ms", node: "half-open · 1 probe",      dur: "2ms" },
+    { id: "search.2",  actor: "search",   row: 10,  from: "gw.3",      msg: "probe ×1 (half-open)", wire: "1ms", node: "index lookup",             dur: "38ms" },
+    { id: "gw.4",      actor: "gw",       row: 11,  from: "search.2",  msg: "20 hits in 38ms",     wire: "1ms",  node: "close circuit",            dur: "1ms" },
+    { id: "app.4",     actor: "app",      row: 12,  from: "gw.4",      msg: "200 · fresh results", wire: "40ms", node: "render fresh results",     dur: "0.25s" },
+    { id: "metrics.2", actor: "metrics",  row: 12,  from: "gw.4",      msg: "breaker.closed +1",   wire: "1ms",  node: "breaker → CLOSED",         dur: "2ms", with: true },
   ];
 
-  // The retry. `data.fail` never fires a loop edge of its own (docs/RUN.md, "Declared
-  // failure"), so the loop's SOURCE is the activation that *succeeds*: the gateway's 2s
-  // timer. Its target is "call search", which is what a retry actually re-enters.
+  // The retry arc. It leaves the activation that FAILS and marks itself `onFail: true`, so its
+  // iteration budget is the failure's retry budget: the lookup runs its dwell four times, each
+  // one emitting its own `fail`, and only the last is terminal (docs/RUN.md, "Retries").
+  // Its target is "call search", which is what a retry actually re-enters.
   var RETRY = {
-    id: "retry", source: "gw.timer", target: "gw.call",
-    loop: true, maxIterations: 3, label: "retry ×3",
+    id: "retry", source: "search.1", target: "gw.call",
+    loop: true, onFail: true, maxIterations: 3,
+    label: { text: "retry ×3 · backoff 200ms → 800ms", pill: true, maxW: 230 },
+    data: { duration: "0.2s" },
   };
 
+  // Column order only — every activation carries its own (actor, row) placement in
+  // `data.seq`, which the shell hands the solver.
   var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
-  MSGS.forEach(function (m) { seq.place(m.id, m.actor, m.row); });
   var BY_ID = {};
   MSGS.forEach(function (m) { BY_ID[m.id] = m; });
 
   function nodeOf(m) {
-    var data = { duration: m.dur };
+    var data = { duration: m.dur, seq: { actor: m.actor, row: m.row } };
     if (m.fail) data.fail = m.fail;
     return { id: m.id, parent: m.actor, label: m.node, data: data };
   }
-  function edgeOf(m) { return { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id, label: m.msg }; }
+  function edgeOf(m) {
+    return {
+      id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id,
+      label: { text: m.msg, pill: true },
+      data: { duration: m.wire },
+    };
+  }
 
   var SEED = {
-    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    // `container: true` — a lifeline is a container from the start, drawn as a header-only
+    // dashed box and given its own column by the solver before its first activation lands.
+    // The Search column follows its LATEST activation, so the timeout does not paint it red
+    // for the rest of the story.
+    nodes: ACTORS.map(function (a) {
+      var n = { id: a.id, label: a.label, container: true };
+      if (a.id === "search") n.statusAgg = "latest";
+      return n;
+    }).concat([nodeOf(MSGS[0])]),
     edges: [],
   };
 
@@ -197,9 +223,12 @@
   });
   function group(i) { return GROUPS[i]; }
 
-  function advance(grp) {
-    var adds = grp.map(function (m) { return { op: "addNode", args: [nodeOf(m)] }; })
+  function addsFor(grp) {
+    return grp.map(function (m) { return { op: "addNode", args: [nodeOf(m)] }; })
       .concat(grp.map(function (m) { return { op: "addEdge", args: [edgeOf(m)] }; }));
+  }
+  function advance(grp, extra) {
+    var adds = addsFor(grp).concat(extra || []);
     var cam = [grp[0].from].concat(grp.map(function (m) { return m.id; }));
     push({ op: "batch", steps: adds, dur: 260 * P });
     push({ op: "camera", args: [{ nodes: cam, k: 1, pad: 110, dur: 300 * P }] });
@@ -210,26 +239,24 @@
   push({ label: "request" });
   say("A search request. The gateway calls Search and arms a 2 s timeout at the same instant.");
   advance(group(0));                       // gw.call
-  advance(group(1));                       // search.1 + gw.timer, one row, two balls
 
-  push({ label: "timeout" });
-  push({ op: "highlight", args: [{ nodes: ["search.1"], variant: "warn", pulse: true }] });
-  say("No reply. data.fail: “timeout after 2s” — the activation runs its full dwell, goes red, and that branch stops.");
-  push({ op: "wait", ms: 1400 * P });
-  push({ op: "clearHighlight" });
-
-  push({ label: "retry ×3" });
-  push({ op: "batch", steps: [{ op: "addEdge", args: [RETRY] }], dur: 320 * P });
-  push({ op: "camera", args: [{ nodes: ["gw.call", "gw.timer", "search.1"], k: 1, pad: 80, dur: 520 * P }] });
-  say("The timer branch survives, so it carries the retry: a loop:true edge back to “call search”, maxIterations 3 — backoff 200 → 400 → 800 ms.");
-  push({ op: "highlight", args: [{ nodes: ["gw.call"], edges: ["retry"], variant: "focus", pulse: true }] });
-  push({ op: "run.play" });
-  push({ op: "wait", ms: 900 * P });
-  say("Attempt 2 re-flies the arc; attempts 3 and 4 tick in place on the target — the iter 3/3 badge is the count.");
+  push({ label: "timeout · retry ×3" });
+  // The retry arc lands with the activation it leaves: `until: "search.1"` waits for the
+  // TERMINAL failure, so all four attempts have to be compiled before the run plays into it.
+  push({ op: "batch", steps: addsFor(group(1)).concat([{ op: "addEdge", args: [RETRY] }]), dur: 320 * P });
+  push({ op: "camera", args: [{ nodes: ["gw.call", "search.1", "gw.timer"], k: 1, pad: 90, dur: 420 * P }] });
+  say("Two balls leave the gateway at once — the RPC, and the 2 s timer racing it. That is what a client-side timeout is.");
+  push({ op: "run.play", until: "gw.timer" });
+  push({ op: "highlight", args: [{ nodes: ["search.1"], edges: ["retry"], variant: "warn", pulse: true }] });
+  say("No reply. data.fail gives the lookup its reason, the onFail arc gives it a budget: four attempts, a fail event each, only the last terminal.");
+  push({ op: "run.play", until: "search.1" });
+  say("Attempt 2 re-flew the arc back to “call search”; 3 and 4 ticked in place — iter 3/3 on the badge, backoff 200 → 400 → 800 ms.");
   push({ op: "wait", ms: 1400 * P });
   push({ op: "clearHighlight" });
 
   push({ label: "circuit OPEN" });
+  // The failed lookup is terminal, so nothing crosses "4 attempts failed" — the breaker's
+  // activation is a token of its own, minted with run.inject() the moment the node lands.
   advance(group(2));                       // gw.open
   push({ op: "highlight", args: [{ nodes: ["gw.open"], variant: "warn", pulse: true }] });
   say("Four failures in a row trip the breaker: circuit OPEN for 30s — no further calls to Search.");
@@ -258,18 +285,16 @@
 
   push({ label: "circuit CLOSED" });
   push({ op: "highlight", args: [{ nodes: ["gw.4", "app.4", "metrics.2"], variant: "ok", pulse: true }] });
-  // pad 60 leaves the top caption, the preset's total bar and the transport bar all clear.
-  push({ op: "camera", args: [{ fit: true, pad: 60, dur: 620 * P }] });
+  push({ op: "camera", args: [{ fit: true, pad: 24, dur: 620 * P }] });
   say("One timeout, three retries, an open breaker — closed again by one 38 ms probe.");
   push({ op: "wait", ms: 1100 * P });
 
   // ---- pacing ----------------------------------------------------------------------
   // A sqrt curve so 2ms / 38ms / 2s stay visibly different without the timeouts dragging.
-  // `iterations` caps the retry edge at its own maxIterations: attempt 2 is the arc-cross,
-  // attempts 3 and 4 are the in-place ticks (docs/RUN.md, "Bounded retry loops").
+  // Hops are not stretched globally any more: every message declares its own
+  // `data.duration`, so `hopMs` is only the fallback for an edge that declares none.
   var RUN_OPTS = {
-    hopMs: 520 * P,
-    iterations: { retry: 3 },
+    hopMs: 320 * P,
     dwell: function (sec) {
       return sec == null ? 300 * P : (240 + 700 * Math.min(1, Math.sqrt(sec / 2))) * P;
     },
@@ -287,7 +312,7 @@
       animation: { duration: 360 * P, easing: "cubic-out" },
       controls: true,
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",              // plays itself when the URL carries ?auto=1
     });
     g.run(RUN_OPTS);
     sb = g.storyboard();
@@ -297,7 +322,7 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
-  window.__g = g;
+  window.smv = g;                   // the library's own "story finished" convention: g.finished
 
   // ---- side panel --------------------------------------------------------------------
   function actorLabel(id) {
@@ -321,6 +346,17 @@
   var SOURCE = { "cache.1": ["cache (stale)", "warn"], "search.2": ["search index", "good"] };
 
   var run = g.run();
+
+  // The breaker's activation is a token of its own: the lookup failed for good, so nothing
+  // fans out of it. run.inject() mints one at "open circuit" the instant the node is added,
+  // on the compiled clock, instead of bolting on a second root node.
+  var injected = {};
+  g.on("add", function (ev) {
+    if (ev.kind !== "node" || ev.id !== "gw.open" || injected[ev.id]) return;
+    injected[ev.id] = true;
+    run.inject(ev.id);
+  });
+
   run.on("start", function (ev) {
     var m = BY_ID[ev.nodeId];
     if (!m) return;
@@ -339,34 +375,48 @@
   run.on("fail", function (ev) {
     var m = BY_ID[ev.nodeId];
     if (!m) return;
+    // One `fail` per attempt now; only the terminal one ends the branch.
+    setTile(tAttempt, ev.attempt + " of " + (ev.retries + 1), ev.terminal ? "bad" : "warn");
+    setTile(tLatency, String(ev.reason || m.dur), "bad");
+    if (!ev.terminal) return;
     var li = document.getElementById("li-" + m.id.replace(".", "-"));
     if (li) { li.classList.remove("now"); li.classList.add("failed"); }
-    setTile(tLatency, String(ev.reason || m.dur), "bad");
   });
   run.on("loop", function (ev) {
     if (ev.edgeId !== "retry") return;
     setTile(tAttempt, (ev.iteration + 1) + " of " + (ev.max + 1), "warn");
   });
 
+  // F27 — a real click event on a node, slop- and pinch-guarded by the library.
+  g.on("nodeclick", function (ev) {
+    var m = BY_ID[ev.id];
+    msgsEl.querySelectorAll("li.sel").forEach(function (x) { x.classList.remove("sel"); });
+    if (!m) return;
+    var li = document.getElementById("li-" + m.id.replace(".", "-"));
+    if (li) li.classList.add("sel");
+  });
+
   // ---- controls ----------------------------------------------------------------------
-  var playing = false;
-  function finish() {
+  var playing = AUTO;
+  // g.finished resolves when the storyboard runs out of steps, however it was started —
+  // the Play button, or autoplay: "auto" honouring ?auto=1. __smvExit stays for the errors
+  // the page collects itself; the checker prefers it when a page offers both.
+  g.finished.then(function () {
     playing = false;
     phaseEl.textContent = "story complete — scrub the bar or Restart";
     window.__smvExit = { done: true, errors: errors };
-  }
+  });
+  if (AUTO) phaseEl.textContent = "playing…";
   $("#play").addEventListener("click", function () {
     if (playing) return;
     playing = true;
     phaseEl.textContent = "playing…";
-    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+    Promise.resolve(sb.play()).catch(function (e) { errors.push("play: " + String(e && e.message || e)); });
   });
   $("#step").addEventListener("click", function () {
     Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
   });
   $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
-
-  if (AUTO) $("#play").click();
 })();
 </script>
 </body>

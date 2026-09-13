@@ -31,21 +31,10 @@
   .layout { display: grid; grid-template-columns: minmax(0, 1fr) 292px; gap: 14px; }
   @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
   #pipe { height: 540px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
-  /* Captions sit at the pane's bottom edge, which the transport bar and the preset's
-     total-duration bar already own; lift them clear of both. */
+  /* The caption strip, the transport bar and the preset's total-duration bar each position
+     themselves against the pane's bottom edge independently (INTERNALS.md, the F20 lesson),
+     so with all three up the caption still has to be lifted over the total bar. */
   #pipe .smv-caption { bottom: 64px; }
-  /* A lifeline whose first activation has not landed yet is still a childless leaf to the
-     renderer, so it paints as one big filled node. Draw it as the empty column it is. */
-  #pipe .smv-node:not([data-container])[data-id="gw"] .smv-node-box,
-  #pipe .smv-node:not([data-container])[data-id="users"] .smv-node-box,
-  #pipe .smv-node:not([data-container])[data-id="products"] .smv-node-box,
-  #pipe .smv-node:not([data-container])[data-id="reviews"] .smv-node-box {
-    fill: none; stroke-dasharray: 5 5; opacity: .5;
-  }
-  /* Activation labels are long here (a sequence activation is a sentence, not a noun), so
-     the preset's duration chip — anchored at the node's top-right corner — would land on
-     the tail of the label. Lift it into the row gap just above the box. */
-  #pipe .smv-node:not([data-container]) .smv-chip { transform: translate(0, -18px); }
   aside { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 14px 16px; }
   aside h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   aside ol { margin: 0; padding-left: 18px; }
@@ -89,6 +78,8 @@
       <li>One row carries <em>two</em> activations: the fan-out to Users and Products really is simultaneous, so two balls cross at once.</li>
       <li><code>join:"all"</code> on “merge entities” makes the gateway wait for both before it moves on.</li>
       <li>Beat 2 zigzags: gateway → Reviews → gateway, three times. That shape <em>is</em> the N+1.</li>
+      <li>Each arrow carries its own wire time (<code>edge.data.duration</code>): the 1ms in-cluster
+        calls flick across, the 9ms cross-region fetches to Reviews visibly take their time.</li>
       <li>The condense set includes the two gateway waits — without them a path would leave the set and re-enter, which <code>condense()</code> rejects as <code>non-convex</code>.</li>
       <li>After the merge, the chip odometer rolls 117ms → 45ms and the total-duration bar drops.</li>
     </ul>
@@ -122,21 +113,35 @@
   // which messages arrive at it, and the real-world time it costs. `sameRow` keeps an
   // activation on the row above's row — that is the fan-out, two actors at one instant —
   // and `gap` skips a row, which the solver draws as extra space (a pause).
+  //
+  // Each inbound message carries its own `wire` time, which becomes `edge.data.duration`:
+  // the compiler paces every hop from it, so a 1ms in-cluster call and a 9ms cross-region
+  // fetch cross at visibly different speeds and the preset chips the number on the wire.
   var MSGS = [
     { id: "cli.1", actor: "client", node: "send cart query", dur: "8ms", in: [] },
-    { id: "gw.1", actor: "gw", node: "plan query", dur: "3ms", in: [{ from: "cli.1", label: "POST /graphql" }] },
-    { id: "usr.1", actor: "users", node: "resolve me", dur: "11ms", in: [{ from: "gw.1", label: "Query.me" }] },
+    { id: "gw.1", actor: "gw", node: "plan query", dur: "3ms",
+      in: [{ from: "cli.1", label: "POST /graphql", wire: "14ms" }] },
+    { id: "usr.1", actor: "users", node: "resolve me", dur: "11ms",
+      in: [{ from: "gw.1", label: "Query.me", wire: "1ms" }] },
     { id: "prd.1", actor: "products", node: "cart items ×3", dur: "14ms", sameRow: true, anchor: true,
-      in: [{ from: "gw.1", label: "Query.cart" }] },
+      in: [{ from: "gw.1", label: "Query.cart { items }", wire: "1ms" }] },
     { id: "gw.2", actor: "gw", node: "merge entities", dur: "2ms", join: "all",
-      in: [{ from: "usr.1", label: "user{cart}" }, { from: "prd.1", label: "items[1,2,3]" }] },
-    { id: "rev.1", actor: "reviews", node: "reviews(product:1)", dur: "38ms", in: [{ from: "gw.2", label: "fetch #1" }] },
-    { id: "gw.3", actor: "gw", node: "wait · 1 of 3", dur: "1ms", in: [{ from: "rev.1", label: "ratings" }] },
-    { id: "rev.2", actor: "reviews", node: "reviews(product:2)", dur: "36ms", in: [{ from: "gw.3", label: "fetch #2" }] },
-    { id: "gw.4", actor: "gw", node: "wait · 2 of 3", dur: "1ms", in: [{ from: "rev.2", label: "ratings" }] },
-    { id: "rev.3", actor: "reviews", node: "reviews(product:3)", dur: "41ms", in: [{ from: "gw.4", label: "fetch #3" }] },
-    { id: "gw.5", actor: "gw", node: "assemble response", dur: "4ms", in: [{ from: "rev.3", label: "ratings" }] },
-    { id: "cli.2", actor: "client", node: "render cart", dur: "16ms", in: [{ from: "gw.5", label: "200 {data}" }] },
+      in: [{ from: "usr.1", label: "user { cart }", wire: "1ms" },
+           { from: "prd.1", label: "items [1,2,3]", wire: "1ms" }] },
+    { id: "rev.1", actor: "reviews", node: "reviews(product:1)", dur: "38ms",
+      in: [{ from: "gw.2", label: "fetch #1 · cross-region", wire: "9ms" }] },
+    { id: "gw.3", actor: "gw", node: "wait · 1 of 3", dur: "1ms",
+      in: [{ from: "rev.1", label: "ratings for #1", wire: "9ms" }] },
+    { id: "rev.2", actor: "reviews", node: "reviews(product:2)", dur: "36ms",
+      in: [{ from: "gw.3", label: "fetch #2 · cross-region", wire: "9ms" }] },
+    { id: "gw.4", actor: "gw", node: "wait · 2 of 3", dur: "1ms",
+      in: [{ from: "rev.2", label: "ratings for #2", wire: "9ms" }] },
+    { id: "rev.3", actor: "reviews", node: "reviews(product:3)", dur: "41ms",
+      in: [{ from: "gw.4", label: "fetch #3 · cross-region", wire: "9ms" }] },
+    { id: "gw.5", actor: "gw", node: "assemble response", dur: "4ms",
+      in: [{ from: "rev.3", label: "ratings for #3", wire: "9ms" }] },
+    { id: "cli.2", actor: "client", node: "render cart", dur: "16ms",
+      in: [{ from: "gw.5", label: "200 {data}", wire: "14ms" }] },
   ];
 
   // The DataLoader beat: five activations (three fetches AND the two gateway waits between
@@ -144,40 +149,51 @@
   // non-convex (gw.2 → rev.1 → gw.3 → rev.2 leaves the set and re-enters), and condense()
   // throws [smv:non-convex] on it.
   var CONDENSE_IDS = ["rev.1", "gw.3", "rev.2", "gw.4", "rev.3"];
-  var MERGED = { id: "rev.batch", parent: "reviews", label: "reviews(products:[1,2,3])", data: { duration: "45ms" } };
   // condense() derives the redirected edge ids as `<protoEdgeId>~<mergedId>`.
   var IN_EDGE = "m:gw.2>rev.1~rev.batch", OUT_EDGE = "m:rev.3>gw.5~rev.batch";
 
   // ---- placements: (actor, row) for every activation ---------------------------------
+  // Each node carries its own placement in `data.seq = { actor, row }`, which the layout
+  // seam hands straight to the solver — nothing is registered out of band.
   var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
-  // An actor with no activations yet is still a leaf to the solver — with no placement it
-  // would be parked in the spare column on the right until its first child lands. Place
-  // each one at the head of its own column; the placement is ignored the moment the actor
-  // becomes a container, which is exactly when the solver starts drawing it as a lifeline.
-  ACTORS.forEach(function (a) { seq.place(a.id, a.id, 0); });
   var row = -1;
   MSGS.forEach(function (m) {
     if (m.sameRow) m.row = row;
     else { row += 1 + (m.gap || 0); m.row = row; }
-    seq.place(m.id, m.actor, m.row);
   });
-  // The merged node is minted by condense() mid-story, so the solver would have no
-  // placement for it and would park it in the spare column with a warning. Place it up
-  // front instead — nothing requires the node to exist yet. Two rows under "merge
-  // entities": the skipped row in between is the gap that reads as the DataLoader holding
-  // its keys for a tick before it fires one batched call.
+  // Two rows under "merge entities": the skipped row in between is the gap that reads as
+  // the DataLoader holding its keys for a tick before it fires one batched call. The
+  // merged node is minted by condense() mid-story and its data travels with the spec, so
+  // the solver reads this placement the moment the node lands. `parent` is named because
+  // the sources span two lifelines — a mixed-parent condense has no common parent to
+  // inherit (README, next to `parent: null`).
   var MERGED_ROW = byId("gw.2").row + 2;
-  seq.place(MERGED.id, "reviews", MERGED_ROW);
+  var MERGED = {
+    id: "rev.batch", parent: "reviews", label: "reviews(products:[1,2,3])",
+    data: { duration: "45ms", seq: { actor: "reviews", row: MERGED_ROW } },
+  };
 
   function byId(id) { for (var i = 0; i < MSGS.length; i++) if (MSGS[i].id === id) return MSGS[i]; return null; }
   function actorLabel(id) { for (var i = 0; i < ACTORS.length; i++) if (ACTORS[i].id === id) return ACTORS[i].full; return id; }
   function nodeOf(m) {
-    var n = { id: m.id, parent: m.actor, label: m.node, data: { duration: m.dur } };
+    var n = {
+      id: m.id, parent: m.actor, label: m.node,
+      data: { duration: m.dur, seq: { actor: m.actor, row: m.row } },
+    };
     if (m.join) n.join = m.join;
     return n;
   }
+  // A message label is the primary text of a sequence diagram, so it rides upright on a
+  // pill; the preset's 180px cap leaves room for a real sentence. `data.duration` is the
+  // wire time the compiler paces the hop with, chipped on the edge by the preset.
   function edgesOf(m) {
-    return m.in.map(function (e) { return { id: "m:" + e.from + ">" + m.id, source: e.from, target: m.id, label: e.label }; });
+    return m.in.map(function (e) {
+      return {
+        id: "m:" + e.from + ">" + m.id, source: e.from, target: m.id,
+        label: { text: e.label, pill: true },
+        data: { duration: e.wire },
+      };
+    });
   }
 
   // Activations that share a row are added, framed and played as one beat.
@@ -193,8 +209,11 @@
     g0.ids = g0.msgs.map(function (m) { return m.id; });
   });
 
+  // An actor declares itself a container up front, so an empty lifeline draws as the
+  // header-only dashed column it is and reaches the solver as a column, not a leaf.
   var SEED = {
-    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label, container: true }; })
+      .concat([nodeOf(MSGS[0])]),
     edges: [],
   };
 
@@ -223,12 +242,12 @@
     g0.msgs.forEach(function (m) { adds.push({ op: "addNode", args: [nodeOf(m)] }); });
     g0.msgs.forEach(function (m) { edgesOf(m).forEach(function (e) { adds.push({ op: "addEdge", args: [e] }); }); });
     STEPS.push({ op: "batch", steps: adds, dur: 260 * P });
-    STEPS.push({ op: "camera", args: [{ nodes: prev.ids.concat(g0.ids), k: 1, pad: 110, dur: 300 * P }] });
+    STEPS.push({ op: "camera", args: [{ nodes: prev.ids.concat(g0.ids), maxK: 1.2, pad: 110, dur: 300 * P }] });
     STEPS.push({ op: "run.play", until: g0.anchor });
     if (head === "rev.3") {
       // The third round trip is the moment worth marking.
       STEPS.push({ op: "highlight", args: [{ nodes: ["rev.1", "rev.2", "rev.3"], variant: "warn", pulse: true }] });
-      STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.1", "rev.3"], k: 0.9, pad: 90, dur: 450 * P }] });
+      STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.1", "rev.3"], maxK: 1.2, pad: 90, dur: 450 * P }] });
       STEPS.push({ op: "caption", args: ["N+1: 3 products = 3 round trips."] });
       STEPS.push({ op: "wait", ms: 1200 * P });
     }
@@ -239,22 +258,22 @@
   STEPS.push({ label: "DataLoader" });
   STEPS.push({ op: "clearHighlight" });
   STEPS.push({ op: "caption", args: ["Same query, with a DataLoader."] });
-  STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.1", "rev.3", "gw.5"], k: 0.9, pad: 90, dur: 450 * P }] });
+  STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.1", "rev.3", "gw.5"], maxK: 1.2, pad: 90, dur: 450 * P }] });
   STEPS.push({ op: "condense", args: [CONDENSE_IDS, MERGED] });
   STEPS.push({ op: "batch", steps: [
-    { op: "update", args: [IN_EDGE, { label: "fetch ×3" }] },
-    { op: "update", args: [OUT_EDGE, { label: "ratings ×3" }] },
+    { op: "update", args: [IN_EDGE, { label: { text: "fetch ×3 · one round trip", pill: true } }] },
+    { op: "update", args: [OUT_EDGE, { label: { text: "ratings for #1, #2, #3", pill: true } }] },
   ], dur: 260 * P });
   STEPS.push({ op: "highlight", args: [{ nodes: ["rev.batch"], variant: "ok", pulse: true }] });
   STEPS.push({ op: "caption", args: ["Five activations become one: 117ms of round trips → 45ms."] });
   STEPS.push({ op: "wait", ms: 1100 * P });
   STEPS.push({ op: "caption", args: ["Replay the same leg: the ball crosses once."] });
   STEPS.push(REPLAY_SEEK);
-  STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.batch"], k: 1, pad: 110, dur: 400 * P }] });
+  STEPS.push({ op: "camera", args: [{ nodes: ["gw.2", "rev.batch"], maxK: 1.2, pad: 110, dur: 400 * P }] });
   STEPS.push({ op: "run.play", until: "rev.batch" });
-  STEPS.push({ op: "camera", args: [{ nodes: ["rev.batch", "gw.5"], k: 1, pad: 110, dur: 300 * P }] });
+  STEPS.push({ op: "camera", args: [{ nodes: ["rev.batch", "gw.5"], maxK: 1.2, pad: 110, dur: 300 * P }] });
   STEPS.push({ op: "run.play", until: "gw.5" });
-  STEPS.push({ op: "camera", args: [{ nodes: ["gw.5", "cli.2"], k: 1, pad: 110, dur: 300 * P }] });
+  STEPS.push({ op: "camera", args: [{ nodes: ["gw.5", "cli.2"], maxK: 1.2, pad: 110, dur: 300 * P }] });
   STEPS.push({ op: "run.play", until: "cli.2" });
   STEPS.push({ label: "done" });
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
@@ -262,7 +281,7 @@
   STEPS.push({ op: "wait", ms: 1000 * P });
 
   var RUN_OPTS = {
-    hopMs: 520 * P,                      // the message in flight — the part worth watching
+    hopMs: 380 * P,                      // only for a wire that declares no duration of its own
     // Durations here span 1ms … 45ms, so a square-root curve keeps a 1ms gateway hop and a
     // 41ms subgraph call visibly different without either becoming tedious.
     dwell: function (sec) {
@@ -283,7 +302,7 @@
       controls: true,
       preset: "pipeline",                // duration chips + the condense odometer/delta badge
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",                  // plays itself when the URL carries ?auto=1
     });
     g.run(RUN_OPTS);
     sb = g.storyboard();
@@ -293,7 +312,7 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
-  window.__g = g;
+  window.smv = g;                        // the convention a headless checker looks for
 
   // ---- side panel: the message list lights up as the ball arrives ---------------------
   function liId(id) { return "li-" + id.split(".").join("-"); }
@@ -335,24 +354,29 @@
   });
 
   // ---- controls -----------------------------------------------------------------------
-  var playing = false;
-  function finish() {
+  // g.finished resolves when the storyboard runs out of steps, however the story was
+  // started — the Play button, or autoplay under ?auto=1.
+  var playing = AUTO;
+  if (AUTO) phaseEl.textContent = "playing…";
+  g.finished.then(function () {
     playing = false;
     phaseEl.textContent = "story complete — scrub the bar or Restart";
     window.__smvExit = { done: true, errors: errors };
-  }
+  });
   $("#play").addEventListener("click", function () {
     if (playing) return;
     playing = true;
     phaseEl.textContent = "playing…";
-    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+    Promise.resolve(sb.play()).catch(function (e) {
+      errors.push("play: " + String(e && e.message || e));
+      g.finish("play-error");            // an explicit end so a waiter never hangs
+    });
   });
   $("#step").addEventListener("click", function () {
     Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
   });
   $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
 
-  if (AUTO) $("#play").click();
 })();
 </script>
 </body>

@@ -52,6 +52,10 @@
   the message once, then fans out on a single row — a live push to Client B and a queue entry
   for offline Client C, two balls in flight at once. A join waits for both receipts before A
   sees its double check. Later, when C reconnects, the queued message finally lands.
+  Every actor is declared <code>container: true</code> so its lifeline exists before its first
+  activation, each activation carries its own <em>(actor, time)</em> placement in
+  <code>data.seq</code>, and every message declares its own <code>data.duration</code> — so the
+  phone hops across the network read visibly longer than the calls inside the datacentre.
 </p>
 
 <div class="bar">
@@ -69,9 +73,10 @@
     <h3 style="margin-top:14px">What to look for</h3>
     <ul class="watch">
       <li>The gateway's ack fans out on one row: two balls leave together — a push to B, a queue entry in the store for C.</li>
-      <li>The store's queued ack usually arrives at the join first and waits; B's read receipt is what the join is really waiting on.</li>
+      <li>Wire time is per edge: the 2 ms hop into the message store lands long before the 70 ms push reaches B's phone, so the queued ack sits at the join waiting — B's read receipt is what the join is really waiting on.</li>
       <li><code>gwjoin</code> is a declared <code>join: "all"</code> activation — it only fires once both branches have checked in.</li>
       <li>After the gap, Client C's own reconnect kicks off a second, shorter delivery: drain the queue, render, receipt, ack.</li>
+      <li>Message labels ride upright on their own backing pill, so the full text of each one fits on the arrow.</li>
       <li>Scrub the transport bar backwards — structural steps are snapshotted, so the diagram folds back up.</li>
     </ul>
   </aside>
@@ -102,47 +107,62 @@
   ];
 
   // Each entry is one activation: who runs it, what it does, how long that takes, and the
-  // message(s) that hand it the ball. `from` can carry two entries — that's a join. `pair`
-  // marks the second of two activations that share a row (a fan-out landing at once).
+  // message(s) that hand it the ball. `from` can carry two entries — that's a join; each one
+  // names its own `wire` time, the duration the edge declares for the hop. `pair` marks the
+  // second of two activations that share a row (a fan-out landing at once).
   var ACT = [
     { id: "a1", actor: "a", row: 0, node: "compose message", dur: "0.2s" },
-    { id: "gw1", actor: "gw", row: 1, node: "route to room", dur: "4ms", from: [{ id: "a1", msg: "send msg" }] },
-    { id: "pres1", actor: "pres", row: 2, node: "B online · C offline", dur: "3ms", from: [{ id: "gw1", msg: "who's online in room?" }] },
-    { id: "gw2", actor: "gw", row: 3, node: "plan delivery", dur: "1ms", from: [{ id: "pres1", msg: "roster" }] },
-    { id: "store1", actor: "store", row: 4, node: "INSERT message", dur: "4ms", from: [{ id: "gw2", msg: "persist(msg)" }] },
-    { id: "gw3", actor: "gw", row: 5, node: "ack + fan out", dur: "1ms", from: [{ id: "store1", msg: "ok · id 42" }] },
-    { id: "b1", actor: "b", row: 6, node: "render bubble", dur: "0.2s", from: [{ id: "gw3", msg: "push msg" }], pair: true },
-    { id: "store2", actor: "store", row: 6, node: "queue for C", dur: "3ms", from: [{ id: "gw3", msg: "queue (C offline)" }] },
-    { id: "b2", actor: "b", row: 7, node: "mark read", dur: "0.15s", from: [{ id: "b1", msg: null }] },
+    { id: "gw1", actor: "gw", row: 1, node: "route to room", dur: "4ms", from: [{ id: "a1", msg: "send msg · room 7", wire: "60ms" }] },
+    { id: "pres1", actor: "pres", row: 2, node: "B online · C offline", dur: "3ms", from: [{ id: "gw1", msg: "who is online in room 7?", wire: "1ms" }] },
+    { id: "gw2", actor: "gw", row: 3, node: "plan delivery", dur: "1ms", from: [{ id: "pres1", msg: "roster: B live, C offline", wire: "1ms" }] },
+    { id: "store1", actor: "store", row: 4, node: "INSERT message", dur: "4ms", from: [{ id: "gw2", msg: "persist(msg)", wire: "2ms" }] },
+    { id: "gw3", actor: "gw", row: 5, node: "ack + fan out", dur: "1ms", from: [{ id: "store1", msg: "ok · id 42", wire: "2ms" }] },
+    { id: "b1", actor: "b", row: 6, node: "render bubble", dur: "0.2s", from: [{ id: "gw3", msg: "push msg · websocket", wire: "70ms" }], pair: true },
+    { id: "store2", actor: "store", row: 6, node: "queue for C", dur: "3ms", from: [{ id: "gw3", msg: "queue (C offline)", wire: "2ms" }] },
+    { id: "b2", actor: "b", row: 7, node: "mark read", dur: "0.15s", from: [{ id: "b1", msg: null, wire: "1ms" }] },
     { id: "gwjoin", actor: "gw", row: 8, node: "delivery report", dur: "1ms", join: "all",
-      from: [{ id: "b2", msg: "read ✓" }, { id: "store2", msg: "queued ok" }] },
-    { id: "a2", actor: "a", row: 9, node: "show ✓✓", dur: "0.2s", from: [{ id: "gwjoin", msg: "delivered + read" }] },
-    { id: "c1", actor: "c", row: 11, node: "reconnect", dur: "0.2s", from: [{ id: "a2", msg: null }] },
-    { id: "gw4", actor: "gw", row: 12, node: "client back online", dur: "2ms", from: [{ id: "c1", msg: "reconnect" }] },
-    { id: "store3", actor: "store", row: 13, node: "drain queue", dur: "6ms", from: [{ id: "gw4", msg: "drain for C" }] },
-    { id: "c2", actor: "c", row: 14, node: "render bubble", dur: "0.2s", from: [{ id: "store3", msg: "queued msg" }] },
-    { id: "c3", actor: "c", row: 15, node: "mark read", dur: "0.15s", from: [{ id: "c2", msg: null }] },
-    { id: "gw5", actor: "gw", row: 16, node: "relay receipt", dur: "1ms", from: [{ id: "c3", msg: "read ✓" }] },
-    { id: "a3", actor: "a", row: 17, node: "show ✓✓ (C)", dur: "0.2s", from: [{ id: "gw5", msg: "delivered + read (C)" }] },
+      from: [{ id: "b2", msg: "read ✓ · seen at 10:04", wire: "65ms" }, { id: "store2", msg: "queued ok", wire: "2ms" }] },
+    { id: "a2", actor: "a", row: 9, node: "show ✓✓", dur: "0.2s", from: [{ id: "gwjoin", msg: "delivered + read", wire: "60ms" }] },
+    { id: "c1", actor: "c", row: 11, node: "reconnect", dur: "0.2s", from: [{ id: "a2", msg: null, wire: "0.3s" }] },
+    { id: "gw4", actor: "gw", row: 12, node: "client back online", dur: "2ms", from: [{ id: "c1", msg: "reconnect · resume room 7", wire: "90ms" }] },
+    { id: "store3", actor: "store", row: 13, node: "drain queue", dur: "6ms", from: [{ id: "gw4", msg: "drain for C", wire: "2ms" }] },
+    { id: "c2", actor: "c", row: 14, node: "render bubble", dur: "0.2s", from: [{ id: "store3", msg: "queued msg · id 42", wire: "85ms" }] },
+    { id: "c3", actor: "c", row: 15, node: "mark read", dur: "0.15s", from: [{ id: "c2", msg: null, wire: "1ms" }] },
+    { id: "gw5", actor: "gw", row: 16, node: "relay receipt", dur: "1ms", from: [{ id: "c3", msg: "read ✓ (C)", wire: "85ms" }] },
+    { id: "a3", actor: "a", row: 17, node: "show ✓✓ (C)", dur: "0.2s", from: [{ id: "gw5", msg: "delivered + read (C)", wire: "60ms" }] },
   ];
   var byId = {};
   ACT.forEach(function (it) { byId[it.id] = it; });
 
   var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
-  ACT.forEach(function (it) { seq.place(it.id, it.actor, it.row); });
 
+  // The activation carries its own (actor, row) placement in `data.seq`; the shell hands a
+  // node's data to the solver, so nothing has to be registered out of band.
   function nodeOf(it) {
-    var n = { id: it.id, parent: it.actor, label: it.node, data: { duration: it.dur } };
+    var n = {
+      id: it.id, parent: it.actor, label: it.node,
+      data: { duration: it.dur, seq: { actor: it.actor, row: it.row } },
+    };
     if (it.join) n.join = it.join;
     return n;
   }
+  // The message is the primary text here: upright, on its own pill, and the wire time is the
+  // edge's own declared duration rather than one global hop for the whole diagram.
   function edgesFor(it) {
     return (it.from || []).map(function (f) {
-      return { id: "m:" + f.id + ">" + it.id, source: f.id, target: it.id, label: f.msg };
+      var e = { id: "m:" + f.id + ">" + it.id, source: f.id, target: it.id, data: { duration: f.wire } };
+      if (f.msg) e.label = { text: f.msg, pill: true };
+      return e;
     });
   }
 
-  var SEED = { nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(ACT[0])]), edges: [] };
+  // An actor is a container from the start — a header-only lifeline box, dashed until its
+  // first activation lands in it.
+  var SEED = {
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label, container: true }; })
+      .concat([nodeOf(ACT[0])]),
+    edges: [],
+  };
 
   // ---- storyboard: add the next activation(s) a beat before the ball arrives ----------
   var STEPS = [{ label: "send" },
@@ -157,8 +177,8 @@
         { op: "addNode", args: [nodeOf(it)] }, { op: "addEdge", args: [edgesFor(it)[0]] },
         { op: "addNode", args: [nodeOf(it2)] }, { op: "addEdge", args: [edgesFor(it2)[0]] },
       ], dur: 260 * P });
-      STEPS.push({ op: "camera", args: [{ nodes: [it.from[0].id, it.id, it2.id], k: 1, pad: 130, dur: 320 * P }] });
-      STEPS.push({ op: "caption", args: ["Two balls, one row — pushed to B, queued for C.", { place: "top" }] });
+      STEPS.push({ op: "camera", args: [{ nodes: [it.from[0].id, it.id, it2.id], maxK: 1, pad: 130, dur: 320 * P }] });
+      STEPS.push({ op: "caption", args: ["Two balls, one row — a 70 ms push to B, a 2 ms queue write for C.", { place: "top" }] });
       STEPS.push({ op: "run.play", until: it.id });
       STEPS.push({ op: "run.play", until: it2.id });
       i += 2;
@@ -168,7 +188,7 @@
     edgesFor(it).forEach(function (e) { addOps.push({ op: "addEdge", args: [e] }); });
     STEPS.push({ op: "batch", steps: addOps, dur: 260 * P });
     var camNodes = it.from.map(function (f) { return f.id; }).concat([it.id]);
-    STEPS.push({ op: "camera", args: [{ nodes: camNodes, k: 1, pad: 120, dur: 300 * P }] });
+    STEPS.push({ op: "camera", args: [{ nodes: camNodes, maxK: 1, pad: 120, dur: 300 * P }] });
     if (it.id === "gwjoin") {
       STEPS.push({ op: "caption", args: ["The report waits for both — B's read receipt and the store's queued ack.", { place: "top" }] });
     }
@@ -184,8 +204,9 @@
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
   STEPS.push({ op: "wait", ms: 900 * P });
 
+  // Every edge declares its own wire time, so there is no global hop to stretch; `dwell` only
+  // paces what an actor does while the ball is parked on it.
   var RUN_OPTS = {
-    hopMs: 520 * P,                       // the message in flight — the part worth watching
     dwell: function (sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; },
   };
 
@@ -196,11 +217,15 @@
   try {
     g = SparkleMotion.mount("#pipe", SEED, {
       theme: "auto",
-      layout: { dir: "TB", solver: seq.solver, nodesep: 32, ranksep: 22, marginx: 24, marginy: 16, minColWidth: 132 },
+      layout: {
+        dir: "TB", solver: seq.solver, nodesep: 32, ranksep: 22, marginx: 24, marginy: 16,
+        minColWidth: 132,
+        edgeLabelMaxW: 180,               // the message is the content here, not a hint on a line
+      },
       animation: { duration: 360 * P, easing: "cubic-out" },
       controls: true,
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",                   // plays itself only when the URL carries ?auto=1
     });
     g.run(RUN_OPTS);
     sb = g.storyboard();
@@ -210,7 +235,7 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
-  window.__g = g;
+  window.smv = g;                         // the instance the checker (and the console) looks for
 
   // ---- side panel: the message list lights up as the ball arrives --------------------
   ACT.forEach(function (it) {
@@ -221,8 +246,8 @@
     li.textContent = (msgs.length ? msgs.join(" + ") + " → " : "") + actorLabel + ": " + it.node;
     msgsEl.appendChild(li);
   });
-  var run = g.run();
-  run.on("start", function (ev) {
+  // Run events are mirrored on the instance bus, so this outlives any recompile.
+  g.on("run:start", function (ev) {
     var li = document.getElementById("li-" + String(ev.nodeId));
     if (!li) return;
     msgsEl.querySelectorAll("li.now").forEach(function (x) { x.classList.remove("now"); x.classList.add("done"); });
@@ -230,24 +255,24 @@
   });
 
   // ---- controls -------------------------------------------------------------------
-  var playing = false;
-  function finish() {
+  var playing = AUTO;
+  if (AUTO) phaseEl.textContent = "playing…";
+  // The end of the story is the library's own signal, not page-rolled plumbing.
+  g.finished.then(function () {
     playing = false;
     phaseEl.textContent = "story complete — scrub the bar or Restart";
     window.__smvExit = { done: true, errors: errors };
-  }
+  });
   $("#play").addEventListener("click", function () {
     if (playing) return;
     playing = true;
     phaseEl.textContent = "playing…";
-    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+    Promise.resolve(sb.play()).catch(function (e) { errors.push("play: " + String(e && e.message || e)); });
   });
   $("#step").addEventListener("click", function () {
     Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
   });
   $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
-
-  if (AUTO) $("#play").click();
 })();
 </script>
 </body>
