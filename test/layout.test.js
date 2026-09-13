@@ -334,3 +334,44 @@ test("F35: a container the solver DID place still unions with its children", () 
   });
   assert.ok(result.nodes.act.x - result.nodes.act.w / 2 <= 380, "kept the solver's own left edge");
 });
+
+test("F33/F35: an EMPTY container the solver omitted keeps the origin fallback, and is named", () => {
+  const warned = [];
+  const realWarn = console.warn;
+  console.warn = (m) => warned.push(m);
+  let result;
+  try {
+    result = layout(fixtureSeam(), {
+      ...OPTS,
+      solver: (input) => {
+        const nodes = {};
+        for (const n of input.nodes) if (n.id !== "solo") nodes[n.id] = { x: 500, y: 300, w: n.w, h: n.h };
+        return { nodes, edges: {}, order: [] };
+      },
+    });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(result.nodes.solo.x, 0, "no children means no bbox to derive from");
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /^\[smv:layout\] solver returned no rect for empty container\(s\): solo/);
+});
+
+test("a container WITH children that the solver omitted is derived silently (no warning)", () => {
+  const warned = [];
+  const realWarn = console.warn;
+  console.warn = (m) => warned.push(m);
+  try {
+    layout(fixtureSeam(), {
+      ...OPTS,
+      solver: (input) => {
+        const nodes = {};
+        for (const n of input.nodes) if (n.id !== "act") nodes[n.id] = { x: 500, y: 300, w: n.w, h: n.h };
+        return { nodes, edges: {}, order: [] };
+      },
+    });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.deepEqual(warned, []);
+});

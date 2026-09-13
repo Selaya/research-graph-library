@@ -75,7 +75,7 @@
         if (n.parent !== undefined && byId.has(n.parent)) isContainer.add(n.parent);
         // An actor declared `container: true` is a lifeline from the start, even with no
         // activations yet — it is not a leaf to park in the spare column.
-        if (n.container) isContainer.add(n.id);
+        if (n.container) { isContainer.add(n.id); colOf(n.id); }
       });
 
       // 1. resolve every leaf to (col, row); unknown ids go to a spare column, stacked.

@@ -72,6 +72,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 
 const { mount } = await import("../src/index.js");
 const { GraphError } = await import("../src/index.js");
+const { CSS } = await import("../src/styles.js");
 
 /** Drive the manual clock until `promise` settles (opts.ticker:"manual", D1). */
 async function settle(promise, g, maxTicks = 800, ms = 16) {
@@ -307,6 +308,13 @@ test("F33: a childless node with container:true draws as an empty container", ()
   assert.equal(plain.hasAttribute("data-container"), false);
   assert.equal(g.node("act").container, true, "the spec field round-trips through the store");
   g.destroy();
+});
+
+test("F33: the empty container's box promises nothing to click", () => {
+  // The chevron and the pointer cursor say "open me"; collapse/expand, the tap toggle and
+  // aria-expanded all key off "has children", so an empty container must not show either.
+  assert.match(CSS, /\.smv-node\[data-container\]\[data-empty\]\{cursor:default\}/);
+  assert.match(CSS, /\.smv-node\[data-container\]\[data-empty\] path\.smv-node-chev\{display:none\}/);
 });
 
 test("F33: the empty container reaches the solver flagged, and loses `empty` once a child lands", async () => {

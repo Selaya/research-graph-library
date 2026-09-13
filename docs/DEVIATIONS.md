@@ -508,6 +508,24 @@ alone, instead of unioning with the origin fallback. Solver-side consequence of 
 condensed node's `data` reaches the solver like any other node's, so a placement-driven
 solver can read the merged node's placement out of the spec it was condensed with.
 
-**Cost:** one more field on the rendered view (`empty`) and one CSS rule
+**Cost:** one more field on the rendered view (`empty`) and two CSS rules
 (`[data-container][data-empty]`), so an empty container reads as "nothing here yet" rather
-than as an empty frame. `container: true` on a node that does have children is ignored.
+than as an empty frame — dashed box, no disclosure chevron, no pointer cursor.
+`container: true` on a node that does have children is ignored.
+
+**Scope of the flag — deliberately narrow.** `container: true` changes the VIEW, the LAYOUT
+input and the DRAWING, and nothing else. Every other subsystem keeps keying off "has
+children", because that is what they actually operate on:
+
+- `viewstate.isContainer/collapse/expand` — `g.collapse(id)` on an empty declared container
+  reports `applied: false`; there is no subtree to fold.
+- `interact.js` `tapToggle` and the keyboard toggle — inert for the same reason, which is
+  why the empty box drops the chevron and the pointer cursor.
+- `a11y.js` — no `aria-expanded`, matching the fact that nothing can be expanded.
+- `run.js` — `childrenOf` comes from `parent` links, so a childless declared container is
+  still an EXECUTABLE step (it seeds/receives tokens, takes a status and a duration chip)
+  and stops being one the moment its first child lands. Declare a container that the run
+  engine must never execute only when you are about to give it children.
+
+Widening any of these would mean inventing a second, empty kind of collapsible thing; the
+flag exists to fix how an empty container is drawn and solved, not to fake a subtree.

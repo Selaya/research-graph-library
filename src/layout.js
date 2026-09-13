@@ -104,6 +104,17 @@ export function layout(view, opts = {}) {
     outNodes[n.id] = d ? { x: d.x, y: d.y, w: d.w, h: d.h } : { x: 0, y: 0, w: n.w || 0, h: n.h || 0 };
   }
   if (hasParents) padContainers(nodes, outNodes, { ...CONTAINER_PAD, ...(o.containerPad || {}) }, unsolved);
+  // A declared container (F33) with no children yet has no bbox to derive from, so an
+  // omitted rect can only fall back to the origin. Name it rather than silently stacking
+  // it on whatever sits there.
+  if (unsolved.size) {
+    const parents = new Set(nodes.map((n) => n.parent));
+    const stranded = nodes.filter((n) => n.container === true && unsolved.has(n.id) && !parents.has(n.id));
+    if (stranded.length)
+      console.warn(
+        `[smv:layout] solver returned no rect for empty container(s): ${stranded.map((n) => n.id).join(", ")} — placed at the origin`
+      );
+  }
 
   const outEdges = {};
   for (const e of realEdges) {

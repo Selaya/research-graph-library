@@ -90,7 +90,9 @@ then `import { dagreSolver } from "sparkle-motion-visualizer/adapters/dagre"`.
 - **Compound nodes** — `parent` links make containers; per-node animated
   expand ⇄ collapse with meta-edge aggregation (deduped, weighted) while collapsed.
   `container: true` declares one up front, so a container that has no children *yet*
-  draws as a header-only box instead of a plain node.
+  draws as a header-only box instead of a plain node. It is a drawing/layout flag only:
+  until real children arrive there is nothing to fold, so collapse/expand, the tap toggle,
+  `aria-expanded` and the run engine all keep keying off "has children".
 - **Condense / split** — `g.condense([ids], newNode)` merges N nodes into one with a
   staged highlight → converge → reveal choreography (and a convexity guard against
   silent graph corruption); `g.split(id, {nodes, edges})` is the mirror image, 1 → N,
@@ -463,8 +465,11 @@ own options travel with it:
 mount("#seq", spec, { layout: { dir: "TB", solver: seq.solver, minColWidth: 140 } });
 ```
 
-A solver that returns no rect for a container is not guessing wrong: the shell then derives
-that container's box purely from its children's bounding box plus `containerPad`.
+A solver that returns no rect for a container *with children* is not guessing wrong: the
+shell then derives that container's box purely from its children's bounding box plus
+`containerPad`. An empty declared container has no bbox to derive from, so an omitted rect
+leaves it at the origin and the shell warns (`[smv:layout] solver returned no rect for
+empty container(s): …`).
 
 **Exports.** ESM-only entries (not in the IIFE, D11):
 
