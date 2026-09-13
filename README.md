@@ -564,7 +564,8 @@ dev-installed `@dagrejs/dagre`).
 
 Design: `docs/PLAN.md` (decisions D1–D15, milestones), `docs/INTERNALS.md` (module
 contracts), `docs/RECORDING.md` (director scripts + video capture), `docs/research/`
-(landscape + critique the plan rests on).
+(landscape + critique the plan rests on). `docs/API-FRICTIONS.md` collects the API and
+internals frictions the demo gallery surfaced, each with a recommendation.
 
 Status: M0 (walking skeleton), M1 (pipeline demo end to end), M2 (live mode, split,
 edge labels, expand/collapse-all, query sugar, ARIA + table fallback, SVG/PNG export,
