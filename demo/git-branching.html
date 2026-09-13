@@ -82,9 +82,9 @@
     Two feature branches, <strong>feat/auth</strong> and <strong>feat/search</strong>, split off
     <code>main</code>, gather commits, and pass CI at their own pace. Both branches
     <em>condense</em> into single merge commits, <code>release/1.4</code> is cut and tagged, and
-    a hotfix branches off it — a bounded retry loop stands in for cherry-pick attempts landing
-    back on the release. Watch the loop's iteration badge, and the merge choreography collapse
-    three commits into one node. Zoom is ctrl/⌘&nbsp;+&nbsp;wheel; plain scroll pans.
+    a hotfix branches off it — the cherry-pick onto the release genuinely fails twice before it
+    lands, so the retry arc is a real <code>data.fail</code> budget rather than a mime. Watch the
+    loop's iteration badge, and the merge choreography collapse three commits into one node. Zoom is ctrl/⌘&nbsp;+&nbsp;wheel; plain scroll pans.
   </p>
 </header>
 
@@ -107,10 +107,12 @@
 
 <p class="legend">
   Legend — chip = duration (<code>data.duration</code>, drives the simulated CI timing),
-  dashed arc = the <code>cherry-pick</code> loop edge (<code>loop:true, maxIterations:2</code>),
+  dashed arc = the <code>cherry-pick</code> retry arc (<code>loop:true, onFail:true</code>) that the
+  hotfix suite takes while its <code>data.fail: { retries: 2, recover: true }</code> budget lasts,
   the gold ring = a tag, condense's staged highlight → converge → reveal turns three commits
   into one <em>merge commit</em> node, and the transport bar under the graph scrubs the whole
   history — backward jumps restore a snapshot instantly, forward ones replay the ops between.
+  Click any commit to read it out under the graph.
 </p>
 
 <div id="report"></div>
@@ -136,7 +138,9 @@
     errors.push("unhandledrejection: " + String(e && e.reason));
   });
 
-  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  // ?auto=1 is the checker's headless pass: `autoplay: "auto"` starts the story by itself,
+  // and the flag is read here only to pick a brisker playback speed.
+  var AUTO = /[?&]auto=(1|true)(&|$)/.test(window.location.search);
 
   // ===========================================================================
   // 1. The graph — assembled incrementally by the storyboard, not handed to mount whole,
@@ -200,11 +204,17 @@
   var WAVE_HOTFIX = [
     add({ id: "hotfix.1", label: "hotfix: null-check patch", data: { duration: "15m" } }),
     edge({ id: "e-tag14-hotfix1", source: "tag.v14", target: "hotfix.1" }),
-    add({ id: "hotfix.ci", label: "CI: hotfix suite", data: { duration: "12s" } }),
+    add({
+      id: "hotfix.ci",
+      label: "CI: hotfix suite",
+      // A declared failure with a retry budget: two attempts fail on a cherry-pick conflict,
+      // the one that spends the last retry recovers and the hotfix moves on.
+      data: { duration: "12s", fail: { reason: "cherry-pick conflict", retries: 2, recover: true } },
+    }),
     edge({ id: "e-hotfix1-ci", source: "hotfix.1", target: "hotfix.ci" }),
-    // The bounded retry loop stands in for cherry-pick attempts: source dwells, checks the
-    // loop edge, and either flies the arc (iteration 1) or ticks in place (2+).
-    edge({ id: "cherrypick", source: "hotfix.ci", target: "hotfix.1", loop: true, maxIterations: 2 }),
+    // The retry's arc: every failed attempt crosses it back onto the patch commit, so the
+    // iteration badge and `state().loops.cherrypick` count real attempts.
+    edge({ id: "cherrypick", source: "hotfix.ci", target: "hotfix.1", loop: true, onFail: true, maxIterations: 2 }),
     add({ id: "release.patch", label: "cherry-pick onto release/1.4", data: { duration: "6s" } }),
     edge({ id: "e-ci-patch", source: "hotfix.ci", target: "release.patch" }),
     add({ id: "tag.v141", label: "tag v1.4.1", data: { duration: "1s" } }),
@@ -270,13 +280,14 @@
     { label: "hotfix" },
     grow(WAVE_HOTFIX, 800),
     cam({ nodes: ["hotfix.1", "hotfix.ci"], pad: 60, dur: 800 }),
-    cap("A critical bug needs a hotfix off release/1.4 — cherry-picked back, up to 2 tries."),
+    cap("A critical bug needs a hotfix off release/1.4 — cherry-picked back, up to 2 retries."),
     hold(400),
     { op: "run.play" },
-    { op: "props", args: [{ "tag.v141": { "--smv-fill": "#1f8f5f" } }] },
+    // merge: the v1.4.0 tag keeps its gold instead of being wiped by this second override.
+    { op: "props", args: [{ "tag.v141": { "--smv-fill": "#1f8f5f" } }, { merge: true }] },
     hi(["tag.v141"], "ok", { pulse: true }),
     cam({ fit: true, pad: 50, dur: 800 }),
-    cap("v1.4.1 ships with the hotfix cherry-picked in."),
+    cap("v1.4.1 ships with the hotfix cherry-picked in — on the third attempt."),
   ];
 
   // ===========================================================================
@@ -297,8 +308,9 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto", // plays itself under ?auto=1; the buttons drive it otherwise
     });
+    window.smv = g; // the library's "story finished" convention: g.finished
     g.run({ hopMs: 220 }); // compile up front so the transport bar has a timeline from step 0
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
@@ -342,31 +354,29 @@
   }
   g.ticker.add(sampleFrame);
 
-  var storyDone = false;
   sb.on("step", function (ev) {
+    playBtn.disabled = true;
     paintRail();
-    g.fitView({ animate: true });
     phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+  sb.on("done", function () { paintRail(); phaseEl.textContent = "story complete"; });
 
-  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
+  // Reactive narration off the run bus (mirrored on `g`, so it survives every recompile):
+  // the cherry-pick's attempts are engine events, not storyboard steps.
+  var attempts = 0;
+  g.on("run:fail", function (ev) {
+    if (!ev || ev.nodeId !== "hotfix.ci") return;
+    attempts++;
+    g.caption("Cherry-pick attempt " + attempts + " hit a conflict — retrying onto the patch commit.");
+  });
+  // F27: a real click event, no pointerdown archaeology.
+  g.on("nodeclick", function (ev) {
+    var n = g.spec().nodes.filter(function (x) { return x.id === ev.id; })[0];
+    phaseEl.textContent = n ? n.id + " · " + (n.label || "") : ev.id;
+  });
 
-  var started = false;
   function start() {
-    if (started) return;
-    started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
     sb.play();
@@ -382,23 +392,17 @@
       "errors               " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
 
-  async function auto() {
-    if (g.run()) g.run().speed(3); // keep the whole story comfortably under the check's budget
-    await sleep(200);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
-    await sleep(300);
-    writeReport();
-    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
-    window.__smvExit = { done: true, errors: errors };
-  }
-
   paintRail();
+
   if (AUTO) {
-    auto().catch(function (err) {
-      errors.push("auto: " + String((err && err.message) || err));
-      writeReport();
-      window.__smvExit = { done: true, errors: errors };
+    // bare speed() is a pure playback multiplier now, so sim().duration keeps its meaning
+    g.run().speed(3); // keep the whole story comfortably under the check's budget
+    g.finished.then(function () {
+      setTimeout(function () {
+        writeReport();
+        phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
+        window.__smvExit = { done: true, errors: errors };
+      }, 300);
     });
   }
 })();

@@ -80,11 +80,12 @@
   <p class="lede">
     Three sub-assemblies — <em>chassis</em>, <em>drivetrain</em>, <em>electronics</em> — build
     as collapsed containers with a summed duration chip, converge on an
-    <code>join:"all"</code> <em>final assembly</em>, and hit <em>QC inspection</em>. The first
-    pass fails with a reason (<code>data.fail</code>); the second pass rides the dashed
-    <code>rework</code> loop edge (<code>maxIterations:2</code>) back to final assembly before
-    packaging and shipping. Watch the duration chips, the bottleneck sub-assembly, and the
-    loop's iteration badge.
+    <code>join:"all"</code> <em>final assembly</em>, and hit <em>QC inspection</em>. QC is
+    declared as a retry: <code>data.fail = { reason, recover: true }</code>, with the dashed
+    <code>rework</code> arc marked <code>onFail: true, maxIterations: 2</code>. Every failed
+    inspection rides that arc back to final assembly; the attempt that spends the last rework
+    passes, and the line moves on to packaging and shipping. Watch the duration chips, the
+    bottleneck sub-assembly, and the loop's iteration badge.
   </p>
 </header>
 
@@ -108,8 +109,9 @@
 <p class="legend">
   Legend — chip = duration (<code>durationAgg:'sum'</code> rolls a collapsed sub-assembly up),
   pips under <em>Final assembly</em> = the three join slots, dashed arc = the
-  <code>rework</code> back edge (<code>loop:true, maxIterations:2</code>), red node = a
-  <code>data.fail</code> step, slim bar under the graph = total pipeline duration.
+  <code>rework</code> retry arc (<code>loop:true, onFail:true, maxIterations:2</code>), red
+  node = a spent <code>data.fail</code> budget, slim bar under the graph = the pipeline total
+  (<code>total:'both'</code> — summed work next to the critical path).
 </p>
 
 <div id="report"></div>
@@ -135,11 +137,10 @@
 
   // ---------------------------------------------------------------------------
   // The spec. Three parallel sub-assemblies (no shared upstream — each is its own root
-  // chain) converge on an explicit join:"all", then QC, then packaging/ship. `qc` carries
-  // data.fail from mount so the FIRST simulated pass genuinely fails with a reason; the
-  // storyboard clears it before the second pass so the structural `rework` loop edge
-  // (already present the whole time) actually gets to tick — a failing node never falls
-  // through to its loop edge (README: "no loop, no fan-out to successors").
+  // chain) converge on an explicit join:"all", then QC, then packaging/ship. QC declares
+  // a retry budget: `data.fail = { reason, recover: true }` with the `rework` arc marked
+  // `onFail: true`, so the arc's maxIterations IS the budget — two failed inspections that
+  // each fly the arc back to final assembly, then a third attempt that passes.
   // ---------------------------------------------------------------------------
 
   var SPEC = {
@@ -160,7 +161,7 @@
       { id: "electronics.sensors", parent: "electronics", label: "Sensors", data: { duration: "20m" } },
 
       { id: "final", label: "Final assembly", join: "all", data: { duration: "30m" } },
-      { id: "qc", label: "QC inspection", data: { duration: "12m", fail: FAIL_REASON } },
+      { id: "qc", label: "QC inspection", data: { duration: "12m", fail: { reason: FAIL_REASON, recover: true } } },
       { id: "packaging", label: "Packaging", data: { duration: "18m" } },
       { id: "ship", label: "Ship", data: { duration: "8m" } },
     ],
@@ -180,9 +181,9 @@
       { id: "f1", source: "final", target: "qc" },
       { id: "f2", source: "qc", target: "packaging" },
       { id: "f3", source: "packaging", target: "ship" },
-      // The rework loop: iteration 1 flies the arc back to final assembly, iteration 2
-      // ticks in place — capped by the edge's own maxIterations (2 of a possible 2 here).
-      { id: "rework", source: "qc", target: "final", loop: true, maxIterations: 2 },
+      // The rework loop is QC's retry arc: a failed inspection flies it back to final
+      // assembly and the line is rebuilt, twice at most (maxIterations = the budget).
+      { id: "rework", source: "qc", target: "final", loop: true, onFail: true, maxIterations: 2 },
     ],
   };
 
@@ -215,32 +216,26 @@
     cam({ fit: true }),
 
     { label: "expand all" },
+    { op: "expandAll" },
+    cam({ fit: true }),
     cap("expandAll() opens every sub-assembly in one transition."),
 
     { label: "collapse all" },
+    { op: "collapseAll" },
+    cam({ fit: true }),
     cap("collapseAll() folds them all back down just as cleanly."),
 
-    { label: "QC — first pass" },
-    cam({ node: "qc", k: 1.8, pad: 50 }),
-    cap("QC inspection runs..."),
+    { label: "QC & rework" },
+    // Frame final assembly AND QC together: the rework arc runs between them, and a
+    // multi-node camera is lidded at k 1.5 so this reads as "look at these two".
+    cam({ nodes: ["final", "qc"], pad: 70 }),
+    cap("QC inspection runs…"),
+    // One continuous play: fail → rework → fail → rework → pass. Each beat inside it is
+    // narrated reactively from the run's own `fail` and `loop` events.
     { op: "run.play", args: [{ until: "qc" }] },
-    cap("QC fails: " + FAIL_REASON + " (data.fail, carried through as the fail reason).", { place: "bottom" }),
-
-    { label: "rework" },
-    { op: "run.seek", ms: 0 },
-    { op: "update", args: ["qc", { data: { fail: false } }] },
-    cam({ fit: true }),
-    cap("Defect fixed. Same graph, same QC step — rework sends it back through final assembly."),
-
-    { label: "QC — second pass" },
-    { op: "run.play", args: [{ until: "qc" }] },
-    cap("QC passes this time — the rework loop is free to tick."),
-    { op: "highlight", args: [{ nodes: ["final"], variant: "ok", pulse: true }] },
-    { op: "run.play", args: [{ until: "packaging" }] },
-    cap("Two rework ticks on final assembly, capped at maxIterations:2, then QC waves it through."),
+    cap("Cleared on the third attempt: recover:true says the pass that spends the last rework is the one that works.", { place: "bottom" }),
 
     { label: "packaging & ship" },
-    { op: "clearHighlight" },
     cam({ fit: true }),
     { op: "run.play", args: [{}] },
     cap("Packaged and shipped."),
@@ -263,11 +258,13 @@
       layout: { dir: "LR", nodesep: 26, ranksep: 50 },
       animation: { duration: 400, easing: "cubic-out" },
       controls: true,
-      preset: "pipeline",
+      preset: { name: "pipeline", total: "both" },
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",
     });
+    window.smv = g; // the documented "story finished" hook: await smv.finished
     g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+    if (AUTO) g.run().speed(1.6); // playback only — sim().declared is unmoved by it
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -298,11 +295,11 @@
 
   // ---------------------------------------------------------------------------
   // Observations — sampled from the public run state, never library internals.
+  // Run events are read off `g` (g.on('run:<type>')), so they survive any recompile.
   // ---------------------------------------------------------------------------
 
-  var obs = { failedOnce: false, failReason: null, loopIteration: 0, loopMax: 0, loopBadge: "", joinFiredAt: null, joinNeeded: 0 };
+  var obs = { attempts: [], failReason: null, loopIteration: 0, loopMax: 0, loopBadge: "", joinFiredAt: null, joinNeeded: 0 };
 
-  var nodeEls = function () { return document.querySelectorAll("#pipe .smv-node"); };
   var loopBadgeText = function () {
     var el = document.querySelector("#pipe .smv-loop-badge");
     return el ? el.textContent : "";
@@ -326,19 +323,25 @@
 
   var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
 
-  g.run().on("fail", function (ev) {
-    if (ev && ev.nodeId === "qc" && !obs.failedOnce) {
-      obs.failedOnce = true;
-      obs.failReason = ev.reason || null;
-    }
+  g.on("run:fail", function (ev) {
+    if (!ev || ev.nodeId !== "qc") return;
+    obs.attempts.push({ attempt: ev.attempt, terminal: ev.terminal });
+    obs.failReason = ev.reason || obs.failReason;
+    g.caption(
+      "QC fails — " + ev.reason + " (attempt " + ev.attempt + " of " + (ev.retries + 1) + ").",
+      { place: "bottom" }
+    );
   });
-  g.run().on("loop", function (ev) {
-    if (ev && ev.edgeId === "rework") {
-      if (ev.max > obs.loopMax) obs.loopMax = ev.max;
-      if (ev.iteration > obs.loopIteration) obs.loopIteration = ev.iteration;
-    }
+  g.on("run:loop", function (ev) {
+    if (!ev || ev.edgeId !== "rework") return;
+    if (ev.max > obs.loopMax) obs.loopMax = ev.max;
+    if (ev.iteration > obs.loopIteration) obs.loopIteration = ev.iteration;
+    g.caption(
+      "Rework " + ev.iteration + " of " + ev.max + " — the arc carries it back to final assembly.",
+      { place: "bottom" }
+    );
   });
-  g.run().on("join", function (ev) {
+  g.on("run:join", function (ev) {
     if (ev && ev.nodeId === "final" && obs.joinFiredAt == null) {
       obs.joinFiredAt = ev.arrived;
       obs.joinNeeded = ev.needed;
@@ -352,7 +355,7 @@
     mTime.textContent = fmt(run.time());
     var qcNode = st.nodes.qc;
     var qcStatus = qcNode ? qcNode.status : "pending";
-    mQc.textContent = qcStatus;
+    mQc.textContent = obs.attempts.length ? qcStatus + " · attempt " + obs.attempts.length : qcStatus;
     mQc.className = qcStatus === "failed" ? "bad" : "";
     var j = st.joins.final;
     mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "0/3";
@@ -363,40 +366,18 @@
   g.ticker.add(sampleFrame);
 
   var checks = {};
-  var storyDone = false;
 
-  // expandAll/collapseAll are top-level g methods, not storyboard ops (M2's OPS set has
-  // per-container expand/collapse only) — trigger them directly off the rail label so the
-  // "collapseAll/expandAll beat" the brief asks for exercises the real methods.
   sb.on("step", function (ev) {
     var label = sb.position().label;
-    if (label === "expand all") g.expandAll();
-    else if (label === "collapse all") g.collapseAll();
     paintRail();
-    g.fitView({ animate: true });
     phaseEl.textContent = "step " + ev.index + " · " + (label || "");
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+  sb.on("done", function () { paintRail(); phaseEl.textContent = "story complete"; });
 
   // ---------------------------------------------------------------------------
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
-
-  function transportPlay() {
-    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
-    if (btn) btn.click(); else sb.play();
-  }
 
   var started = false;
   function start() {
@@ -404,7 +385,8 @@
     started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
-    transportPlay();
+    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
+    if (btn) btn.click(); else sb.play();
   }
 
   playBtn.addEventListener("click", start);
@@ -412,18 +394,20 @@
 
   function writeReport() {
     reportEl.textContent =
-      "QC failed on first pass   " + obs.failedOnce + "  reason: " + JSON.stringify(obs.failReason) + "\n" +
+      "QC attempts               " + JSON.stringify(obs.attempts) + "  reason: " + JSON.stringify(obs.failReason) + "\n" +
       "final assembly join       " + obs.joinFiredAt + "/" + obs.joinNeeded + "\n" +
-      "rework loop                " + obs.loopIteration + " of max " + obs.loopMax + "  (" + obs.loopBadge + ")\n" +
-      "NaN in DOM                 " + (checks.nan && checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
-      "errors                     " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+      "rework loop               " + obs.loopIteration + " of max " + obs.loopMax + "  (" + obs.loopBadge + ")\n" +
+      "NaN in DOM                " + (checks.nan && checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
+      "errors                    " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
 
   async function auto() {
-    if (AUTO) g.run().speed(1.6);
-    await sleep(200);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
+    // autoplay: 'auto' already started the story (the URL carries ?auto=1); g.finished is
+    // the library's own end-of-story signal.
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    await g.finished;
     await sleep(400);
     checks.nan = scanNaN();
     writeReport();

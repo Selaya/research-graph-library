@@ -83,7 +83,8 @@
     in parallel — three compound containers you can expand to see the steps inside, or
     collapse to see just the shape of the plan. All three must finish before
     <strong>Day one</strong> (an <code>all</code>-join), then a Week&nbsp;1 check-in closes
-    the loop. Watch what happens when the slow manual steps — a 3-day background check, a
+    the loop. The background check fails its first attempt and retries, the way real ones do.
+    Watch what happens when the slow manual steps — that 3-day check, a
     5-day laptop order — get replaced by two integrations: the container's duration chip
     odometers down and the total-duration bar underneath the graph visibly shrinks.
   </p>
@@ -105,6 +106,7 @@
   <div class="tile"><i>day one · join</i><span id="m-join">0/3</span></div>
   <div class="tile"><i>HR track</i><span id="m-hr">—</span></div>
   <div class="tile"><i>IT track</i><span id="m-it">—</span></div>
+  <div class="tile"><i>background check</i><span id="m-bg">—</span></div>
 </div>
 
 <ul class="look">
@@ -114,9 +116,14 @@
     expand/collapse it by hand, or watch the storyboard do it during narration.</li>
   <li><em>Day one</em> is an implicit <code>join:"all"</code> — three in-edges, and it only
     fires once every track has landed.</li>
+  <li>The background check declares <code>data.fail:{retries:1,recover:true}</code> with an
+    <code>onFail</code> loop edge — one failing attempt, an iteration badge on the retry arc,
+    then it clears.</li>
   <li>The <em>automate</em> chapter runs <code>g.condense()</code> twice — HR's background
     check + payroll become one HRIS integration, IT's account + VPN/MFA steps become one
-    provisioning step — and the container chip odometers from days down to minutes.</li>
+    provisioning step — and the container chip odometers from days down to minutes. The
+    storyboard then recompiles the run in place (<code>{op:"run"}</code>) so the
+    total-duration bar reports the automated plan.</li>
 </ul>
 
 <div id="report"></div>
@@ -151,7 +158,9 @@
     return n;
   }
   function automated(id, label, duration) {
-    return { id: id, label: label, data: { duration: duration, mode: "automated" } };
+    // `parent: null` — inherit the merged sources' common parent, so the replacement lands
+    // inside the same track container and its chip keeps rolling up.
+    return { id: id, parent: null, label: label, data: { duration: duration, mode: "automated" } };
   }
   function add(node) { return { op: "addNode", args: [node] }; }
   function link(id, s, t, extra) {
@@ -165,6 +174,13 @@
   var IT_SET = ["it.accounts", "it.vpn"];
   var IT_AUTO = automated("it.auto", "Automated provisioning", "8m");
 
+  // The background check is the step that really bites: it comes back once asking for
+  // documents the candidate has to resubmit. `fail: { retries, recover }` declares that as
+  // one real failing attempt followed by a passing one, and the `onFail` loop edge is the
+  // arc it re-enters, so the retry gets its own iteration badge.
+  var BG = manual("hr.bg", "hr", "Background check", "3d");
+  BG.data.fail = { reason: "ID documents missing", retries: 1, recover: true };
+
   // Mount holds only the kickoff node; the storyboard grows the three tracks so the plan is
   // seen assembling, one track at a time.
   var SEED = { nodes: [{ id: "kickoff", label: "Offer accepted" }], edges: [] };
@@ -172,11 +188,17 @@
   var WAVE_HR = [
     add({ id: "hr", label: "HR", collapsed: false, durationAgg: "sum" }),
     add(manual("hr.offer", "hr", "Offer signed", "10m")),
-    add(manual("hr.bg", "hr", "Background check", "3d")),
+    add(BG),
     add(manual("hr.payroll", "hr", "Payroll setup", "45m")),
     link("k-hr", "kickoff", "hr.offer"),
     link("hr1", "hr.offer", "hr.bg"),
     link("hr2", "hr.bg", "hr.payroll"),
+    link("hr-retry", "hr.bg", "hr.bg", {
+      loop: true,
+      onFail: true,
+      maxIterations: 1,
+      label: { text: "resubmit ID documents", pill: true },
+    }),
   ];
 
   var WAVE_IT = [
@@ -208,6 +230,15 @@
     link("d1", "dayone", "checkin"),
   ];
 
+  var RUN_OPTS = {
+    hopMs: 180,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 350;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 150 + 950 * f;
+    },
+  };
+
   var STEPS = [
     { label: "assemble" },
     { op: "batch", steps: WAVE_HR },
@@ -215,27 +246,28 @@
     { op: "batch", steps: WAVE_MGR },
     { op: "batch", steps: WAVE_JOIN },
     { label: "kickoff" },
+    { op: "run", args: [RUN_OPTS] },
     { op: "camera", args: [{ fit: true }] },
     { op: "caption", args: ["Offer accepted — HR, IT and the manager all start today.", { place: "bottom" }] },
     { op: "run.play", until: "kickoff" },
     { label: "hr track" },
-    { op: "camera", args: [{ node: "hr", k: 1.7, pad: 70 }] },
+    { op: "camera", args: [{ nodes: ["hr"], pad: 70 }] },
     { op: "highlight", args: [{ nodes: ["hr"], variant: "focus" }] },
-    { op: "caption", args: ["HR: a 3-day background check has to clear before payroll can be set up.", { place: "bottom" }] },
+    { op: "caption", args: ["HR: the 3-day background check comes back needing documents — it retries, then payroll can be set up.", { place: "bottom" }] },
     { op: "run.play", until: "hr.payroll" },
     { label: "it track" },
-    { op: "camera", args: [{ node: "it", k: 1.7, pad: 70 }] },
+    { op: "camera", args: [{ nodes: ["it"], pad: 70 }] },
     { op: "highlight", args: [{ nodes: ["it"], variant: "focus" }] },
     { op: "caption", args: ["IT: the laptop order is the long pole here — 5 days end to end.", { place: "bottom" }] },
     { op: "run.play", until: "it.vpn" },
     { label: "manager track" },
-    { op: "camera", args: [{ node: "mgr", k: 1.7, pad: 70 }] },
+    { op: "camera", args: [{ nodes: ["mgr"], pad: 70 }] },
     { op: "highlight", args: [{ nodes: ["mgr"], variant: "focus" }] },
     { op: "caption", args: ["Manager: buddy assigned, a 30-60-90 plan, a first-week schedule.", { place: "bottom" }] },
     { op: "run.play", until: "mgr.schedule" },
     { op: "clearHighlight" },
     { label: "day one" },
-    { op: "camera", args: [{ node: "dayone", k: 1.4, pad: 90 }] },
+    { op: "camera", args: [{ nodes: ["dayone", "checkin"], pad: 90 }] },
     { op: "caption", args: ["Day one waits on all three tracks — an all-join, not a race.", { place: "bottom" }] },
     { op: "run.play", until: "dayone" },
     { op: "run.play" },
@@ -247,19 +279,11 @@
     { op: "condense", args: [IT_SET, IT_AUTO] },
     { op: "highlight", args: [{ nodes: [HR_AUTO.id, IT_AUTO.id], variant: "ok", pulse: true } ] },
     { label: "re-run, automated" },
-    { op: "caption", args: ["Same plan, automated — the total-duration bar drops with it.", { place: "bottom" }] },
-    { op: "run.seek", ms: 0 },
+    { op: "camera", args: [{ fit: true }] },
+    { op: "caption", args: ["Same plan, automated — no resubmission round, and the total-duration bar drops with it.", { place: "bottom" }] },
+    { op: "run", args: [RUN_OPTS] },
     { op: "run.play" },
   ];
-
-  var RUN_OPTS = {
-    hopMs: 180,
-    dwell: function (sec, ctx) {
-      if (sec == null) return 350;
-      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
-      return 150 + 950 * f;
-    },
-  };
 
   // ---------------------------------------------------------------------------
 
@@ -267,7 +291,7 @@
   var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
   var playBtn = $("#play"), resetBtn = $("#reset");
   var mTime = $("#m-time"), mTokens = $("#m-tokens"), mJoin = $("#m-join");
-  var mHr = $("#m-hr"), mIt = $("#m-it");
+  var mHr = $("#m-hr"), mIt = $("#m-it"), mBg = $("#m-bg");
 
   var g;
   try {
@@ -278,9 +302,9 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",
     });
-    g.run(RUN_OPTS);
+    window.smv = g;
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -329,23 +353,37 @@
   }
   g.ticker.add(sampleFrame);
 
+  // Run events mirrored on the instance, so the narration survives the storyboard's
+  // recompile in the "re-run, automated" chapter.
+  var bgAttempts = 0;
+  g.on("run:fail", function (ev) {
+    if (ev.nodeId !== "hr.bg") return;
+    bgAttempts = ev.attempt || 1;
+    mBg.textContent = "attempt " + bgAttempts + " ✗ " + (ev.reason || "");
+  });
+  g.on("run:finish", function (ev) {
+    if (ev.nodeId !== "hr.bg") return;
+    bgAttempts = ev.attempt || bgAttempts || 1;
+    mBg.textContent = "cleared on attempt " + bgAttempts;
+  });
+
   var checks = {};
-  var storyDone = false;
 
   sb.on("step", function (ev) {
     paintRail();
-    g.fitView({ animate: true });
-    phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
+    var label = sb.position().label || "";
+    if (label === "re-run, automated") mBg.textContent = "n/a — HRIS clears it inline";
+    phaseEl.textContent = "step " + ev.index + " · " + label;
   });
   sb.on("seek", paintRail);
   sb.on("done", function () {
-    storyDone = true;
     paintRail();
     phaseEl.textContent = "story complete";
     checks.hrChipAfter = chipOf("hr.auto");
     checks.itChipAfter = chipOf("it.auto");
     checks.finalDuration = g.run() ? g.run().duration : null;
     reportEl.textContent =
+      "background check attempts  " + (bgAttempts || 0) + " (manual pass)\n" +
       "HR chip after automation   " + checks.hrChipAfter + "\n" +
       "IT chip after automation   " + checks.itChipAfter + "\n" +
       "final compiled duration    " + fmt(checks.finalDuration || 0) + "\n" +
@@ -353,49 +391,32 @@
   });
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
 
-  function transportPlay() {
-    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
-    if (btn) btn.click(); else sb.play();
-  }
-
-  var started = false;
   function start() {
-    if (started) return;
-    started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
-    transportPlay();
+    sb.play();
   }
 
   playBtn.addEventListener("click", start);
   resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
 
-  async function auto() {
-    await sleep(250);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
-    await sleep(400);
-    window.__smvExit = { done: true, errors: errors };
-  }
-
   paintRail();
   if (AUTO) {
-    auto().catch(function (err) {
-      errors.push("auto: " + String((err && err.message) || err));
-      window.__smvExit = { done: true, errors: errors };
-    });
+    // `autoplay: "auto"` already started the story because the URL carries ?auto=1.
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
   }
+
+  // The library's own story-finished signal; __smvExit just carries the page's error list.
+  g.finished.then(function () {
+    return sleep(400);
+  }).then(function () {
+    window.__smvExit = { done: true, errors: errors };
+  }, function (err) {
+    errors.push("finished: " + String((err && err.message) || err));
+    window.__smvExit = { done: true, errors: errors };
+  });
 })();
 </script>
 
