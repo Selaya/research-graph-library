@@ -9,7 +9,7 @@ export class GraphError extends Error {
 }
 
 const NODE_FIELDS = [
-  "id", "label", "parent", "data", "collapsed", "join", "type",
+  "id", "label", "parent", "data", "collapsed", "container", "join", "type",
   "iterate", "children", "durationAgg", "w", "h", "groups",
 ];
 const EDGE_FIELDS = ["id", "source", "target", "loop", "maxIterations", "label", "data", "weight"];

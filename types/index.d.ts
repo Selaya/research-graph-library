@@ -22,6 +22,14 @@ export interface NodeSpec {
   data?: Record<string, unknown>;
   /** Container starts collapsed. */
   collapsed?: boolean;
+  /** Treat this node as a container even before anything names it as a `parent` (F33):
+   *  it draws as a header-only box (`data-container` + `data-empty`) and reaches the
+   *  layout solver flagged `container: true`, instead of being a plain leaf until its
+   *  first child arrives. Ignored (harmlessly) once the node does have children.
+   *  View/layout/render only: collapse, expand, the tap toggle, `aria-expanded` and the
+   *  run engine all keep keying off "has children", so an empty declared container is not
+   *  collapsible and is still an executable step. */
+  container?: boolean;
   join?: JoinPolicy;
   type?: string;
   iterate?: unknown;
@@ -192,11 +200,34 @@ export interface LayoutResult {
 // supplies the same contract on top of the optional @dagrejs/dagre peer.
 // ---------------------------------------------------------------------------
 
+/** A node as the drawing sees it: the spec node plus the fields the view pass computed.
+ *  This is what `StyleFn` and `LayoutOpts.hint` are handed. */
+export interface ViewNode extends NodeSpec {
+  w?: number;
+  h?: number;
+  /** Has children, or was declared with `NodeSpec.container` (F33). */
+  container?: true;
+  /** A container with no children yet — mirrored as `data-empty` on the DOM group. */
+  empty?: true;
+  /** Container currently folded shut. */
+  collapsed?: true;
+  /** Hidden descendants, on a collapsed container only (the ×N badge). */
+  count?: number;
+  /** Containment depth, 0 at the root. */
+  depth?: number;
+}
+
 export interface LayoutViewNode {
   id: string;
   w?: number;
   h?: number;
   parent?: string;
+  /** True for a container — one with children, or one declared with `NodeSpec.container`
+   *  before it has any (F33). Absent on leaves. */
+  container?: true;
+  /** The node's own `data`, or whatever `LayoutOpts.hint(node)` picked instead (F32), so a
+   *  placement-driven solver can read per-node hints. Absent when there is nothing to pass. */
+  data?: unknown;
 }
 
 export interface LayoutViewEdge {
@@ -205,7 +236,9 @@ export interface LayoutViewEdge {
   target: string;
 }
 
-/** What the shell hands a solver: acyclic, and no edge incident to a node with children. */
+/** What the shell hands a solver: acyclic, and no edge incident to a node with children.
+ *  Every custom key on `LayoutOpts` reaches the solver untouched, by spread — that is the
+ *  supported channel for a solver's own options. */
 export interface SolverInput {
   nodes: LayoutViewNode[];
   edges: LayoutViewEdge[];
@@ -246,6 +279,9 @@ export interface LayoutOpts {
   prevOrder?: string[][];
   /** The bend half of the same channel (LayoutResult.layers). Persist and pass both. */
   prevLayers?: string[][];
+  /** Pick what each node carries to the solver as `LayoutViewNode.data` (F32). Defaults to
+   *  the node's own `data`; return `undefined` to pass nothing for that node. */
+  hint?: (node: ViewNode) => unknown;
   /**
    * Pin the order of the drawing's DISCONNECTED components (e.g. several parallel
    * pipelines), which nothing else holds in place: with no edges between them, adding or
@@ -310,7 +346,7 @@ export interface MountOpts {
 }
 
 /** Node-scoped user style function (§5.6) — return `--smv-*` custom-property values only. */
-export type StyleFn = (node: NodeSpec) => Record<string, string | number> | null | undefined;
+export type StyleFn = (node: ViewNode) => Record<string, string | number> | null | undefined;
 
 // ---------------------------------------------------------------------------
 // Query sugar (src/query.js)

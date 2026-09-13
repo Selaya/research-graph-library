@@ -110,6 +110,7 @@ All written at commit time (`renderer.styleCommit`, `preset-pipeline.js`, `a11y.
 | `data-container` | `.smv-node` | present (any truthy value) when the node is a compound/container node |
 | `data-collapsed` | `.smv-node` | present when a container is collapsed (controls header-strip vs. stacked-card chrome) |
 | `data-count` | `.smv-node` | the ×N child-count badge on a collapsed container |
+| `data-empty` | `.smv-node` | present on a container declared with `container: true` that has no children yet — a header-only box with a dashed outline, and no disclosure chevron or pointer cursor (there is nothing to expand) |
 | `data-emph` | `.smv-node`, `.smv-edge` | director emphasis (D14): `"focus"` \| `"warn"` \| `"ok"` \| `"mute"` — picks `--smv-emph`; pair with `--smv-pulse` for the beat |
 | `data-dim` | `.smv-node`, `.smv-edge` | the spotlight half of `highlight({dim:true})` — everything drawn and not emphasised drops to 28% opacity |
 | `data-smv-record` | `.smv-root` | record mode (D15): kills every CSS transition/animation beneath it |

@@ -238,3 +238,140 @@ test("forward edges strictly advance along the rank axis; siblings never overlap
     }
   }
 });
+
+// --- the solver seam's node view (F32/F33) and container fallback (F35) ---------------
+
+/** A view with one container, one child and one free-standing declared container. */
+function fixtureSeam() {
+  return {
+    nodes: [
+      { id: "act", w: 90, h: 36, container: true, data: { col: 0 } },
+      { id: "a1", w: 80, h: 36, parent: "act", data: { row: 1, note: "first" } },
+      { id: "solo", w: 70, h: 36, container: true, data: { col: 1 } },
+    ],
+    edges: [{ id: "e1", source: "a1", target: "solo" }],
+  };
+}
+
+test("F32: the solver sees each node's data and the container flag", () => {
+  let seen = null;
+  layout(fixtureSeam(), {
+    ...OPTS,
+    solver: (input) => {
+      seen = input.nodes;
+      return { nodes: {}, edges: {}, order: [] };
+    },
+  });
+  const byId = Object.fromEntries(seen.map((n) => [n.id, n]));
+  assert.deepEqual(byId.a1.data, { row: 1, note: "first" });
+  assert.equal(byId.a1.parent, "act");
+  assert.equal(byId.act.container, true);
+  assert.equal(byId.solo.container, true, "a childless declared container is flagged too");
+  assert.equal(byId.a1.container, undefined, "a leaf carries no container key");
+  // Still the frozen seam: id/w/h are untouched and nothing else appeared.
+  assert.deepEqual(Object.keys(byId.solo).sort(), ["container", "data", "id", "parent", "w", "h"].sort());
+});
+
+test("F32: layout.hint(node) picks what the solver sees as data, and a node without data has no key", () => {
+  let seen = null;
+  const view = fixtureSeam();
+  view.nodes.push({ id: "bare", w: 40, h: 36 });
+  layout(view, {
+    ...OPTS,
+    hint: (n) => (n.data ? { col: n.data.col } : undefined),
+    solver: (input) => { seen = input.nodes; return { nodes: {}, edges: {}, order: [] }; },
+  });
+  const byId = Object.fromEntries(seen.map((n) => [n.id, n]));
+  assert.deepEqual(byId.a1.data, { col: undefined });
+  assert.deepEqual(byId.act.data, { col: 0 });
+  assert.equal("data" in byId.bare, false);
+});
+
+test("F32: custom layout opts reach the solver untouched, by spread", () => {
+  let opts = null;
+  layout(fixtureSeam(), {
+    ...OPTS,
+    minColWidth: 120,
+    lanes: ["a", "b"],
+    solver: (input, o) => { opts = o; return { nodes: {}, edges: {}, order: [] }; },
+  });
+  assert.equal(opts.minColWidth, 120);
+  assert.deepEqual(opts.lanes, ["a", "b"]);
+});
+
+test("F35: a container the solver omitted takes its rect from the children alone", () => {
+  const place = { a1: { x: 500, y: 300 } };
+  const result = layout(fixtureSeam(), {
+    ...OPTS,
+    containerPad: { top: 40, side: 12, bottom: 12 },
+    solver: (input) => {
+      const nodes = {};
+      for (const n of input.nodes) {
+        const p = place[n.id];
+        if (p) nodes[n.id] = { x: p.x, y: p.y, w: n.w, h: n.h };
+      }
+      return { nodes, edges: {}, order: [] };
+    },
+  });
+  const act = result.nodes.act;
+  // children bbox is x 460..540, y 282..318; + pad = x 448..552, y 242..330.
+  assert.equal(act.x, 500);
+  assert.equal(act.w, 80 + 24);
+  assert.equal(act.y, (242 + 330) / 2);
+  assert.equal(act.h, 330 - 242);
+  assert.equal(act.x - act.w / 2, 448, "left edge is the child's, not the origin's");
+});
+
+test("F35: a container the solver DID place still unions with its children", () => {
+  const result = layout(fixtureSeam(), {
+    ...OPTS,
+    solver: (input) => {
+      const nodes = {};
+      for (const n of input.nodes) nodes[n.id] = { x: 500, y: 300, w: n.w, h: n.h };
+      nodes.act = { x: 400, y: 300, w: 40, h: 40 };
+      return { nodes, edges: {}, order: [] };
+    },
+  });
+  assert.ok(result.nodes.act.x - result.nodes.act.w / 2 <= 380, "kept the solver's own left edge");
+});
+
+test("F33/F35: an EMPTY container the solver omitted keeps the origin fallback, and is named", () => {
+  const warned = [];
+  const realWarn = console.warn;
+  console.warn = (m) => warned.push(m);
+  let result;
+  try {
+    result = layout(fixtureSeam(), {
+      ...OPTS,
+      solver: (input) => {
+        const nodes = {};
+        for (const n of input.nodes) if (n.id !== "solo") nodes[n.id] = { x: 500, y: 300, w: n.w, h: n.h };
+        return { nodes, edges: {}, order: [] };
+      },
+    });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(result.nodes.solo.x, 0, "no children means no bbox to derive from");
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /^\[smv:layout\] solver returned no rect for empty container\(s\): solo/);
+});
+
+test("a container WITH children that the solver omitted is derived silently (no warning)", () => {
+  const warned = [];
+  const realWarn = console.warn;
+  console.warn = (m) => warned.push(m);
+  try {
+    layout(fixtureSeam(), {
+      ...OPTS,
+      solver: (input) => {
+        const nodes = {};
+        for (const n of input.nodes) if (n.id !== "act") nodes[n.id] = { x: 500, y: 300, w: n.w, h: n.h };
+        return { nodes, edges: {}, order: [] };
+      },
+    });
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.deepEqual(warned, []);
+});

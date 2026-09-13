@@ -89,6 +89,10 @@ then `import { dagreSolver } from "sparkle-motion-visualizer/adapters/dagre"`.
   the node.
 - **Compound nodes** — `parent` links make containers; per-node animated
   expand ⇄ collapse with meta-edge aggregation (deduped, weighted) while collapsed.
+  `container: true` declares one up front, so a container that has no children *yet*
+  draws as a header-only box instead of a plain node. It is a drawing/layout flag only:
+  until real children arrive there is nothing to fold, so collapse/expand, the tap toggle,
+  `aria-expanded` and the run engine all keep keying off "has children".
 - **Condense / split** — `g.condense([ids], newNode)` merges N nodes into one with a
   staged highlight → converge → reveal choreography (and a convexity guard against
   silent graph corruption); `g.split(id, {nodes, edges})` is the mirror image, 1 → N,
@@ -474,6 +478,25 @@ bundle — so the adapter costs non-users nothing. A solver is just
 `(input, opts) → {nodes, edges, order, layers?}` (`layers` is the bend-stability channel;
 omit it and the shell simply returns `[]`); the shell keeps cycle breaking, back-edge and
 self-loop arcs, container padding and bounds either way.
+
+**What a solver sees.** Each input node is
+`{ id, w, h, parent?, container?, data? }`. `data` is the node's own spec `data`, so a
+placement-driven solver (an actor column, a time row) can read per-node hints straight off
+the graph instead of keeping its own registry — pass `layout: { hint: (n) => … }` to send
+something else (or `undefined`) in its place. `container: true` marks a container,
+*including* one declared with `container: true` on the spec before it has any children.
+Every key you put on the layout opts reaches the solver untouched, by spread, so a solver's
+own options travel with it:
+
+```js
+mount("#seq", spec, { layout: { dir: "TB", solver: seq.solver, minColWidth: 140 } });
+```
+
+A solver that returns no rect for a container *with children* is not guessing wrong: the
+shell then derives that container's box purely from its children's bounding box plus
+`containerPad`. An empty declared container has no bbox to derive from, so an omitted rect
+leaves it at the origin and the shell warns (`[smv:layout] solver returned no rect for
+empty container(s): …`).
 
 **Exports.** ESM-only entries (not in the IIFE, D11):
 

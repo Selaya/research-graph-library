@@ -115,3 +115,18 @@ test("dagreSolver ignores componentOrder: it neither throws nor changes the draw
   const o = { dir: "LR", nodesep: 28, ranksep: 56, marginx: 20, marginy: 20 };
   assert.deepEqual(dagreSolver(input, { ...o, componentOrder: ["c", "a"] }), dagreSolver(input, o));
 });
+
+test("the adapter ignores the seam's extra node fields (data/container, F32/F33)", () => {
+  const plain = fixtureDiamond();
+  const rich = fixtureDiamond();
+  for (const n of rich.nodes) n.data = { note: n.id };
+  assert.deepEqual(
+    toComparable(dagreLayout(rich, OPTS)),
+    toComparable(dagreLayout(plain, OPTS)),
+    "a node carrying data draws exactly as it did without it"
+  );
+  // A childless declared container is a plain box to dagre, not a cluster.
+  const solo = { nodes: [{ id: "solo", w: 80, h: 36, container: true }], edges: [] };
+  const r = dagreLayout(solo, OPTS);
+  assert.equal(r.nodes.solo.w, 80);
+});
