@@ -924,7 +924,9 @@ vp.target                                 // getter: where a live tween is headi
     (`.smv-has-transport .smv-caption{bottom:46px}`) used to outrank
     `.smv-caption[data-place="top"]{bottom:auto}` by specificity, so a top-placed caption
     under `controls: true` kept both `top` and `bottom` set and stretched over the whole
-    pane. The fix is an equally-specific transport-aware rule per placement, guarded by
+    pane. The fix is a *more* specific transport-aware rule per placement
+    (`.smv-root.smv-has-transport .smv-caption[data-place="top"]{bottom:auto}` — one
+    attribute selector above the offset rule, which is why it wins), guarded by
     `test/caption-place.test.js`. The general lesson: the caption strip, the transport bar
     and the total-duration bar (`.smv-totalbar`) each position themselves independently
     against the pane, with no single source of truth for how much chrome is stacked at top

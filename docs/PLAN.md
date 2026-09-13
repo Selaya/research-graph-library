@@ -445,13 +445,28 @@ README/RUN.md); `match` filters it by payload fields (`edgeId`, `nodeId`, …); 
 ordinary op list, exactly what a page would have called manually from the handler. The
 part that actually resolves F19 — rather than just moving the same reactive code into a
 different array — is that this step is **evaluated at compile time against the simulated
-schedule** (`sim().events`, already produced for `cues()`/the scrubber): a compiling
-storyboard walks the compiled event list, and for each matching event synthesizes the
-child steps at that event's real offset, exactly as if the author had written a positional
-step there by hand. The result is an ordinary step sequence with real `dur`/offsets, so it
-composes with `seek()`'s snapshot array and `cues()` for free — no new runtime path.
+schedule** (`sim().events`, the same event list the run transport and scrubber already
+consume; note `cues()` itself does *not* read it — it is built from the op array alone,
+via `stepSlices()`/`durOf()`): a compiling storyboard walks the compiled event list and,
+for each matching event, synthesizes the child steps at that event's real offset. Once
+expanded, the result is an ordinary step sequence with real `dur`/offsets, so `seek()`'s
+snapshot array and `cues()` pick it up through their existing paths.
 
 Open questions:
+
+- **Where a mid-run step goes (the crux).** A storyboard is a strictly sequential op array,
+  and a `run.play` step is awaited as one unit: `stepSlices()` hands it
+  `[base, timeOf(until) ?? runCtl.duration]` and `applyStep` awaits the whole `r.play(...)`.
+  There is no way to place a step *inside* a `run.play` window, so expansion has to **split
+  the enclosing `run.play` into two steps around each synthesized step** — and `run.play`'s
+  only positioning primitive today is `until`, a *node id* resolved through
+  `runCtl.timeOf()` (`untilOf()`, src/index.js), not a time offset. A per-iteration loop-tick
+  offset cannot even be expressed as an `until` target. So this design needs one of: a
+  time-addressed `run.play` (`{ op: 'run.play', untilTime: ms }`, with `stepSlices()` and
+  `applyStep` taught to read it), or an internal-only split representation that never
+  appears in the authored array but does appear in `cues()`/snapshots. Which of those, and
+  what the split does to step indices that pages already hold (`seek(index)`, `cues()[].index`),
+  is the first thing to settle.
 
 - **Compile-time only, or also live-reactive?** A live-mode run (Mode B, D4) has no
   compiled schedule to evaluate this against — does a reactive step in Mode A get expanded
