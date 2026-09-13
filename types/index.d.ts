@@ -13,12 +13,17 @@ export interface NodeSpec {
   label?: string;
   /** Containment: this node is a child of `parent` (compound / container nodes, D5). */
   parent?: string;
-  /** Free-form payload. Two keys are read by the Mode A run engine (src/run.js):
+  /** Free-form payload. Four keys are read by the Mode A run engine (src/run.js):
    *  - `duration`: `"2h" | "45m" | "8s" | "300ms" | 12` (bare number = seconds) — paces
    *    the dwell. Unparseable or negative values warn and fall back to the default.
    *  - `fail`: truthy = this step runs its dwell and then FAILS — status `'failed'`, no
    *    fan-out to its successors, a `'fail'` run event. A string value is carried through
-   *    as that event's `reason`. (Mode B's equivalent is `LiveRun.fail(id)`.) */
+   *    as that event's `reason`; the object form `{reason, retries, recover}` gives it a
+   *    retry budget (see `NodeFail`). (Mode B's equivalent is `LiveRun.fail(id)`.)
+   *  - `entry`: `true` declares an EXTRA seed — this node is minted a token of its own at
+   *    t = 0 even when it has in-edges (a saga's compensation, a token refresh).
+   *  - `startAt`: when this node's seed token appears, in ms on the compiled clock
+   *    (a string goes through the duration grammar, so `"2s"` is 2000). */
   data?: Record<string, unknown>;
   /** Container starts collapsed. */
   collapsed?: boolean;
@@ -30,6 +35,13 @@ export interface NodeSpec {
    *  run engine all keep keying off "has children", so an empty declared container is not
    *  collapsible and is still an executable step. */
   container?: boolean;
+  /** F9 — container ports: the descendants an edge INTO this container attaches to. With
+   *  several, the incoming edge fans out to all of them, like any other fan-out. Default
+   *  (unset): the one inferred entry child. */
+  entry?: string[];
+  /** F9 — the descendants an edge OUT of this container is fed by. Several exits give the
+   *  downstream node that many in-edges, so its implicit AND-join waits for all of them. */
+  exit?: string[];
   join?: JoinPolicy;
   type?: string;
   iterate?: unknown;
@@ -49,7 +61,13 @@ export interface EdgeSpec {
   /** Back/retry edge; requires `maxIterations` (D3/D4). */
   loop?: boolean;
   maxIterations?: number;
+  /** F1 — a `loop` edge that fires only out of a DECLARED FAILURE at its source: its
+   *  iteration budget is that node's retry budget, and it is the arc each retry crosses.
+   *  It is inert on a successful finish (an ordinary loop edge handles that case). */
+  onFail?: boolean;
   label?: string;
+  /** `data.duration` (same grammar as a node's) is this edge's own hop time (F8); `hopMs`
+   *  is the default for every edge that declares none. */
   data?: Record<string, unknown>;
   /** Meta-edge aggregation weight (>1 renders as a heavier line + badge). */
   weight?: number;
@@ -404,11 +422,34 @@ export interface RunEvent {
    *  compile-time diagnostic (carries `nodeId`, `message`, `value`). Both are re-emitted
    *  on the run bus by type, like every other event. */
   type: "enter" | "start" | "finish" | "fail" | "spawn" | "join" | "drop" | "loop" | "warn" | "done";
+  /** `fail` events: the 1-based attempt, its retry budget, and whether this one stuck. */
+  attempt?: number;
+  retries?: number;
+  terminal?: boolean;
   [key: string]: unknown;
 }
 
+export interface NodeFail {
+  /** Carried through as the emitted `'fail'` event's `reason`. Annotation only. */
+  reason?: string;
+  /** F1 — attempts AFTER the first. Each spent retry re-runs the dwell and emits its own
+   *  `'fail'` (`terminal: false`) plus a `'loop'`; the node only reaches status `'failed'`
+   *  when the budget is gone. Omitted: an `onFail` loop edge out of this node supplies the
+   *  budget instead, and with neither it is 0 — today's single terminal attempt. */
+  retries?: number;
+  /** The attempt that spends the last retry SUCCEEDS instead: `'finish'`, fan-out, status
+   *  `'done'` — "fail, retry, pass" without recompiling the run. */
+  recover?: boolean;
+}
+
 export interface Sim {
+  /** The DECLARED timeline's length in ms. Playback speed never moves it (F7). */
   duration: number;
+  /** `duration` under its intent-revealing name. */
+  declared?: number;
+  /** Wall-clock ms the declared timeline takes at the current bare `speed()` multiplier
+   *  (`Infinity` at speed 0). Mode A and Mode B both report it. */
+  playback?: number;
   events: RunEvent[];
   boundaries?: number[];
   stateAt(t: number): RunState;
@@ -426,6 +467,14 @@ export interface RunOptsBase {
   rates?: RunRate[];
   hopMs?: number;
   dwell?: (sec: number | null, ctx?: unknown) => number;
+  /** Playback multiplier a bare `speed(f)` set — playback only, never the schedule (F7). */
+  playbackSpeed?: number;
+}
+
+/** An extra seed: one token minted at `id` at `at` ms on the compiled clock (F3). */
+export interface RunEntry {
+  id: string;
+  at?: number;
 }
 
 export interface LiveEvent {
@@ -439,6 +488,8 @@ export interface LiveEvent {
 
 export interface SimRunOpts extends RunOptsBase {
   mode?: "simulate";
+  /** Pre-seed extra tokens (the compile input `run.inject()` appends to, F3). */
+  entries?: RunEntry[];
 }
 export interface LiveRunOpts extends RunOptsBase {
   mode: "live";
@@ -453,8 +504,12 @@ export interface RunControllerBase {
   play(o?: { until?: string }): Promise<{ canceled: boolean }>;
   pause(): number;
   seek(ms: number): number;
-  /** `{branch}` is per-token in Mode A, a documented no-op in Mode B (§5.4). */
+  /** Bare: a pure PLAYBACK multiplier in both modes — it scales how fast the clock walks
+   *  the timeline and leaves `duration` alone (F7). `{branch}` is a Mode A compile input
+   *  (a rate event, which does re-time the schedule) and a documented no-op in Mode B. */
   speed(factor: number, o?: { branch?: string }): number;
+  /** The multiplier a bare `speed()` set; 1 = real declared time. */
+  playbackSpeed(): number;
   step(o?: { token?: string }): number;
   /** First moment `nodeId` finishes — what a `run.play({until})` storyboard step is worth. */
   timeOf(nodeId: string): number;
@@ -475,7 +530,13 @@ export interface RunControllerBase {
 }
 
 /** Mode A — compiled/declared token schedule. */
-export type SimRun = RunControllerBase;
+export interface SimRun extends RunControllerBase {
+  /** F3 — mint a token at `nodeId` on the compiled clock (`at` defaults to now),
+   *  recompiling and extending the schedule around it. The seed is a compile input, so it
+   *  survives later recompiles and round-trips through `options()`/`reset()`. Injecting
+   *  into a container seeds every entry child. Returns the instant it was seeded. */
+  inject(nodeId: string, o?: { at?: number }): number;
+}
 
 /** Mode B — event-log/replayed. `t` can never exceed `now()`; `following` tracks it live. */
 export interface LiveRun extends RunControllerBase {
