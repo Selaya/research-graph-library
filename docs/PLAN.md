@@ -828,7 +828,9 @@ small-multiples diff view (an app *on* the library; docs example instead),
 
 **Public commitment:** *core (no layout) < 40KB gzip; full pipeline IIFE < 50KB gzip from
 M3; ~55KB during the dagre era* — enforced by a CI hard-fail budget from M0, with
-optional pieces (exports, ARIA fallback table, adapters) as ESM-only entries.
+optional pieces (exports, ARIA fallback table, adapters) as ESM-only entries. Revised since:
+the usability round moved core to 45KB, and the API-frictions round (`docs/API-FRICTIONS.md`)
+moved core to 50KB and the IIFE to 55KB; `scripts/size-budget.js` records each move.
 
 ---
 

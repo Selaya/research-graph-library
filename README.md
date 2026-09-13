@@ -757,15 +757,18 @@ Enforced by a hard-fail CI budget (`npm run size`):
 
 | bundle | min+gzip | budget |
 |---|---:|---:|
-| core (layout engine external) | 42.62KB | <45KB |
-| full IIFE incl. in-house layout | 47.50KB | <50KB |
+| core (layout engine external) | 47.85KB | <50KB |
+| full IIFE incl. in-house layout | 53.31KB | <55KB |
 
 The M3 engine swap took the shipped IIFE from **51.66KB → 40.04KB** gzip (dagre 17.1KB
 out, `engine.js` ~3.6KB in), which is what bought the tightened 50KB budget. The usability
 round after it — misuse warnings and build-time validation across director/run/live-mode,
 the aria-live region, `--smv-radius`, richer mutation handles, the `fail` primitive — grew
 the core bundle past its old 40KB budget, so core's budget moved to 45KB while the shipped
-IIFE's 50KB budget held.
+IIFE's 50KB budget held. The API-frictions round after that (`docs/API-FRICTIONS.md`: retry
+loops, injected tokens, live joins, edge durations and labels, chrome-aware fit, the measure
+hook, `g.validate`, storyboard run ops, container ports) cost ~4.8KB gzip per bundle even
+with the embedded stylesheets minified at build time, so the budgets moved to 50KB / 55KB.
 
 ## Demos
 
