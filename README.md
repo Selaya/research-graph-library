@@ -241,8 +241,11 @@ from reading as a click, so these never fire mid-drag; a pinch kills the gesture
 
 ```js
 g.on("nodeclick", ({ id, event }) => inspector.show(id));
-g.on("edgeclick", ({ id }) => console.log("edge", id));   // the drawn stroke is the hit area
+g.on("edgeclick", ({ id }) => console.log("edge", id));   // stroke AND label are the hit area
 ```
+
+Enter/Space on a focused node publishes the same `nodeclick`, so an inspector wired to it
+is reachable without a pointer.
 
 **Edge labels.** `edge.label` is a string, or an object when the message *is* the content
 (a sequence diagram, say) rather than a hint on a line:
@@ -433,14 +436,17 @@ same pixels:
 
 ```js
 mount(el, spec, { layout: { measure: {
-  extraWidth: (node) => (node.data && node.data.owner ? 44 : 0),   // number, or per-node fn
+  extraWidth: (node, ctx) => (node.data && node.data.owner ? 44 : 0), // number, or a fn
   extraHeight: 8,
 } } });
 ```
 
 `extraWidth` is reserved **chrome**, not label room: it widens the box *and* comes out of
-what the label may fill, so the label truncates before it reaches your decoration. A node
-that declares both `w` and `h` opts out. `preset: "pipeline"` installs its own unless you
+what the label may fill, so the label truncates before it reaches your decoration. It grows
+the box only up to the usual 220px maximum — past that the label gives way instead. A node
+that declares both `w` and `h` opts out; one that declares only `w` keeps its width and
+still gets the reserve. `ctx` is `{nodes, cache}` — the whole node set, for chrome whose
+size depends on more than the node itself. `preset: "pipeline"` installs its own unless you
 set one, which is why a preset mount sizes nodes slightly larger than a bare one.
 
 All four directions (`LR`/`RL`/`TB`/`BT`) are solved top-to-bottom internally and

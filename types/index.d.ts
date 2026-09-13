@@ -248,13 +248,22 @@ export type ThemeName = "auto" | "light" | "dark";
 export type EasingName = "linear" | "cubic-out" | "cubic-in-out" | "overshoot";
 export type EasingFn = (t: number) => number;
 
+/** The rest of the graph, handed to a measure hook whose chrome depends on more than the
+ *  node itself (the pipeline preset's rollup chip reads its children's durations). */
+export interface MeasureCtx {
+  nodes: Map<string, NodeSpec>;
+  cache: Map<string, unknown>;
+}
+
 /** F22/F23 - what a decoration layer contributes to node measurement. Each entry is a
  *  number or a per-node function; anything non-finite reads as 0. A node that declares both
- *  `w` and `h` opts out. `extraWidth` is reserved CHROME, not label room: the renderer
- *  truncates the label to the box minus it, so a chip can never be run under. */
+ *  `w` and `h` opts out entirely; one that declares only `w` keeps that width and still
+ *  gets the reserve. `extraWidth` is reserved CHROME, not label room: the renderer
+ *  truncates the label to the box minus it, so a chip can never be run under. It widens the
+ *  box inside the 220px maximum, never past it. */
 export interface MeasureOpts {
-  extraWidth?: number | ((node: NodeSpec) => number);
-  extraHeight?: number | ((node: NodeSpec) => number);
+  extraWidth?: number | ((node: NodeSpec, ctx?: MeasureCtx) => number);
+  extraHeight?: number | ((node: NodeSpec, ctx?: MeasureCtx) => number);
 }
 
 export interface LayoutOpts {

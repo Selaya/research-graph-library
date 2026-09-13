@@ -618,6 +618,54 @@ test("F22/F23: PIPELINE_MEASURE reserves gutters for the chip/glyphs and a row o
   assert.ok(PIPELINE_EDGE_LABEL_MAX_W > 90, "the preset raises the edge-label cap (F26)");
 });
 
+test("F21/F23: a container's rollup chip keeps its in-box slot — it never lifts out of the node", () => {
+  const spec = {
+    nodes: [
+      { id: "chassis", label: "Chassis", collapsed: true, durationAgg: "sum" },
+      { id: "weld", parent: "chassis", data: { duration: "20m" } },
+      { id: "paint", parent: "chassis", data: { duration: "10m" } },
+    ],
+    edges: [],
+  };
+  const g = fakeInstance(spec);
+  const host = g.renderer.node("chassis");
+  host.setAttribute("data-container", "");
+  host.setAttribute("data-collapsed", "");
+  const handle = applyPipelinePreset(g);
+
+  // A collapsed container is 36px tall by construction (viewstate sizes it like a plain
+  // node), but its chip is the rollup the condense odometer and delta badge anchor to.
+  g.emit("commit", { nodes: { chassis: { x: 0, y: 0, w: 140, h: 36 } } });
+  const chip = clsOf(host, "smv-chip");
+  assert.equal(chip.textContent, "30m", "the chip shows the durationAgg rollup");
+  assert.ok(xy(chip).y > 0, "collapsed container: the chip stays INSIDE the box");
+
+  host.removeAttribute("data-collapsed");
+  g.emit("commit", { nodes: { chassis: { x: 0, y: 0, w: 240, h: 120 } } });
+  assert.equal(xy(chip).y, 14, "expanded container: the chip rides the header strip");
+  handle.destroy();
+});
+
+test("F22: PIPELINE_MEASURE reserves for the rollup chip a container actually draws", () => {
+  const nodes = new Map([
+    ["chassis", { id: "chassis", label: "Chassis", durationAgg: "sum" }],
+    ["weld", { id: "weld", parent: "chassis", data: { duration: "20m" } }],
+    ["paint", { id: "paint", parent: "chassis", data: { duration: "10m" } }],
+  ]);
+  const chassis = nodes.get("chassis");
+  const ctx = { nodes, cache: new Map() };
+  // Without the graph context all a bare node can offer is its own (absent) duration...
+  assert.equal(PIPELINE_MEASURE.extraWidth(chassis), 0);
+  // ...with it, the rollup the chip will show is measured, so the label clears the chip.
+  assert.ok(PIPELINE_MEASURE.extraWidth(chassis, ctx) > 0, "a rollup container reserves width");
+  assert.ok(PIPELINE_MEASURE.extraHeight(chassis, ctx) > 0, "and a chip row of height");
+  // A leaf with its own duration is measured the same either way.
+  assert.equal(
+    PIPELINE_MEASURE.extraWidth(nodes.get("weld"), ctx),
+    PIPELINE_MEASURE.extraWidth(nodes.get("weld")),
+  );
+});
+
 // ---------------------------------------------------------------------------
 // F24 — the total-duration bar reports sum vs critical path
 // ---------------------------------------------------------------------------

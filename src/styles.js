@@ -157,10 +157,11 @@ svg.smv.smv-grabbing{cursor:grabbing}
   text-anchor:middle; dominant-baseline:central;
   paint-order:stroke fill;
   stroke:var(--smv-bg); stroke-width:3px; stroke-linejoin:round;
-  pointer-events:none;
 }
+/* F27: a 1.25px stroke is a poor click target, so the label (and its pill) are part of the
+   edge's hit area — the obvious thing to aim at in a sequence diagram. */
 /* F25 label.pill: an opaque plate instead of the halo, where the message IS the content. */
-.smv-edge rect.smv-edge-pill{fill:var(--smv-container); stroke:var(--smv-stroke); stroke-width:1; pointer-events:none}
+.smv-edge rect.smv-edge-pill{fill:var(--smv-container); stroke:var(--smv-stroke); stroke-width:1}
 .smv-edge[data-pill] text.smv-edge-label{stroke:none; fill:var(--smv-text)}
 
 /* Back edges read as loops, not glitches: muted + dashed, a distinct visual channel (D3). */
@@ -176,7 +177,7 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-token{fill:var(--smv-accent); stroke:var(--smv-bg); stroke-width:1.5}
 .smv-token[data-frozen]{opacity:.45}
 .smv-ghost{fill:var(--smv-muted)}
-.smv-token-badge{fill:var(--smv-muted); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:end; dominant-baseline:central}
+.smv-token-badge{fill:var(--smv-muted); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:start; dominant-baseline:central}
 .smv-loop-badge{fill:var(--smv-condense-text); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:middle; dominant-baseline:central}
 .smv-join-pip{fill:none; stroke:var(--smv-muted); stroke-width:1.2}
 .smv-join-pip[data-filled]{fill:var(--smv-accent); stroke:var(--smv-accent)}

@@ -99,7 +99,7 @@ function depthOf(id, node) {
 
 const isSpace = (key) => key === " " || key === "Spacebar";
 
-export function attachA11y(g, { root, svg } = {}) {
+export function attachA11y(g, { root, svg, emit } = {}) {
   const noop = { destroy() {} };
   // Guard: importable and safely callable under Node (no document) or with a stub host.
   if (!g || !svg || typeof svg.setAttribute !== "function" || typeof svg.querySelectorAll !== "function") {
@@ -310,6 +310,14 @@ export function attachA11y(g, { root, svg } = {}) {
     else if (typeof g.collapse === "function") g.collapse(id);
   }
 
+  /** F27 — keyboard activation is the same public event a tap publishes, so an inspector
+   *  wired to `g.on('nodeclick')` is reachable without a pointer. */
+  function activate(id, ev) {
+    if (id == null) return;
+    if (emit) emit("nodeclick", { id, event: ev });
+    toggle(id);
+  }
+
   function onKeydown(ev) {
     const key = ev && ev.key;
     const stop = () => { if (ev && typeof ev.preventDefault === "function") ev.preventDefault(); };
@@ -318,8 +326,8 @@ export function attachA11y(g, { root, svg } = {}) {
       case "ArrowLeft": case "ArrowUp": stop(); move(-1); break;
       case "Home": { const ids = navOrder(); if (ids.length) { stop(); focusId(ids[0]); } break; }
       case "End": { const ids = navOrder(); if (ids.length) { stop(); focusId(ids[ids.length - 1]); } break; }
-      case "Enter": stop(); toggle(currentId); break;
-      default: if (isSpace(key)) { stop(); toggle(currentId); }
+      case "Enter": stop(); activate(currentId, ev); break;
+      default: if (isSpace(key)) { stop(); activate(currentId, ev); }
     }
   }
 

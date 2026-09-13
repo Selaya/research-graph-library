@@ -20,12 +20,16 @@ decorates from `stateAt(t)` inside the same rAF loop, never mutates the graph.
 - `src/store.js` — `Store` (validated spec, mutations, `condense`, `snapshot/restore`),
   `GraphError(code, msg)`, `isConvex`.
 - `src/cycles.js` — `breakCycles(nodes, edges, pinned:Set)→Set<edgeId>`, `isAcyclic`.
-- `src/measure.js` — `textWidth`, `truncate`, `sizeNode(node, measure?)→{w,h,reserve}`
-  (deterministic estimator under Node), constants `NODE_H`, etc. `measure` is
-  `opts.layout.measure` = `{extraWidth, extraHeight}`, each a number or `(node)=>number`:
-  `extraWidth` widens the derived box AND comes back as `reserve`, which render.js
-  subtracts from the label's room, so reserved chrome is never label room. A node that
-  declares both `w` and `h` opts out (`reserve: 0`). `viewstate.view().sizes[id]` carries
+- `src/measure.js` — `textWidth`, `truncate`, `sizeNode(node, measure?, ctx?)→{w,h,reserve}`
+  (deterministic estimator under Node, scaled by the font's px size), constants `NODE_H`,
+  etc. `measure` is `opts.layout.measure` = `{extraWidth, extraHeight}`, each a number or
+  `(node, ctx)=>number`, where `ctx = {nodes: Map<id,specNode>, cache}` is the whole node
+  set (a hook whose chrome depends on other nodes — a durationAgg rollup chip — needs it).
+  `extraWidth` widens the derived box **inside** the `NODE_MAX_W` clamp (a measured node
+  still never exceeds 220px; past that the label gives way) AND comes back as `reserve`,
+  which render.js subtracts from the label's room, so reserved chrome is never label room.
+  A node that declares both `w` and `h` opts out entirely (`reserve: 0`); one that declares
+  only `w` keeps that width and still gets the reserve. `viewstate.view().sizes[id]` carries
   `{w, h, reserve}`; `createViewState(store, measureOf)` takes a live getter for it so
   `g.layout({measure})` re-measures without rebuilding the view state.
 - `src/layout.js` — **frozen seam (D2)**:

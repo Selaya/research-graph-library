@@ -1128,17 +1128,20 @@ export function mount(el, spec = {}, opts = {}) {
   relayout({ duration: 0 });
   viewport.fit(last.bounds, { pad: 24 });
 
-  // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
-  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg });
   // Tap/click a container toggles it (same public path the keyboard uses), and every clean
   // tap publishes `nodeclick`/`edgeclick` (F27). `interaction: {click: false}` drops the
   // events; `{tapToggle: false}` drops only the expand/collapse.
   const ia = opts.interaction || {};
+  const clickEmit = ia.click === false ? null : (t, p) => bus.emit(t, p);
+
+  // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
+  // Enter/Space there publishes the same `nodeclick` a tap does (F27).
+  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg, emit: clickEmit });
   if (ia.tapToggle !== false || ia.click !== false) {
     tap = attachTapToggle(g, {
       svg: renderer.svg,
       toggle: ia.tapToggle !== false,
-      emit: ia.click === false ? null : (t, p) => bus.emit(t, p),
+      emit: clickEmit,
     });
   }
 

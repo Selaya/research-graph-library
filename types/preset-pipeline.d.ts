@@ -2,6 +2,8 @@
 // entry — the pipeline preset ships as a separate module (own stylesheet, own marker) so a
 // core-only page never has to load it.
 
+import type { MeasureCtx } from "./index.js";
+
 /** The minimal shape applyPipelinePreset needs — a full `Graph` satisfies this structurally
  *  (see index.d.ts). */
 export interface PipelinePresetGraph {
@@ -42,12 +44,13 @@ export function criticalPathSec(
   cache?: Map<string, number | null>,
 ): number | null;
 
-/** What the preset needs reserved on every node it decorates, in the shape
+/** What the preset needs reserved on every node it decorates. With the measure `ctx` the
+ *  core hands it, a container's `durationAgg` rollup chip is measured too, in the shape
  *  `opts.layout.measure` takes (F22/F23). `mount(..., {preset: 'pipeline'})` installs it
  *  unless the caller supplied their own; pass it by hand alongside `presetPipeline(g)`. */
 export const PIPELINE_MEASURE: {
-  extraWidth(node: { data?: Record<string, unknown> }): number;
-  extraHeight(node: { data?: Record<string, unknown> }): number;
+  extraWidth(node: { id?: string; data?: Record<string, unknown> }, ctx?: MeasureCtx): number;
+  extraHeight(node: { id?: string; data?: Record<string, unknown> }, ctx?: MeasureCtx): number;
 };
 
 /** The edge-label truncation cap the preset installs when the caller set none (F26). */

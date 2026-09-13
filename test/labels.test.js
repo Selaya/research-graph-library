@@ -191,6 +191,9 @@ test(".smv-edge-label CSS: muted fill, small size, paint-order stroke halo (both
   assert.match(CSS, /\.smv-edge\s+text\.smv-edge-label\s*\{[^}]*fill:var\(--smv-muted\)/);
   assert.match(CSS, /\.smv-edge-label\s*\{[^}]*paint-order:stroke fill/);
   assert.match(CSS, /\.smv-edge-label\s*\{[^}]*stroke:var\(--smv-bg\)/, "halo uses the themed bg token, so it works in light and dark");
+  // F27 — the label is part of the edge's hit area: a 1.25px stroke is not a click target.
+  assert.ok(!/\.smv-edge text\.smv-edge-label\{[^}]*pointer-events:none/.test(CSS));
+  assert.ok(!/\.smv-edge rect\.smv-edge-pill\{[^}]*pointer-events:none/.test(CSS));
 });
 
 // ---------------------------------------------------------------------------

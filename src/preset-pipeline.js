@@ -170,6 +170,7 @@ export const PRESET_CSS = `
 .smv-totalbar-fill{height:100%; background:var(--smv-accent,#5b6ef5); border-radius:2px}
 /* F24: name each total as soon as the bar shows two. F8/F26: edge.data.duration chip. */
 .smv-totalbar-key,.smv-totalbar-alt{flex:none; opacity:.75}
+.smv-totalbar-key:empty,.smv-totalbar-alt:empty{display:none}
 .smv-totalbar-alt:not(:empty)::before{content:"· "}
 .smv-edge-chip{text-anchor:middle; paint-order:stroke fill; stroke:var(--smv-bg,#fbfbfd); stroke-width:3px; stroke-linejoin:round}
 `;
@@ -210,6 +211,14 @@ const SHORT_H = 42;     // below this a plain box has no room for the row beside
 const chipTextFor = (data) => formatDuration(parseDuration(data && data.duration));
 const chipWidth = (text) => (text ? Math.ceil(textWidth(text, CHIP_FONT)) : 0);
 
+/** The text the chip will actually carry. With the measure ctx (`{nodes, cache}`) that is
+ *  the EFFECTIVE duration — a container showing a durationAgg rollup has no `data.duration`
+ *  of its own, and measuring only that would reserve nothing for a chip it does draw. */
+const chipTextOf = (node, ctx) =>
+  ctx && ctx.nodes
+    ? formatDuration(effectiveDurationSec(ctx.nodes, node.id, ctx.cache))
+    : chipTextFor(node && node.data);
+
 /**
  * F22/F23 — what the preset needs reserved on every node it decorates, in the shape
  * `opts.layout.measure` takes. `mount(..., { preset: 'pipeline' })` installs it unless the
@@ -219,18 +228,18 @@ const chipWidth = (text) => (text ? Math.ceil(textWidth(text, CHIP_FONT)) : 0);
  * the decorations on either side — hence `2 * max(left, right)`.
  */
 export const PIPELINE_MEASURE = {
-  extraWidth(node) {
+  extraWidth(node, ctx) {
     const d = (node && node.data) || {};
-    const chip = chipWidth(chipTextFor(d));
+    const chip = chipWidth(chipTextOf(node, ctx));
     const right = chip ? chip + CHIP_GAP : 0;
     return 2 * Math.max(
       STATUS_GLYPH[d.status] ? GLYPH_W : 0,
       right + (MODE_GLYPH[d.mode] ? GLYPH_W : 0),
     );
   },
-  extraHeight(node) {
+  extraHeight(node, ctx) {
     const d = (node && node.data) || {};
-    return chipTextFor(d) || STATUS_GLYPH[d.status] || MODE_GLYPH[d.mode] ? CHIP_ROW : 0;
+    return chipTextOf(node, ctx) || STATUS_GLYPH[d.status] || MODE_GLYPH[d.mode] ? CHIP_ROW : 0;
   },
 };
 
@@ -259,16 +268,20 @@ function setXY(el, x, y) {
  *  time only, never per frame; the chip glides for free as the node's own <g> tweens).
  *
  *  The mode glyph is placed off the chip's MEASURED width rather than a fixed inset, so a
- *  wide chip ("300ms") can no longer sit on top of it (F21). A plain box too short for the
+ *  wide chip ("300ms") can no longer sit on top of it (F21). A PLAIN box too short for the
  *  row to clear its vertically centred label wears the row just above itself instead
- *  (F23) — which is what `PIPELINE_MEASURE.extraHeight` exists to avoid needing. */
+ *  (F23) — which is what `PIPELINE_MEASURE.extraHeight` exists to avoid needing. A
+ *  container never lifts: a collapsed one is 36px by construction, and its chip is the
+ *  rollup the condense odometer and delta badge anchor to, which has to stay in the box. */
 function positionParts(parts, rect) {
   if (!rect) return;
   const w = Number.isFinite(rect.w) ? rect.w : 0;
   const h = Number.isFinite(rect.h) ? rect.h : 0;
   const has = (a) => typeof parts.host.hasAttribute === "function" && parts.host.hasAttribute(a);
   const container = has("data-container");
-  const y = container && !has("data-collapsed") ? HEADER_H / 2 : h > 0 && h < SHORT_H ? -7 : CHIP_Y;
+  const y = container
+    ? (has("data-collapsed") ? CHIP_Y : HEADER_H / 2)
+    : h > 0 && h < SHORT_H ? -7 : CHIP_Y;
   const cw = chipWidth(parts.chip.textContent);
   setXY(parts.status, 12, y);
   setXY(parts.chip, Math.max(12, w - CHIP_GAP), y);

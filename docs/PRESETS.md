@@ -120,12 +120,19 @@ convention rather than by luck:
 | --- | --- | --- |
 | top row, left gutter | status glyph (`data.status`) | the preset |
 | top row, right gutter | mode glyph, then the duration chip | the preset |
-| above the top-right corner | the run's `×N` occupancy badge | the core run layer |
+| above the box, left end | the run's `×N` occupancy badge | the core run layer |
 | below the bottom edge | join pips | the core run layer |
 
-The chip row moves into the header strip of an expanded container, and lifts just above a
-plain box too short to hold it next to a vertically centred label. Put your own decoration
-somewhere else (the bottom row is free), or reserve for it with `layout.measure` above.
+The chip row moves into the header strip of an expanded container, and on a plain box too
+short to hold it next to a vertically centred label it lifts into the gutter above — where
+it still clears the occupancy badge, which keeps that gutter's left end. A **container**
+never lifts: its chip is the rollup the condense odometer and delta badge animate, and that
+has to stay in the box. Put your own decoration somewhere else (the bottom row is free), or
+reserve for it with `layout.measure` above.
+
+`PIPELINE_MEASURE`'s hooks take `(node, ctx)`; with the `ctx` the core passes them they
+measure the duration the chip will actually show — including a `durationAgg` rollup, which
+lives on a container's children rather than on the container.
 
 ## The pipeline preset's own options
 
