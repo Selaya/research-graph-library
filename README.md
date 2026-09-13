@@ -185,8 +185,8 @@ included) or a `batch()`-shaped function called with a probe carrying the same m
 methods plus `node`/`edge`/`children`/`spec`. Every `GraphError` the ops would have thrown
 comes back in `errors` rather than being thrown — a failing op simply does not land in the
 clone, and the ops after it are still checked. Director and transport steps (`camera`,
-`run.play`, `wait`, `label` markers…) are skipped; an unrecognized `op` reports
-`validate-op`.
+`run.play`, `wait`, `label` markers…) are skipped; an `op` that `storyboard()` itself would
+not accept reports `validate-op`. `expand` / `collapse` steps are checked for a live id.
 
 **`update()`.** `patch.data` merges into the existing `data`. An explicit `undefined`
 removes a key, and `{ replace: true }` swaps the whole payload:
@@ -194,11 +194,16 @@ removes a key, and `{ replace: true }` swaps the whole payload:
 ```js
 g.update("deploy", { data: { fail: undefined } });            // the key is gone
 g.update("deploy", { data: { duration: "8s" } }, { replace: true });   // data is now exactly this
+g.update("deploy", { data: {} }, { replace: true });          // data is gone entirely
 ```
 
+A `data` left with no keys is dropped from the record, so `g.node(id).data` reads
+`undefined` rather than `{}` (and `spec()` still round-trips through JSON).
+
 `collapsed` is view state rather than a rendered spec field, so a `collapsed` patch is
-routed to the real `expand()` / `collapse()` (and resolves like they do — `applied: false`
-when the container is already in that state) instead of quietly doing nothing.
+routed to the real `expand()` / `collapse()` instead of quietly doing nothing. Anything
+else in the same patch still renders, even when the container was already in the requested
+state (the awaitable then resolves `applied: false`, exactly as `expand()`/`collapse()` do).
 
 **Errors.** Every structural misuse throws a synchronous `GraphError` — a real exported
 class, so `instanceof` works, and every message already embeds its code (`[smv:<code>] …`):

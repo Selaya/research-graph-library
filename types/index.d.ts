@@ -716,8 +716,9 @@ export interface ViewState {
 
 /** `g.update(id, patch, opts)`. */
 export interface UpdateOpts {
-  /** `patch.data` REPLACES the record's `data` instead of merging into it. Merging is the
-   *  default either way; `data: { key: undefined }` removes a single key without it. */
+  /** `patch.data` REPLACES the record's `data` instead of merging into it (`data: {}` or
+   *  `data: undefined` then clears it). Merging is the default either way;
+   *  `data: { key: undefined }` removes a single key without it. */
   replace?: boolean;
 }
 
@@ -736,7 +737,8 @@ export interface ValidateProbe {
   update(id: string, patch: Record<string, unknown>, opts?: UpdateOpts): void;
   condense(ids: Iterable<string>, node: CondenseNodeSpec): void;
   split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): void;
-  /** View-only: accepted so a whole op list validates, but nothing structural to check. */
+  /** View-only — nothing commits, but an unknown id still records `"missing"`, because the
+   *  real `expand()`/`collapse()` throw on one. */
   expand(id?: string): void;
   collapse(id?: string): void;
   expandAll(): void;
@@ -795,7 +797,9 @@ export interface Graph {
   /** `patch.data` merges into the record's `data`; `data: { key: undefined }` REMOVES that
    *  key, and `{ replace: true }` swaps the whole payload. A `collapsed` patch is routed to
    *  `expand()`/`collapse()` (it is view state, not a rendered spec field), so it resolves
-   *  like they do — `{applied: false}` when the container was already in that state. */
+   *  like they do — `{applied: false}` when the container was already in that state; the
+   *  rest of the patch is still committed and rendered either way. A `data` left with no
+   *  keys is dropped, so `node(id).data` reads `undefined` rather than `{}`. */
   update(id: string, patch: Record<string, unknown>, opts?: UpdateOpts): Awaitable<MutationResult>;
 
   /** Dry-run the structural guards without committing anything: every op runs against a
@@ -803,7 +807,7 @@ export interface Graph {
    *  in `errors` (an op that fails just does not land in the clone; the ops after it are
    *  still checked). Takes either a `batch()`-shaped function or an array of
    *  storyboard-shaped `{op, args}` steps; director/transport steps and `label` markers are
-   *  skipped, an unrecognized `op` reports `"validate-op"`. */
+   *  skipped, an `op` that `storyboard()` would not accept reports `"validate-op"`. */
   validate(ops: StoryboardStep[] | ((probe: ValidateProbe) => void)): ValidateResult;
 
   /** D5 — children bloom out of the container's previous centre. */

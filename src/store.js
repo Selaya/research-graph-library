@@ -180,6 +180,9 @@ export class Store {
         }
       }
     }
+    // pick() drops a top-level `undefined`, so spell the whole-payload clear out here:
+    // `update(id, { data: undefined }, { replace: true })` removes `data` like `data: {}`.
+    if (opts.replace && patch && patch.data === undefined && "data" in patch) delete t.data;
     for (const [k, v] of Object.entries(p)) {
       if (k === "id") continue;
       if (k !== "data") { t[k] = v; continue; }

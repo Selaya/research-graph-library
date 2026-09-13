@@ -155,6 +155,32 @@ test("a `collapsed` patch on a container with no children yet applies when they 
   g.destroy();
 });
 
+const allText = (el, out = []) => {
+  if (el.textContent) out.push(el.textContent);
+  for (const c of el.children) allText(c, out);
+  return out;
+};
+
+test("a patch carrying `collapsed` still commits everything else in it", async () => {
+  const g = mountG();
+  let commits = 0;
+  g.on("commit", () => { commits++; });
+
+  // `collapsed: false` on an already-expanded container: the view route is a no-op, so the
+  // label in the SAME patch has to reach the screen anyway (it used to be dropped).
+  const r = await settle(g.update("box", { label: "RENAMED", data: { k: 1 }, collapsed: false }), g);
+  assert.equal(r.applied, true);
+  assert.equal(commits > 0, true, "the patch was committed");
+  assert.equal(g.node("box").label, "RENAMED");
+  assert.ok(allText(g.el).includes("RENAMED"), "…and rendered");
+
+  // And when the view half DOES move, one relayout still carries the rest of the patch.
+  await settle(g.update("box", { label: "FOLDED", collapsed: true }), g);
+  assert.deepEqual(drawn(g), ["box", "out"]);
+  assert.ok(allText(g.el).includes("FOLDED"));
+  g.destroy();
+});
+
 test("a `collapsed` patch that matches the current state is still a no-op awaitable", async () => {
   const g = mountG();
   const r = await settle(g.update("box", { collapsed: false }), g);
@@ -241,6 +267,30 @@ test("g.validate(): batch children are checked, director/transport steps are not
     { op: "teleport", args: [] },
   ]);
   assert.deepEqual(res.errors.map((e) => e.code), ["dup-id", "validate-op"]);
+  g.destroy();
+});
+
+test("g.validate(): expand/collapse steps are checked for a live id, like the real methods", () => {
+  const g = mountG();
+  assert.equal(g.validate([{ op: "collapse", args: ["box"] }, { op: "expand", args: ["box"] }]).ok, true);
+
+  const res = g.validate([
+    { op: "removeNode", args: ["box"] },
+    { op: "expand", args: ["box"] },   // gone by now — g.expand() would throw "missing"
+    { op: "collapse", args: ["nope"] },
+  ]);
+  assert.equal(res.ok, false);
+  assert.deepEqual(res.errors.map((e) => e.code), ["missing", "missing"]);
+  assert.throws(() => g.expand("nope"), (e) => e instanceof GraphError && e.code === "missing");
+  g.destroy();
+});
+
+test("g.validate(): only ops storyboard() accepts are ops — a method name is not enough", () => {
+  const g = mountG();
+  const res = g.validate([{ op: "fitView" }, { op: "destroy" }]);
+  assert.equal(res.ok, false);
+  assert.deepEqual(res.errors.map((e) => e.code), ["validate-op", "validate-op"]);
+  assert.equal(g.validate([{ op: "camera", args: [{ to: "box" }] }, { op: "wait", args: [10] }]).ok, true);
   g.destroy();
 });
 

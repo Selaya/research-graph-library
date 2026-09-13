@@ -433,6 +433,8 @@ export function compileRun(spec = {}, opts = {}) {
   for (const id of childrenOf.keys()) {
     let agg = nodes.get(id) && nodes.get(id).statusAgg;
     if (agg != null && agg !== "earliest-fail" && agg !== "latest" && agg !== "none") {
+      // `[smv:<area>]` is the library-wide misuse-warning prefix; the older unparseable-
+      // duration warning above predates it and keeps its `compileRun:` form.
       console.warn(`[smv:run] node "${id}" has an unknown statusAgg (${JSON.stringify(agg)}); using 'earliest-fail'`);
       agg = null;
     }

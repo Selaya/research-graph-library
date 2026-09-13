@@ -460,3 +460,13 @@ test("statusAgg survives normalizeSpec/spec() like durationAgg does", () => {
   s.restore(s.snapshot());
   assert.equal(s.node("box").statusAgg, "latest");
 });
+
+test("update(): {replace:true} with `data: undefined` clears the payload (F29)", () => {
+  const s = new Store({ nodes: [{ id: "a", data: { x: 1 } }], edges: [] });
+  s.update("a", { data: undefined }, { replace: true });
+  assert.equal(s.node("a").data, undefined, "cleared like `data: {}` does");
+  // Without `replace`, a top-level `data: undefined` is simply nothing to merge.
+  s.update("a", { data: { y: 2 } });
+  s.update("a", { data: undefined });
+  assert.deepEqual(s.node("a").data, { y: 2 });
+});

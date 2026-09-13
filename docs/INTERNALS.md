@@ -362,9 +362,13 @@ end re-condenses; no NaN anywhere.
   an emptied `data` is dropped entirely so spec() still round-trips through JSON.
 - `index.js`: `g.validate(ops|fn)` dry-runs the structural ops against
   `new Store(store.snapshot())` and returns `{ok, errors}` — guarded wrappers collect the
-  `GraphError`s instead of throwing, nothing commits, no relayout. A `collapsed` patch to
-  `g.update()` is routed to `expand()`/`collapse()`; `viewstate.expand()/collapse()` own
-  the `pendingCollapse` bookkeeping for a container whose children have not arrived yet.
+  `GraphError`s instead of throwing, nothing commits, no relayout. The op whitelist is
+  storyboard.js's own `STORYBOARD_OPS`; the `expand`/`collapse` probes are view-only but
+  still record `missing` for an unknown id, like the real methods throw. A `collapsed`
+  patch to `g.update()` is routed to `expand()`/`collapse()` for the view half only — the
+  commit still runs when the route changed nothing, so the rest of the patch renders;
+  `viewstate.expand()/collapse()` own the `pendingCollapse` bookkeeping for a container
+  whose children have not arrived yet.
 - `run.js`: the container failure rollup is per-container policy `statusAgg`
   (`'earliest-fail'` default | `'latest'` | `'none'`), read off each container's own leaf
   descendants; `'latest'` keeps an ascending `[{t, fail}]` mark list sampled in `stateAt`.
