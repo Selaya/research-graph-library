@@ -95,6 +95,28 @@ returns — clearing an override does not strip what `style()` was already setti
 `captions: false` hides the overlay but keeps the text in the state and the cue sheet —
 so you can burn subtitles in from `g.cues()` instead.
 
+**`run` / `run.reset` / `expandAll` / `collapseAll` / `layout`** — the rest of `g`'s own
+methods, method-shaped like every other op, so a beat that used to need an
+`sb.on("step")` handler stays inside the declared timeline (and inside `g.cues()`):
+
+```json
+{ "op": "run", "args": [{ "iterations": { "retry": 1 } }] },
+{ "op": "run.play", "until": "verify" },
+{ "op": "run.reset" },
+{ "op": "expandAll" },
+{ "op": "layout", "args": [{ "dir": "TB" }] },
+{ "op": "collapseAll" }
+```
+
+`run` is `g.run(opts)` — a full recompile, with the page's `run.on(...)` listeners carried
+across (`docs/RUN.md`); `run.reset` re-seats the same transport at t = 0 without replacing
+it. Both are zero-duration flips that restart the run's clock, so the next `run.play` step
+is priced from 0. `expandAll`/`collapseAll`/`layout` are the ordinary mutation ops they
+look like, priced at the mount's `animation.duration` unless the step declares `dur`.
+Options-shaped ops are validated at build time like everything else: `{"op":"run","args":
+["deploy"]}` throws `GraphError('storyboard-step')` at its own index rather than failing
+mid-take.
+
 ### Pacing: `dur` and `wait`
 
 Every step may declare `dur` (ms). The declared timeline is the contract (D12): the
@@ -144,14 +166,33 @@ only thing on the public export map; to put `dur` on a mutation step, author the
 ```js
 const g = SparkleMotion.mount("#pipe", spec, {
   controls: true,        // transport bar: play/pause/step/scrub, current label
-  autoplay: false,
+  autoplay: false,       // true plays at once; "auto" plays only when the URL has ?auto=1
   storyboard: steps,     // or g.storyboard(steps) after mount
 });
 ```
 
+**Knowing when the story ended.** `g.finished` is one promise per instance, resolving
+`{reason}` when the storyboard runs out of steps (`"storyboard"`), when the page calls
+`g.finish()` — the explicit end for a live-mode story, which has no last step to reach —
+or when the instance is destroyed (`"destroy"`, so awaiting it can never hang). It never
+rejects and never re-arms.
+
+```js
+const g = SparkleMotion.mount("#pipe", spec, { storyboard: steps, autoplay: "auto" });
+window.smv = g;                          // the convention headless checkers look for
+await g.finished;                        // { reason: "storyboard" }
+```
+
+`autoplay: "auto"` + `window.smv` + `g.finished` is all a page needs to be driveable
+unattended: `scripts/check-demos.mjs` opens each page with `?auto=1`, waits on
+`window.smv.finished` (or `window.__smv`, the record pack's global), and then asserts the
+render. A page that ends on its own terms — a live feed, a hand-driven tour — calls
+`g.finish()` when it is done. (The older `window.__smvExit = {done, errors}` hook every
+demo page still uses keeps working, and wins when a page offers both.)
+
 Scrubbing works through everything: each step is snapshotted before it runs (G2), and
-emphasis, the caption, and — once the script has a camera op — the viewport are part of
-that snapshot, so a backward seek restores the shot, not just the graph. A forward scrub
+emphasis, the caption, the layout options a `layout` step changed, and — once the script
+has a camera op — the viewport are part of that snapshot, so a backward seek restores the shot, not just the graph. A forward scrub
 replays camera/highlight/caption instantly (you asked for a position, not a screening).
 
 For a self-contained file:

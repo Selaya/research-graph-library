@@ -3,17 +3,25 @@
 //   node scripts/check-demos.mjs demo/foo.html [demo/bar.html ...] [--screenshot DIR] [--wait MS]
 //   node scripts/check-demos.mjs --all            # every demo/*.html except index.html
 //
-// For each page: serve the repo over http, open `<page>?auto=1`, wait for
-// `window.__smvExit.done === true` when the page defines that hook (up to --timeout, default
-// 60s) or for --wait ms (default 4000) when it doesn't, then assert: no page errors, no
+// For each page: serve the repo over http, open `<page>?auto=1`, wait for the page's
+// "story finished" signal (up to --timeout, default 60s), then assert: no page errors, no
 // console errors, no `[smv:` misuse warnings, at least one `.smv-node` rendered, every node
 // transform / edge path finite. Optionally writes `<DIR>/<basename>.png`.
+//
+// Two finish signals, either of which a page may offer:
+//   - `window.smv` (or `window.__smv`) = the mounted instance, and `g.finished` resolves
+//     when the story ends — the library's own convention (mount opts `autoplay: 'auto'`
+//     honours the `?auto=1` this script appends, and `g.finish()` ends a live-mode page).
+//   - `window.__smvExit = { done, errors }` — the older page-rolled hook, still honoured,
+//     and preferred when a page has both, since it also carries the page's own error list.
+// A page with neither is simply given --wait ms (default 4000).
 // Exits 1 if any page fails.
 
 import { chromium } from "playwright-core";
 import { readdirSync, mkdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { findChromium, serveRoot, ROOT } from "./harness.mjs";
+import { SIGNAL_JS, LATCH_JS, LATCH_DONE_JS, EXIT_DONE_JS, waitedLabel } from "./finish-signal.mjs";
 
 const argv = process.argv.slice(2);
 const opt = { screenshot: null, wait: 4000, timeout: 60000, all: false };
@@ -60,14 +68,20 @@ try {
 
     const sep = rel.includes("?") ? "&" : "?";
     const url = `http://127.0.0.1:${port}/${rel}${sep}auto=1`;
-    let hook = false;
+    let hook = null;
     try {
       await page.goto(url, { waitUntil: "load" });
-      // Pages usually install the hook synchronously, but give a deferred install a moment.
-      hook = await page.waitForFunction("typeof window.__smvExit === 'object' && window.__smvExit !== null", null, { timeout: 1500 })
-        .then(() => true, () => false);
-      if (hook) {
-        await page.waitForFunction("window.__smvExit && window.__smvExit.done === true", null, { timeout: opt.timeout });
+      // Pages usually install a hook synchronously, but give a deferred install a moment.
+      // `__smvExit` wins when both are present: it also carries the page's own error list.
+      hook = await page.waitForFunction(SIGNAL_JS, null, { timeout: 1500 })
+        .then((h) => h.jsonValue(), () => null);
+      if (hook === "__smvExit") {
+        await page.waitForFunction(EXIT_DONE_JS, null, { timeout: opt.timeout });
+      } else if (hook === "finished") {
+        // g.finished is a promise, and waitForFunction polls — so latch it onto a flag the
+        // poll can read, which keeps --timeout in charge instead of hanging in evaluate().
+        await page.evaluate(LATCH_JS);
+        await page.waitForFunction(LATCH_DONE_JS, null, { timeout: opt.timeout });
       } else {
         await page.waitForTimeout(opt.wait);
       }
@@ -113,7 +127,8 @@ try {
 
     const ok = problems.length === 0;
     anyFail ||= !ok;
-    console.log(`${ok ? "PASS" : "FAIL"}  ${rel}  nodes=${info.nodes} edges=${info.edges} ${hook ? "(waited for __smvExit.done)" : `(waited ${opt.wait}ms)`}`);
+    const waited = waitedLabel(hook, opt.wait);
+    console.log(`${ok ? "PASS" : "FAIL"}  ${rel}  nodes=${info.nodes} edges=${info.edges} ${waited}`);
     for (const p of problems) console.log("      - " + p);
     await page.close();
   }

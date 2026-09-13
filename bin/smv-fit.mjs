@@ -44,6 +44,11 @@ const batchKids = (step) =>
  */
 export function durOf(step, base = BASE_MS) {
   if (!step || step.op === undefined) return 0;      // labels are zero-duration positions
+  // BEFORE `dur`, exactly as src/index.js durOf does it: a `run` recompile and a
+  // `run.reset` are instant flips that put the run clock back to 0, and stepSlices()
+  // prices them as 0ms slices whatever `dur` they carry. Pricing them at `base` here
+  // would shift every label after them off the clock g.cues() reports.
+  if (step.op === "run" || step.op === "run.reset") return 0;
   if (step.dur != null) return Math.max(0, step.dur);
   const a0 = step.args && step.args[0];
   switch (step.op) {

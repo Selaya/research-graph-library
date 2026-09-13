@@ -302,14 +302,29 @@ compileRun(spec, opts) → sim
 - `createStoryboard(host, steps)` where `host = { apply(step) → {promise?|run?},
   snapshot() → any, restore(snap) → promise, }`; steps = the JSON op array (§5.5), ops:
   `addNode|addEdge|removeNode|removeEdge|update|expand|collapse|condense|batch|
+   expandAll|collapseAll|layout|run (args = g.run opts)|run.reset|
    run.play (args or {until})|run.step|run.seek|wait {ms}`; `label` entries are
-  zero-duration markers.
+  zero-duration markers. `run`/`run.reset`/`layout` also check at build time that their
+  one argument, if present, is an options object (F5).
 - Snapshot BEFORE each step (G2); `sb.seek(indexOrLabel)`: restore that snapshot →
   host.restore animates the diff from current visual state; then optionally replay to an
   intra-step run time. `sb.play/pause/next/prev/seek/labels/position/on`.
-- index.js: `opts.storyboard` array + `opts.autoplay`; host implementation lives in
-  index.js (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed],
-  runTime, runOpts}).
+- index.js: `opts.storyboard` array + `opts.autoplay` (`true`, or `'auto'` = play only when
+  the page URL carries `?auto=1`, F36); host implementation lives in index.js
+  (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed], runTime, runOpts,
+  layout: {...layoutOpts}} — the `layout` op mutates the instance-wide options in place, so
+  they are state a step moves and a backward seek has to put back).
+  `g.finished` is one deferred per instance, resolved by the storyboard's `done` event,
+  `g.finish(reason)` or `destroy()` — the "story finished" signal check-demos waits on.
+  The two snippets the checker evaluates in the page (which hook is on offer, and the latch
+  that turns `g.finished` into a pollable flag) live in `scripts/finish-signal.mjs`, so they
+  are unit-tested without a browser (`test/finish-signal.test.js`).
+- `createRun()` keeps a `runSubs` set of every `run.on(type, fn)` a CALLER registered and
+  re-seats it on the fresh transport a `g.run(opts)` recompile builds (F6), keeping the
+  live undo on the sub so the unsubscriber `on()` returned still works after a recompile; the run layer's
+  own subscriptions (run-render's, the transport-bar notify hop) use the raw pre-wrap
+  `on()` and are rebuilt per compile. That same hop mirrors every run event onto the
+  instance bus as `run:<type>`.
 - `src/transport.js`: `createTransport(rootEl, controller)` — play/pause, step back/fwd,
   scrubber (input range over the storyboard's cumulative timeline; within a run.play
   step maps to run.seek), speed select (0.5/1/2/4), current label readout.
