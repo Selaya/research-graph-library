@@ -258,7 +258,6 @@
   STEPS.push({ op: "run.play", until: "cli.2" });
   STEPS.push({ label: "done" });
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
-  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -34 }, dur: 200 * P }] });  // clear the transport + total bar
   STEPS.push({ op: "caption", args: ["One round trip instead of three — same data, same query."] });
   STEPS.push({ op: "wait", ms: 1000 * P });
 

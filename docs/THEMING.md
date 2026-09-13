@@ -90,7 +90,11 @@ of the mix are the same colour, so the built-in picture is exactly what it alway
 one (a `g.style(fn)` role colour, a `g.props()` beat) the node keeps your hue *and* shows
 the done/failed tint. Set `--smv-status-mix: 100%` to go back to "status wins the fill".
 The mix sits behind `@supports (color: color-mix(...))`, so a viewer without `color-mix`
-simply paints `--smv-fill`.
+simply paints `--smv-fill`. One consequence worth knowing: `[data-container]` wins
+`--smv-fill` over the status selectors, so a **collapsed container** carrying a
+spec-authored `data.status` now shows that status mixed over container grey where it used
+to stay plain grey. Put `.smv-node[data-container] { --smv-status-mix: 0% }` in your sheet if you want the old
+flat container back.
 
 `g.style(fn)` is the per-node escape hatch: `fn(node)` returns a plain object of
 `--smv-*` values written as **inline** custom properties on that node's `<g>` at commit

@@ -46,6 +46,11 @@ until playback reached it and threw a bare `TypeError` instead of the library's 
   mounted** over it — the transport bar, the preset's total-duration bar, the caption
   strip. `inset: {top,right,bottom,left}` (or a bare number) replaces that measurement with
   your own; `inset: 0` opts out. No more hand-tuned `by:{dy:-40}` nudge after every fit.
+  Only those bars are measured (they hug the top/bottom edge) — a rail of your own down the
+  side of the pane is an `inset: {left}`/`{right}` you pass. The caption strip is *transient*:
+  a fit taken while a caption is up reserves its height, and clearing the caption does not
+  re-fit, so if a shot should rest at the same framing all the way through a beat, fit
+  before you caption (or pass an explicit `inset`).
 - A `node`/`nodes` id that is currently inside a **collapsed** container resolves to the
   nearest drawn ancestor — the box the viewer can actually see. Only an id that resolves
   to nothing drawn warns (`[smv:camera]`), so a script no longer has to filter its ids

@@ -125,6 +125,14 @@ test("paneInsets(): ignores host markup, panels, and a DOM that cannot be measur
   assert.deepEqual(paneInsets({ children: [] }, {}), { top: 0, right: 0, bottom: 0, left: 0 });
 });
 
+test("paneInsets(): only measures horizontal bars — a side panel is an inset YOU pass", () => {
+  // Every piece of chrome the library mounts (transport, total bar, caption) is a bar on
+  // the top or bottom edge, so that is all this measures. A vertical rail belongs to the
+  // host page, which knows its width: `fitView({ inset: { left: 90 } })`.
+  const { root, svg } = rootWith([chromeEl("smv-caption", { left: 0, top: 0, width: 90, height: 480 })]);
+  assert.deepEqual(paneInsets(root, svg), { top: 0, right: 0, bottom: 0, left: 0 });
+});
+
 test("viewport.fit({inset}): frames and centres inside the pane MINUS the chrome", () => {
   const bounds = { x: 0, y: 0, w: 400, h: 200 };
   const { ticker, vp } = setup();          // 800x600 pane

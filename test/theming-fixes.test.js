@@ -235,3 +235,15 @@ test("styles: the status rules still set --smv-fill, so an un-overridden node mi
   assert.equal((CSS.match(/--smv-status-mix:/g) || []).length, 0);
   assert.equal((CSS.match(/var\(--smv-status-mix,70%\)/g) || []).length, 3);
 });
+
+test("styles: a collapsed container carrying a spec status takes the status tint over container grey", () => {
+  // [data-container] sets --smv-fill AFTER the status rules at equal specificity, so such a
+  // node painted plain container grey before F18. It now mixes the status token over that
+  // grey, like any other override — documented in THEMING.md's data-* precedence section.
+  const status = CSS.indexOf('.smv-node[data-status="done"]{--smv-fill:var(--smv-ok)');
+  const container = CSS.indexOf(".smv-node[data-container]{--smv-fill:var(--smv-container)");
+  assert.ok(status >= 0 && container > status, "[data-container] still wins --smv-fill");
+  // …and the status channel is written regardless of [data-container], which is what makes
+  // the tint show through.
+  assert.doesNotMatch(supportsBlock(), /data-status="done"\][^{]*:not\(\[data-container\]\)/);
+});

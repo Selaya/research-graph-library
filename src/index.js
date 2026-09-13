@@ -1054,7 +1054,10 @@ export function mount(el, spec = {}, opts = {}) {
       // multi-node fit is lidded at NODES_MAX_K so "look at these two" is not a close-up.
       // Both are defaults: `inset`/`maxK` (or an explicit `k`) on the target still win.
       const size = { ...viewport.size(), inset: o.inset ?? chromeInset() };
-      const target = Array.isArray(o.nodes) && o.maxK === undefined ? { ...o, maxK: NODES_MAX_K } : o;
+      // Only a MULTI-NODE FIT is lidded: a `node` close-up (which wins over `nodes`) and an
+      // explicit `k` are scale requests, not fits, and are left alone.
+      const lid = Array.isArray(o.nodes) && !o.node && o.k === undefined && o.maxK === undefined;
+      const target = lid ? { ...o, maxK: NODES_MAX_K } : o;
       const to = resolveCameraTarget(target, last, size, viewport.target, (id) => vs.visibleAncestor(id));
       // D12 — the declared timeline is the contract, and durOf() reads `step.dur` FIRST, so
       // the tween has to as well: args-first here would let a step declaring both durations

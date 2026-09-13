@@ -923,8 +923,10 @@ vp.target                                 // getter: where a live tween is headi
   `prefersReducedMotion()` in this file — index.js owns `reduced` and passes the duration.
 - **M5 (F15).** `paneInsets()` measures the chrome the library itself mounts over the pane
   (`.smv-transport`, `.smv-totalbar`, `.smv-caption`): each BAR is assigned to the pane edge
-  it hugs (wide → nearer of top/bottom, tall → left/right), deepest intrusion per side wins,
-  anything covering half the pane is a host panel and is ignored, every side capped at 40%.
+  it hugs (top or bottom — every bar the library mounts is horizontal, and a taller element
+  is a host overlay), deepest intrusion per side wins, anything covering half the pane is a
+  host panel and is ignored, top/bottom each capped at 40%. Left/right are only ever an
+  `inset` the caller passes.
   All zeros without `getBoundingClientRect`, so every fake-DOM test fits as before. `fit()`
   and `resolveCameraTarget()` both frame through `paneBox()`, so they agree by construction.
 

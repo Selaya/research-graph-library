@@ -260,7 +260,9 @@ first one in a script takes the viewport (auto-refit stops, the camera joins the
 snapshots). Every fit — `g.fitView()`, `camera({fit})`, `camera({node|nodes})` — frames
 inside the pane *minus the chrome the library mounted over it* (transport bar, the preset's
 total-duration bar, the caption strip), so the last rank never lands underneath them; pass
-`inset: {top,right,bottom,left}` for chrome of your own, or `inset: 0` to opt out. Targeting
+`inset: {top,right,bottom,left}` for chrome of your own (only the library's own top/bottom
+bars are measured), or `inset: 0` to opt out. The caption strip counts while it is up, so
+fit before you caption if a beat should hold one framing. Targeting
 a node inside a collapsed container aims at the ancestor drawn in its place instead of
 warning. A highlight *is* the emphasis state (replace, not accumulate) and survives
 relayouts and backward scrubs — and so does the `props` override layer, which sits over

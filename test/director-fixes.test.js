@@ -167,6 +167,35 @@ test("g.camera({fit}) dodges the same chrome, with no per-page dy nudge (F15)", 
   g.destroy();
 });
 
+/** Mount with a transport whose rect is the stylesheet's 34px bar from the moment it is
+ *  created — so the MOUNT-TIME auto-fit (D10) can measure it, if it runs after the transport
+ *  mounts. */
+function mountWithLiveChrome(opts = {}) {
+  const orig = doc.createElement;
+  doc.createElement = (t) => {
+    const el = orig.call(doc, t);
+    const rect = el.getBoundingClientRect.bind(el);
+    el.getBoundingClientRect = () =>
+      (!el.rect && (el.attrs.class || "").split(/\s+/).includes("smv-transport")
+        ? { left: 0, top: PANE.height - 34, width: PANE.width, height: 34 }
+        : rect());
+    return el;
+  };
+  try { return mountG(chain(), { controls: true, ...opts }); } finally { doc.createElement = orig; }
+}
+
+test("the mount-time auto-fit runs AFTER the transport mounts, so it dodges it too (F15)", () => {
+  // Pins the one ordering constraint in mount(): the single auto-fit has to come after
+  // opts.controls builds the bar, or the INITIAL framing is the only one still parked under
+  // the chrome — something no later fitView() call in a test would catch.
+  const { root, g } = mountWithLiveChrome();
+  assert.ok(root.classList.contains("smv-has-transport"), "the bar is up before the fit");
+  const b = g.layoutResult().bounds;
+  const t = g.viewport.transform;
+  close(t.y, (PANE.height - 34) / 2 - (b.y + b.h / 2) * t.k, "the first frame is already inset");
+  g.destroy();
+});
+
 test("a mount with no measurable chrome fits exactly where it always did (F15)", () => {
   const { g } = mountG();
   const b = g.layoutResult().bounds;
@@ -257,6 +286,15 @@ test("g.camera({node}) singular is still allowed to lean all the way in (F17)", 
   const { g } = mountG();
   g.camera({ node: "a", dur: 0 });
   assert.equal(g.viewport.transform.k, MAX_K, "framing ONE node is the case that wants the close-up");
+  g.destroy();
+});
+
+test("g.camera({node, nodes}) is a close-up: the lid follows the branch that wins (F17)", () => {
+  // `node` beats `nodes` in the resolver, so the lid must not be injected under it either —
+  // otherwise naming both silently capped a single-node shot at 1.5.
+  const { g } = mountG();
+  g.camera({ node: "a", nodes: ["a", "b"], dur: 0 });
+  assert.equal(g.viewport.transform.k, MAX_K, "still the one-node close-up");
   g.destroy();
 });
 

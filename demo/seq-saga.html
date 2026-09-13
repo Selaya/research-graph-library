@@ -233,7 +233,6 @@
   STEPS.push({ label: "rolled back" });
   STEPS.push({ op: "highlight", args: [{ nodes: ["saga.c2", "store.2"], variant: "ok", pulse: true }] });
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 520 * P }] });
-  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -22 }, dur: 200 * P }] });  // clear the total + transport bars
   STEPS.push(cap("One order, two balls: $42 refunded, 2× sku back on the shelf."));
   STEPS.push({ op: "wait", ms: 1100 * P });
   // Drop the caption for the held final frame: its panel would otherwise sit over the

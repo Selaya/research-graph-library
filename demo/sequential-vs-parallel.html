@@ -409,13 +409,10 @@
     return { seq: seq, par: par };
   }
 
-  // The transport bar (34px), the preset's total bar (22px) and the caption strip all
-  // overlay the bottom of each pane, and fitView() centres on the WHOLE pane — so every fit
-  // is followed by a small camera nudge that lifts the drawing clear of that chrome.
-  var BAR_LIFT = 34;
+  // fitView() already frames inside the pane MINUS the chrome the library mounts over it
+  // (transport bar, the preset's total bar, the caption strip), so no lift nudge is needed.
   function fitSide(side, dur) {
     side.g.fitView({ pad: 50, animate: true, duration: dur });
-    side.g.camera({ by: { dy: -BAR_LIFT }, dur: dur == null ? 420 : dur });
   }
   function fitBoth(dur) { fitSide(L, dur); fitSide(R, dur); }
 

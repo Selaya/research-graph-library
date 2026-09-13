@@ -43,9 +43,9 @@ export function paneBox(size, pad = 0, inset) {
 }
 
 /** F15 — measure the mounted chrome rather than guess at its heights: each bar goes to the
- *  pane edge it hugs (wide → the nearer of top/bottom, tall → left/right), deepest per side
- *  wins. All zeros without a usable getBoundingClientRect (Node / fake DOM), so a headless
- *  mount fits exactly as before. */
+ *  pane edge it hugs (the nearer of top/bottom), deepest intrusion per side wins. All zeros
+ *  without a usable getBoundingClientRect (Node / fake DOM), so a headless mount fits
+ *  exactly as before. */
 export function paneInsets(root, svgEl) {
   const out = { top: 0, right: 0, bottom: 0, left: 0 };
   const rect = (el) => (el && typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null);
@@ -53,29 +53,25 @@ export function paneInsets(root, svgEl) {
   if (!pane || !(pane.width > 0) || !(pane.height > 0)) return out;
   // Edges from left/top/width/height, never a DOMRect's right/bottom: the fake DOMs this
   // library is tested against hand back the four they were asked for and no more.
-  const paneR = pane.left + pane.width, paneB = pane.top + pane.height;
+  const paneB = pane.top + pane.height;
   for (const el of (root && root.children) || []) {
     const cls = typeof el.getAttribute === "function" ? el.getAttribute("class") || "" : "";
     if (!CHROME.test(cls)) continue;
     const r = rect(el);
     if (!r || !(r.width > 0) || !(r.height > 0)) continue;
-    const right = r.left + r.width, bottom = r.top + r.height;
-    // Chrome is a BAR: something covering half the pane is a panel of the host page's own
-    // (or a fake-DOM stub handing every element the pane's rect) and is left alone.
-    if (r.width >= r.height) {
-      if (r.height >= pane.height * 0.5) continue;
-      if (r.top - pane.top <= paneB - bottom) out.top = Math.max(out.top, bottom - pane.top);
-      else out.bottom = Math.max(out.bottom, paneB - r.top);
-    } else if (r.width >= pane.width * 0.5) continue;
-    else if (r.left - pane.left <= paneR - right) out.left = Math.max(out.left, right - pane.left);
-    else out.right = Math.max(out.right, paneR - r.left);
+    // Every piece of chrome this library mounts is a horizontal BAR pinned to the top or
+    // the bottom edge, so that is all this measures; a side panel of your own is an
+    // `inset:{left|right}` you pass in. Anything taller than it is wide, or covering half
+    // the pane (a host overlay, or a fake-DOM stub handing back the pane's own rect), is
+    // left alone.
+    if (r.width < r.height || r.height >= pane.height * 0.5) continue;
+    const bottom = r.top + r.height;
+    if (r.top - pane.top <= paneB - bottom) out.top = Math.max(out.top, bottom - pane.top);
+    else out.bottom = Math.max(out.bottom, paneB - r.top);
   }
   // A stray overlay must never collapse the pane: no side eats more than 40% of it.
-  const cap = (v, max) => Math.min(Math.max(0, v), max);
-  return {
-    top: cap(out.top, pane.height * 0.4), bottom: cap(out.bottom, pane.height * 0.4),
-    left: cap(out.left, pane.width * 0.4), right: cap(out.right, pane.width * 0.4),
-  };
+  const cap = (v) => Math.min(Math.max(0, v), pane.height * 0.4);
+  return { top: cap(out.top), bottom: cap(out.bottom), left: 0, right: 0 };
 }
 
 export function createViewport(svgEl, viewportG, ticker) {
