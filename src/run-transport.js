@@ -118,12 +118,22 @@ function createSimTransport(internals, opts = {}) {
    *  after a recompile, replay the backlog for nodes the previous schedule had nothing for
    *  at or below `t` — new to the story, so nothing can be firing twice. */
   function replayBacklog(prev) {
-    const seen = new Set();
-    for (const ev of prev.events) { if (ev.t > t) break; if (ev.nodeId != null) seen.add(ev.nodeId); }
+    // Counted per (node, event type), not per node: an inject() into a node that has
+    // ALREADY been visited adds a second `enter`/`start` at the cursor, and a set keyed by
+    // node id would swallow exactly that — the saga token-refresh case F3 exists for.
+    // Only the SURPLUS over what the previous schedule already told the page is replayed.
+    const seen = new Map();
+    const key = (ev) => ev.nodeId + "\u0000" + ev.type;
+    for (const ev of prev.events) {
+      if (ev.t > t) break;
+      if (ev.nodeId != null) seen.set(key(ev), (seen.get(key(ev)) || 0) + 1);
+    }
     for (const ev of sim.events) {
       if (ev.t > t) break;
-      if (ev.nodeId == null || seen.has(ev.nodeId)) continue;
-      bus.emit(ev.type, ev);
+      if (ev.nodeId == null) continue;
+      const c = seen.get(key(ev)) || 0;
+      if (c > 0) seen.set(key(ev), c - 1);
+      else bus.emit(ev.type, ev);
     }
   }
 
@@ -277,8 +287,12 @@ function createSimTransport(internals, opts = {}) {
    *  being something to wait for (see satisfied()). Falls back to the whole run. */
   function timeOf(nodeId) {
     const s = current();
+    // `terminal === false` marks a non-terminal retry attempt (F1): it is NOT the instant
+    // the node stops being something to wait for — satisfied() reads status, which only
+    // turns 'failed' on the terminal attempt — so a slice sized from here must skip it.
     for (const ev of s.events) {
-      if ((ev.type === "finish" || ev.type === "fail") && ev.nodeId === nodeId) return ev.t;
+      if (ev.nodeId !== nodeId || ev.terminal === false) continue;
+      if (ev.type === "finish" || ev.type === "fail") return ev.t;
     }
     return s.duration;
   }

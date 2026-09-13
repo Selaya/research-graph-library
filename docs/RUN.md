@@ -55,7 +55,7 @@ Every method below is on the object `g.run(opts)` returns.
 | `playbackSpeed()` | `number` | The multiplier a bare `speed()` set; `1` is real declared time. |
 | `inject(nodeId, { at? })` | `number` | Mints a token at `nodeId` (`at` defaults to now), recompiling and extending the schedule around it. See **Seeding tokens**. |
 | `step({ token? })` | `number` | Jumps to the next event boundary. No `token`: the next boundary across every token. `token: id`: that token's own next boundary (a join's fire time counts as a boundary for every token it consumed). |
-| `timeOf(nodeId)` | `number` | First instant `nodeId` emits `'finish'` **or** `'fail'` — what a storyboard `run.play({until})` step is worth on the cumulative timeline. Falls back to `duration` if the node never does either. |
+| `timeOf(nodeId)` | `number` | First instant `nodeId` emits `'finish'` **or** a *terminal* `'fail'` — what a storyboard `run.play({until})` step is worth on the cumulative timeline. Non-terminal retry attempts are skipped, so this agrees with where `play({until})` really stops. Falls back to `duration` if the node never does either. |
 | `reset(opts, time?)` | `number` | Re-seats the *same* transport (same identity, same listeners) with new compile inputs, silently jumping to `time` (default 0) — used by storyboard restores, not something you usually call directly. |
 | `reload()` | `number` | Forces a recompile against the live spec and returns the new `duration`. |
 | `playing` (getter) | `boolean` | |
@@ -161,7 +161,9 @@ run.inject("compensate", { at: run.time() });        // …or mint one imperativ
 
 - **`data.startAt`** — when a seed token appears, in ms on the compiled clock. A string goes
   through the duration grammar (seconds), so `"2s"` is 2000. Unparseable values warn
-  (`[smv:run]`), emit a `'warn'` event and seed at 0.
+  (`[smv:run]`), emit a `'warn'` event and seed at 0. It only means something on a seed: on
+  a node reached through an in-edge it warns and is ignored (add `entry: true` if you meant
+  to seed it).
 - **`data.entry: true`** — this node is seeded whether or not it is a root. A saga's
   compensation branch, a token refresh after a 401: the second request is a token-level
   need, not a reason to bolt on a new root node.
@@ -172,10 +174,17 @@ run.inject("compensate", { at: run.time() });        // …or mint one imperativ
   child (see **Containers with several ports**). An unknown id warns and is kept, in case
   the node is added later.
 
+A seed is not a join arrival. Seeding a fan-in node (`entry: true` or `inject()`) gives it
+its own token straight away; the node's implicit AND-join still waits for all of its real
+in-edges, so no upstream branch is fired early or dropped.
+
 A node whose compiled `enter`/`start` are **already behind the clock** — one added mid-run,
 or injected at a past instant — has its backlog re-emitted once on the run bus after the
 recompile. Forward playback only re-emits what it crosses and a scrub back is deliberately
-silent (D8), so without this a node that joins the story late would light up nowhere.
+silent (D8), so without this a node that joins the story late would light up nowhere. The
+backlog is counted per node *and* event type, so injecting into a node that has **already
+run** re-emits its second `enter`/`start` rather than swallowing them — which is the point
+of a token refresh or a re-run of a step the clock is already past.
 
 ## Playback vs the declared timeline
 
@@ -250,6 +259,10 @@ declaration rather than a second compile.
 // attempt 1 fails · loop · attempt 2 finishes and the line moves on
 ```
 
+`recover` implies a budget of at least 1, so `{ recover: true }` on its own is still one
+real failing attempt followed by a passing one — a declared failure always produces a
+`'fail'` event.
+
 **The retry's arc.** With no loop edge the retry is in place and the `'loop'` event carries
 `edgeId: null`. Mark a `loop: true` edge out of the failing node with `onFail: true` and it
 becomes the retry's arc instead:
@@ -261,7 +274,9 @@ becomes the retry's arc instead:
 - its iteration budget **is** the retry budget when `data.fail` declares no `retries`
   (`opts.iterations` caps it exactly as it caps an ordinary loop);
 - every retry crosses it, so `state().loops[edgeId]` gives an `iter 2/3` badge on the real
-  arc and `edges[edgeId].traversed` fills;
+  arc and `edges[edgeId].traversed` fills. The badge's `max` (and the `'loop'` event's) is
+  the **effective budget**: if `data.fail.retries` is also declared it wins over the arc's
+  `maxIterations`, and the badge says so;
 - the token re-enters the edge's **target**, so an arc back to an upstream step replays that
   step (a self-arc simply re-runs the failing node);
 - it is inert on a successful finish — `exitNode` skips it. An ordinary `loop: true` edge
@@ -411,7 +426,7 @@ compiled schedule, re-emitted verbatim as playback crosses each event's timestam
 | `join` | `{t, nodeId, tokenId, arrived, needed, merged}` | a join policy fired |
 | `drop` | `{t, tokenId, nodeId, edgeId}` | an arrival after the join already fired |
 | `loop` | `{t, tokenId, edgeId, nodeId, iteration, max}` | a loop edge's arc-cross or in-place tick, or a failure taking a retry (`edgeId: null` without an `onFail` arc) |
-| `warn` | `{t, nodeId \| edgeId, message, value}` | an unparseable/negative `data.duration`, edge duration or `data.startAt` |
+| `warn` | `{t, nodeId \| edgeId, message, value}` | an unparseable/negative `data.duration`, edge duration or `data.startAt`, or a `startAt` on a non-seed |
 | `done` | `{t, stalled}` | the compiled schedule's own end marker |
 
 ## See also

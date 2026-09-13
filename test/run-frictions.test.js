@@ -378,3 +378,142 @@ test("F9: run.inject() into a container seeds every entry child", () => {
   assert.equal(st.nodes.calc.status, "done");
   run.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// Review follow-ups: the retry budget's edges, seeds vs joins, and re-injection
+// ---------------------------------------------------------------------------
+
+test("F1: timeOf() skips non-terminal retry fails, so a storyboard slice matches what play({until}) waits for", () => {
+  const spec = chain();
+  spec.nodes[1].data = { fail: { retries: 2 } };
+  const { ticker, store, bus } = internals(spec);
+  const run = createRunTransport({ ticker, store, bus }, {});
+
+  const fails = run.sim().events.filter((e) => e.type === "fail" && e.nodeId === "b");
+  assert.equal(fails.length, 3);
+  assert.equal(run.timeOf("b"), fails[2].t, "the TERMINAL attempt is what the step is worth");
+  assert.notEqual(run.timeOf("b"), fails[0].t);
+  // …and that is exactly where play({until:'b'}) actually stops.
+  assert.equal(run.sim().stateAt(run.timeOf("b")).nodes.b.status, "failed");
+  assert.equal(run.sim().stateAt(fails[0].t).nodes.b.status, "active", "attempt 1 is not a stopping point");
+  run.destroy();
+});
+
+test("F1: a recovering node's timeOf() is its finish, not its first fail", () => {
+  const spec = chain();
+  spec.nodes[1].data = { fail: { retries: 1, recover: true } };
+  const { ticker, store, bus } = internals(spec);
+  const run = createRunTransport({ ticker, store, bus }, {});
+  const fin = run.sim().events.find((e) => e.type === "finish" && e.nodeId === "b");
+  assert.equal(run.timeOf("b"), fin.t);
+  run.destroy();
+});
+
+test("F1: fail {recover:true} with no retries still fails once before it passes", () => {
+  const spec = chain();
+  spec.nodes[1].data = { fail: { reason: "seam", recover: true } };
+  const sim = compileRun(spec);
+  const fails = evs(sim, "fail").filter((e) => e.nodeId === "b");
+  assert.equal(fails.length, 1, "a declared failure must produce a real failure");
+  assert.equal(fails[0].terminal, false);
+  assert.equal(fails[0].reason, "seam");
+  assert.equal(evs(sim, "start").filter((e) => e.nodeId === "b").length, 2, "then it re-runs and passes");
+  assert.equal(sim.stateAt(sim.duration).nodes.b.status, "done");
+  assert.equal(sim.stateAt(sim.duration).nodes.c.status, "done", "and the run carries on");
+});
+
+test("F1: the retry badge reports the real budget when data.fail.retries overrides the arc", () => {
+  const spec = {
+    nodes: [{ id: "q", data: { fail: { retries: 2 } } }],
+    edges: [{ id: "qa", source: "q", target: "q", loop: true, onFail: true, maxIterations: 3 }],
+  };
+  const sim = compileRun(spec);
+  const loops = evs(sim, "loop");
+  assert.deepEqual(loops.map((e) => e.max), [2, 2], "not the arc's raw maxIterations");
+  assert.deepEqual(sim.stateAt(sim.duration).loops.qa, { iteration: 2, max: 2 });
+});
+
+test("F1: a retry folds in a rate event issued after the first attempt", () => {
+  const spec = { nodes: [{ id: "q", data: { fail: { retries: 1 } } }], edges: [] };
+  const plain = compileRun(spec);
+  const t1 = plain.events.find((e) => e.type === "fail").t;
+  const slow = compileRun(spec, { rates: [{ t: t1, scope: "q", factor: 0.5 }] });
+  const starts = slow.events.filter((e) => e.type === "start" && e.nodeId === "q");
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1].dwellMs, starts[0].dwellMs * 2, "the retried token runs at the new tempo");
+});
+
+test("F3: an extra seed at a fan-in does not count as a join arrival", () => {
+  const spec = {
+    nodes: [{ id: "a" }, { id: "b", data: { duration: "5s" } }, { id: "j", data: { entry: true } }],
+    edges: [{ id: "aj", source: "a", target: "j" }, { id: "bj", source: "b", target: "j" }],
+  };
+  const sim = compileRun(spec);
+  const join = evs(sim, "join").find((e) => e.nodeId === "j");
+  assert.ok(join, "the join still fires");
+  assert.equal(join.arrived, 2);
+  assert.equal(join.needed, 2);
+  assert.equal(evs(sim, "drop").length, 0, "b's genuine arrival is not thrown away");
+  // It fires on b (the slow branch), not on a alone.
+  const bFinish = evs(sim, "finish").find((e) => e.nodeId === "b");
+  assert.ok(join.t > bFinish.t, "the AND-join waited for both real branches");
+  assert.equal(sim.stateAt(sim.duration).nodes.j.status, "done");
+});
+
+test("F3: inject() into a fan-in node does not fire its join early either", () => {
+  const spec = {
+    nodes: [{ id: "a" }, { id: "b", data: { duration: "5s" } }, { id: "j" }],
+    edges: [{ id: "aj", source: "a", target: "j" }, { id: "bj", source: "b", target: "j" }],
+  };
+  const { ticker, store, bus } = internals(spec);
+  const run = createRunTransport({ ticker, store, bus }, {});
+  run.inject("j", { at: 0 });
+  const s = run.sim();
+  const join = s.events.find((e) => e.type === "join" && e.nodeId === "j");
+  assert.equal(join.arrived, 2);
+  assert.equal(s.events.filter((e) => e.type === "drop").length, 0);
+  run.destroy();
+});
+
+test("F3: inject() re-lights a node that has already been visited", () => {
+  const { ticker, store, bus } = internals();
+  const run = createRunTransport({ ticker, store, bus }, {});
+  run.seek(1500);
+  assert.equal(run.state().nodes.a.status, "done", "a is already behind us");
+
+  const seen = [];
+  for (const type of ["enter", "start", "finish"]) run.on(type, (e) => seen.push(`${type}:${e.nodeId}`));
+  const at = run.inject("a");
+  assert.equal(at, 1500);
+  assert.ok(seen.includes("enter:a"), "the second request lights the node up again");
+  assert.ok(seen.includes("start:a"));
+  run.destroy();
+});
+
+test("F4: startAt on a node that is not a seed warns instead of silently doing nothing", () => {
+  const spec = chain();
+  spec.nodes[1].data = { startAt: 4000 };
+  let sim;
+  const warns = captureWarnings(() => { sim = compileRun(spec); });
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /\[smv:run\] node "b" declares startAt but is not a seed/);
+  assert.ok(sim.events.some((e) => e.type === "warn" && e.message === "startAt on a non-seed"));
+});
+
+test("F7: a bare speed() leaves the schedule alone; a {branch} speed recompiles it", () => {
+  const { ticker, store, bus } = internals();
+  const run = createRunTransport({ ticker, store, bus }, {});
+  const declared = run.sim().declared;
+  const events = run.sim().events.length;
+
+  run.speed(2);
+  assert.equal(run.playbackSpeed(), 2);
+  assert.equal(run.sim().declared, declared, "playback never moves the declared timeline");
+  assert.equal(run.sim().playback, declared / 2);
+  assert.equal(run.sim().events.length, events, "…and nothing was recompiled");
+
+  run.speed(0.5, { branch: "b" });
+  assert.equal(run.playbackSpeed(), 2, "the playback multiplier is untouched by a branch rate");
+  assert.ok(run.sim().declared > declared, "a per-branch rate IS a compile input: the work got slower");
+  run.destroy();
+});

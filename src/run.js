@@ -334,9 +334,12 @@ export function compileRun(spec = {}, opts = {}) {
    *  failure (exitNode skips it), and its iteration budget is that node's retry budget. */
   const onFailEdge = (id) => { for (const e of outLoop.get(id) || []) if (e.onFail) return e; return null; };
   function retriesFor(nodeId, fs) {
-    if (fs.declared) return fs.retries;
-    const e = onFailEdge(nodeId);
-    return e ? iterationsFor(e) : 0;
+    let n;
+    if (fs.declared) n = fs.retries;
+    else { const e = onFailEdge(nodeId); n = e ? iterationsFor(e) : 0; }
+    // `recover` describes a failure that is survived, so it implies at least one real
+    // failing attempt — otherwise a declared failure would produce no `fail` event at all.
+    return fs.recover && n < 1 ? 1 : n;
   }
 
   function applyRates(tk, nodeId, t) {
@@ -356,10 +359,13 @@ export function compileRun(spec = {}, opts = {}) {
   function segment(tk, seg) { seg.rate = tk.rate; tk.segments.push(seg); return seg; }
   function endToken(tk, t) { tk.endT = t; }
 
-  function arrive(tk, nodeId, t, viaEdgeId) {
+  function arrive(tk, nodeId, t, viaEdgeId, seed) {
     applyRates(tk, nodeId, t);
     emit({ t, type: "enter", tokenId: tk.id, nodeId, edgeId: viaEdgeId });
-    const st = joinStates.get(nodeId);
+    // A seed does not come through an in-edge, so it must not fill one of the join's slots
+    // (that would fire an AND-join an arrival early and drop a genuine upstream token).
+    // It simply starts working alongside whatever the join is still waiting for.
+    const st = seed ? null : joinStates.get(nodeId);
     if (!st) return startDwell(tk, nodeId, t);
     if (st.fireT != null) {
       // The policy already fired: this branch's work is moot (ghost-fade in the renderer).
@@ -428,7 +434,10 @@ export function compileRun(spec = {}, opts = {}) {
     const hop = e ? scale(hopFor(e), tk.rate) : 0;
     const to = e ? e.target : nodeId;
     if (e) {
-      emit({ t, type: "loop", tokenId: tk.id, edgeId: e.id, nodeId: to, iteration: attempt, max: e.maxIterations });
+      // The budget — not the arc's raw maxIterations, which `data.fail.retries` overrides —
+      // is what a `iter 2/3` badge must read, so the event and loops[id].max carry it.
+      loopMax.set(e.id, retries);
+      emit({ t, type: "loop", tokenId: tk.id, edgeId: e.id, nodeId: to, iteration: attempt, max: retries });
       loopTimeline.get(e.id).push({ iteration: attempt, t });
       segment(tk, { kind: "edge", id: e.id, t0: t, t1: t + hop });
     } else {
@@ -438,6 +447,10 @@ export function compileRun(spec = {}, opts = {}) {
     }
     if (!Number.isFinite(hop)) return;
     push(t + hop, () => {
+      // Deliberately not arrive(): a retry must not be gated by (or counted into) the
+      // target's join, which has already fired for the attempt that just failed. It does
+      // fold in rate events, exactly as every other node entry does.
+      applyRates(tk, to, t + hop);
       emit({ t: t + hop, type: "enter", tokenId: tk.id, nodeId: to, edgeId: e ? e.id : undefined });
       startDwell(tk, to, t + hop);
     });
@@ -504,12 +517,19 @@ export function compileRun(spec = {}, opts = {}) {
     const at = Number.isFinite(+inj.at) && +inj.at >= 0 ? +inj.at : 0;
     for (const id of attachAll(inj.id, "entry")) seeds.push({ id, at });
   }
+  // A start instant only means something for a token that is MINTED, not one that arrives:
+  // say so rather than dropping it silently (add `entry: true` to seed the node).
+  for (const n of nodes.values()) {
+    if (!(n.data && n.data.startAt != null) || seeds.some((sd) => sd.id === n.id)) continue;
+    console.warn(`[smv:run] node "${n.id}" declares startAt but is not a seed; ignored`);
+    emit({ t: 0, type: "warn", nodeId: n.id, message: "startAt on a non-seed", value: n.data.startAt });
+  }
   seeds.sort((a, b) => a.at - b.at);
   // Queued rather than called: a seed with a later `at` must not record its join arrival
   // before an earlier token's. At the all-zero default this is byte-identical to before.
   for (const sd of seeds) {
     const tk = newToken(1, new Set(), new Set(), null);
-    push(sd.at, () => arrive(tk, sd.id, sd.at, undefined));
+    push(sd.at, () => arrive(tk, sd.id, sd.at, undefined, true));
   }
   let steps = 0;
   while (queue.length && steps++ < MAX_STEPS) queue.shift().fn();
