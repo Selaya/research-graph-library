@@ -241,7 +241,6 @@
   STEPS.push({ op: "clearHighlight", args: [] });
   STEPS.push({ label: "done" });
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
-  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -30 }, dur: 200 * P }] }); // clear the transport bar
   STEPS.push({ op: "caption", args: ["Cold vs warm: watch the total-duration bar below.", { place: "top" }] });
   STEPS.push({ op: "wait", ms: 900 * P });
 

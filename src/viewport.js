@@ -15,6 +15,65 @@ const FIT_MS = 350;           // the legacy `fit(bounds, pad, true)` spelling's 
 
 const clampK = (k) => Math.max(MIN_K, Math.min(MAX_K, Number.isFinite(k) ? k : 1));
 
+/** The chrome the LIBRARY itself mounts over the pane (F15): plain HTML positioned over the
+ *  svg, so a fit centred on the whole client box parks the last rank underneath it — the
+ *  `by:{dy}` nudge nearly every demo page ended up hand-tuning. */
+const CHROME = /(^|\s)smv-(transport|totalbar|caption)($|\s)/;
+
+/** `{top,right,bottom,left}`, from a number (all four sides) or a partial object. */
+export function normInset(v) {
+  const n = (x) => (Number.isFinite(x) && x > 0 ? x : 0);
+  if (Number.isFinite(v)) return { top: n(v), right: n(v), bottom: n(v), left: n(v) };
+  const o = v || {};
+  return { top: n(o.top), right: n(o.right), bottom: n(o.bottom), left: n(o.left) };
+}
+
+/** The rect a fit should aim at: the pane minus `inset` minus `pad`, as a centre + extent.
+ *  Shared by viewport.fit() and director.resolveCameraTarget() so both frame the same box. */
+export function paneBox(size, pad = 0, inset) {
+  const i = normInset(inset);
+  const W = size && size.w > 0 ? size.w : 0;
+  const H = size && size.h > 0 ? size.h : 0;
+  return {
+    cx: i.left + (W - i.left - i.right) / 2,
+    cy: i.top + (H - i.top - i.bottom) / 2,
+    w: Math.max(1, W - i.left - i.right - 2 * pad),
+    h: Math.max(1, H - i.top - i.bottom - 2 * pad),
+  };
+}
+
+/** F15 — measure the mounted chrome rather than guess at its heights: each bar goes to the
+ *  pane edge it hugs (the nearer of top/bottom), deepest intrusion per side wins. All zeros
+ *  without a usable getBoundingClientRect (Node / fake DOM), so a headless mount fits
+ *  exactly as before. */
+export function paneInsets(root, svgEl) {
+  const out = { top: 0, right: 0, bottom: 0, left: 0 };
+  const rect = (el) => (el && typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null);
+  const pane = rect(svgEl) || rect(root);
+  if (!pane || !(pane.width > 0) || !(pane.height > 0)) return out;
+  // Edges from left/top/width/height, never a DOMRect's right/bottom: the fake DOMs this
+  // library is tested against hand back the four they were asked for and no more.
+  const paneB = pane.top + pane.height;
+  for (const el of (root && root.children) || []) {
+    const cls = typeof el.getAttribute === "function" ? el.getAttribute("class") || "" : "";
+    if (!CHROME.test(cls)) continue;
+    const r = rect(el);
+    if (!r || !(r.width > 0) || !(r.height > 0)) continue;
+    // Every piece of chrome this library mounts is a horizontal BAR pinned to the top or
+    // the bottom edge, so that is all this measures; a side panel of your own is an
+    // `inset:{left|right}` you pass in. Anything taller than it is wide, or covering half
+    // the pane (a host overlay, or a fake-DOM stub handing back the pane's own rect), is
+    // left alone.
+    if (r.width < r.height || r.height >= pane.height * 0.5) continue;
+    const bottom = r.top + r.height;
+    if (r.top - pane.top <= paneB - bottom) out.top = Math.max(out.top, bottom - pane.top);
+    else out.bottom = Math.max(out.bottom, paneB - r.top);
+  }
+  // A stray overlay must never collapse the pane: no side eats more than 40% of it.
+  const cap = (v) => Math.min(Math.max(0, v), pane.height * 0.4);
+  return { top: cap(out.top), bottom: cap(out.bottom), left: 0, right: 0 };
+}
+
 export function createViewport(svgEl, viewportG, ticker) {
   const state = { x: 0, y: 0, k: 1 };
   const target = { x: 0, y: 0, k: 1 };
@@ -121,9 +180,11 @@ export function createViewport(svgEl, viewportG, ticker) {
     return { x: tl.x - pad, y: tl.y - pad, w: br.x - tl.x + 2 * pad, h: br.y - tl.y + 2 * pad };
   }
 
-  /** fit(bounds, {pad, duration, ease, maxK}) — and still the M0 spelling
+  /** fit(bounds, {pad, duration, ease, maxK, inset}) — and still the M0 spelling
    *  `fit(bounds, pad, animate)`, which every existing caller and the public d.ts use.
-   *  Reduced motion is NOT consulted here: index.js owns `reduced` and passes duration=1. */
+   *  Reduced motion is NOT consulted here: index.js owns `reduced` and passes duration=1.
+   *  `inset` (F15) is the chrome mounted OVER the pane: the shot is fitted and centred in
+   *  what is left, so the last rank never lands under the transport bar. */
   function fit(bounds, o = 24, animate = false) {
     if (!bounds) return Promise.resolve({ canceled: false });
     const opts = o && typeof o === "object" ? o : { pad: o, duration: animate ? FIT_MS : 0 };
@@ -131,13 +192,13 @@ export function createViewport(svgEl, viewportG, ticker) {
     // FIT_MAX_K exists so the initial auto-fit never blows a two-node graph up to fill the
     // pane. A director camera framing ONE node wants the opposite, so it passes maxK.
     const lid = opts.maxK ?? FIT_MAX_K;
-    const { w: W, h: H } = size();
+    const box = paneBox(size(), pad, opts.inset);
     const bw = Math.max(bounds.w, 1), bh = Math.max(bounds.h, 1);
-    let k = Math.min((W - 2 * pad) / bw, (H - 2 * pad) / bh);
+    let k = Math.min(box.w / bw, box.h / bh);
     if (!Number.isFinite(k) || k <= 0) k = 1;
     k = Math.max(MIN_K, Math.min(lid, k));
-    const x = W / 2 - (bounds.x + bounds.w / 2) * k;
-    const y = H / 2 - (bounds.y + bounds.h / 2) * k;
+    const x = box.cx - (bounds.x + bounds.w / 2) * k;
+    const y = box.cy - (bounds.y + bounds.h / 2) * k;
     return setTo(x, y, k, opts.duration ?? 0, opts.ease);
   }
 

@@ -209,7 +209,6 @@
   STEPS.push({ label: "done" });
   STEPS.push({ op: "caption", args: [null] });
   STEPS.push({ op: "camera", args: [{ fit: true, pad: 62, dur: 500 * P }] }); // extra top pad clears the actor headers under the closing caption
-  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -26 }, dur: 200 * P }] }); // clear the transport bar
   STEPS.push({ op: "caption", args: ["Fourteen activations, one 3-D Secure detour, one fire-and-forget email.", { place: "top" }] });
   STEPS.push({ op: "wait", ms: 900 * P });
   STEPS.push({ op: "clearHighlight" });

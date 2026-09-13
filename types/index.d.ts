@@ -503,8 +503,19 @@ export type Run = SimRun | LiveRun;
 // Storyboard (src/storyboard.js's op table, as index.js's applyStep dispatches it)
 // ---------------------------------------------------------------------------
 
+/** Chrome sitting OVER the pane that a fit must keep clear of, in screen px (F15). A bare
+ *  number is all four sides; `0` opts out of the library's own measurement. */
+export interface Inset {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}
+
 /** Where a `camera` op is pointed. First match wins, in declaration order: absolute
- *  `x`/`y` -> `node` -> `nodes` -> `fit` -> relative `zoom`/`by`. */
+ *  `x`/`y` -> `node` -> `nodes` -> `fit` -> relative `zoom`/`by`. A `node`/`nodes` id that
+ *  is a collapsed descendant resolves to the nearest DRAWN ancestor (F16); only an id
+ *  nothing can resolve warns. */
 export interface CameraTarget {
   /** Absolute transform (screen px / scale). `k` alone is a relative zoom-to-scale. */
   x?: number;
@@ -522,6 +533,12 @@ export interface CameraTarget {
   zoom?: number;
   /** Padding around a framed box (default 24). */
   pad?: number;
+  /** Chrome to keep the shot clear of. Defaults to the bars the library itself mounted
+   *  (transport, the preset's total bar, the caption strip); `0` opts out (F15). */
+  inset?: Inset | number;
+  /** Lid on a FITTED scale — never on an explicit `k`. Defaults to 1.5 for a `nodes[]`
+   *  union, so two nodes in a short pane are not an extreme close-up (F17). */
+  maxK?: number;
   /** Move duration in ms (default 600). Reduced motion shrinks it to 1 (G9). */
   dur?: number;
   ease?: EasingName;
@@ -546,6 +563,11 @@ export interface HighlightSelection {
  *  merged OVER the mount's style function at commit time. `null`/`false` on a key removes
  *  it; only `--smv-*` keys are accepted (D7) and anything else throws. */
 export type PropsOverride = Record<string, Record<string, string | number | false | null>>;
+
+/** `{merge:true}` patches the override layer instead of replacing it (F18). */
+export interface PropsOpts {
+  merge?: boolean;
+}
 
 export interface CaptionOpts {
   place?: "bottom" | "top";
@@ -593,7 +615,7 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "highlight"; args: [HighlightSelection] }
   | { op: "clearHighlight"; args?: [] }
   | { op: "caption"; args: [string | null, CaptionOpts?] }
-  | { op: "props"; args: [PropsOverride | null] }
+  | { op: "props"; args: [PropsOverride | null, PropsOpts?] }
   | { label: string }
 );
 
@@ -714,6 +736,8 @@ export interface FitOpts {
   pad?: number;
   duration?: number;
   ease?: EasingFn;
+  /** Pane chrome to fit inside of, in screen px (F15). */
+  inset?: Inset | number;
   /** Scale lid. Defaults to 1.5 (the initial-auto-fit rule); pass 4 to frame one node. */
   maxK?: number;
 }
@@ -868,11 +892,14 @@ export interface Graph {
   /** User style functions set `--smv-*` custom properties only (D7). Pass `null` to clear. */
   style(fn: StyleFn | null): Graph;
   /** M4d/D16 — the per-step override layer, merged over `style()`. Replace-not-accumulate
-   *  (this call IS the layer) and snapshotted like emphasis. `null` clears it. */
-  props(map: PropsOverride | null): Graph;
+   *  (this call IS the layer) and snapshotted like emphasis. `null` clears it. F18 —
+   *  `{merge:true}` patches instead: unnamed ids keep their overrides, a `null` value drops
+   *  one key and a `null` entry drops one id. */
+  props(map: PropsOverride | null, opts?: PropsOpts): Graph;
   theme(t: ThemeName): Graph;
   layout(o?: LayoutOpts): Awaitable;
-  fitView(o?: { pad?: number; animate?: boolean; duration?: number }): Graph;
+  /** `inset` defaults to the chrome the library mounted over the pane (F15); `0` opts out. */
+  fitView(o?: { pad?: number; animate?: boolean; duration?: number; inset?: Inset | number }): Graph;
   destroy(): void;
 
   // Query sugar (M2, src/query.js) — spread onto `g`; `node`/`edge` above stay singular.

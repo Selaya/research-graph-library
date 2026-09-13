@@ -10,12 +10,12 @@ import { layout } from "./layout.js";
 import { createTicker, EASE, prefersReducedMotion } from "./anim.js";
 import { createScene } from "./scene.js";
 import { createRenderer } from "./render.js";
-import { createViewport } from "./viewport.js";
+import { createViewport, paneInsets } from "./viewport.js";
 import { injectStyles } from "./styles.js";
 import { createViewState } from "./viewstate.js";
 import { runCondense, CONDENSE_PHASES } from "./condense-anim.js";
 import { runSplit } from "./split-anim.js";
-import { createDirector, resolveCameraTarget } from "./director.js";
+import { createDirector, resolveCameraTarget, NODES_MAX_K } from "./director.js";
 import { makeQuery, cloneItem } from "./query.js";
 import { attachA11y } from "./a11y.js";
 import { attachTapToggle } from "./interact.js";
@@ -166,6 +166,9 @@ export function mount(el, spec = {}, opts = {}) {
     ticker,
     reduced,
     lastLayout: () => last,
+    // F16 — a highlight aimed at a collapsed descendant lands on the ancestor drawn in its
+    // place, so a script does not have to filter its ids through layoutResult() first.
+    resolveId: (id) => vs.visibleAncestor(id),
     emphasize: (id, v) => renderer.emphasize(id, v),
     dim: (id, v) => renderer.dim(id, v),
   });
@@ -196,6 +199,11 @@ export function mount(el, spec = {}, opts = {}) {
       style: styleFn, sizes, props: director.propsLayer(),
     });
   }
+
+  /** F15 — every fit aims at the pane MINUS the chrome the library mounted over it (the
+   *  transport bar, the preset's total bar, the caption strip), measured rather than
+   *  assumed. Zero without getBoundingClientRect: a headless mount fits as it always did. */
+  const chromeInset = () => paneInsets(root, renderer.svg);
 
   scene.onFrame((visual) => renderer.frame(visual));
 
@@ -335,7 +343,7 @@ export function mount(el, spec = {}, opts = {}) {
       viewport.anchor(before, after, dur);
       // The auto-refit rides the SAME computed duration, so reduced motion shrinks it too
       // (through M3 it was a flat 350ms tween whatever the environment asked for).
-      if (!viewport.userMoved && !viewport.contains(res.bounds)) viewport.fit(res.bounds, { pad: 24, duration: dur });
+      if (!viewport.userMoved && !viewport.contains(res.bounds)) viewport.fit(res.bounds, { pad: 24, duration: dur, inset: chromeInset() });
     }
 
     bus.emit("commit", {
@@ -1093,9 +1101,12 @@ export function mount(el, spec = {}, opts = {}) {
      *  OVER the style function, `g.props(null)` to clear. Replace-not-accumulate like
      *  highlight, and state like it too — snapshotted, restored, and re-applied to the
      *  fresh <g> a commit builds for a re-added id (it rides the style commit, which runs
-     *  before the elements exist). Only --smv-* keys, same as every other styling path. */
-    props(map) {
-      director.props(map);
+     *  before the elements exist). Only --smv-* keys, same as every other styling path.
+     *  F18 — `g.props(patch, { merge: true })` patches the layer instead of replacing it:
+     *  unnamed ids keep their overrides, a `null` value drops one key, a `null` entry drops
+     *  one id, and `g.props(null)` still clears the lot. */
+    props(map, o) {
+      director.props(map, o);
       styleNow();
       return g;
     },
@@ -1110,7 +1121,9 @@ export function mount(el, spec = {}, opts = {}) {
     fitView(o = {}) {
       // G9 — the fit tween shrinks under reduced motion instead of running at full length.
       const dur = o.animate === false ? 0 : (reduced ? 1 : (o.duration ?? baseDuration));
-      if (last) viewport.fit(last.bounds, { pad: o.pad ?? 24, duration: dur });
+      // F15 — the mounted chrome is subtracted by default; `inset: 0` opts back out, and an
+      // explicit inset (a legend of the host page's own) replaces the measurement.
+      if (last) viewport.fit(last.bounds, { pad: o.pad ?? 24, duration: dur, inset: o.inset ?? chromeInset() });
       viewport.userMoved = false;
       return g;
     },
@@ -1126,7 +1139,15 @@ export function mount(el, spec = {}, opts = {}) {
       // must not "helpfully" refit over a shot the script composed.
       cameraOwned = true;
       viewport.userMoved = true;
-      const to = resolveCameraTarget(o, last, viewport.size(), viewport.target);
+      // F15/F17 — the pane the shot is composed in carries its chrome inset, and a
+      // multi-node fit is lidded at NODES_MAX_K so "look at these two" is not a close-up.
+      // Both are defaults: `inset`/`maxK` (or an explicit `k`) on the target still win.
+      const size = { ...viewport.size(), inset: o.inset ?? chromeInset() };
+      // Only a MULTI-NODE FIT is lidded: a `node` close-up (which wins over `nodes`) and an
+      // explicit `k` are scale requests, not fits, and are left alone.
+      const lid = Array.isArray(o.nodes) && !o.node && o.k === undefined && o.maxK === undefined;
+      const target = lid ? { ...o, maxK: NODES_MAX_K } : o;
+      const to = resolveCameraTarget(target, last, size, viewport.target, (id) => vs.visibleAncestor(id));
       // D12 — the declared timeline is the contract, and durOf() reads `step.dur` FIRST, so
       // the tween has to as well: args-first here would let a step declaring both durations
       // play for one length while the scrubber, cues and frame count measured the other.
@@ -1201,9 +1222,9 @@ export function mount(el, spec = {}, opts = {}) {
   // elements exist.
   bus.on("commit", () => director.reassert());
 
-  // Initial paint: land immediately (nothing to tween from), then fit once (D10).
+  // Initial paint: land immediately (nothing to tween from). The one auto-fit (D10) waits
+  // until the chrome below has mounted, so F15's inset measurement sees the real pane.
   relayout({ duration: 0 });
-  viewport.fit(last.bounds, { pad: 24 });
 
   // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
   if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg });
@@ -1217,6 +1238,7 @@ export function mount(el, spec = {}, opts = {}) {
     root.classList.add("smv-has-transport"); // the preset's total bar steps up out of the way
     transport = createTransport(root, controller);
   }
+  viewport.fit(last.bounds, { pad: 24, inset: chromeInset() });
   if (wantsAutoplay(opts.autoplay, doc) && sb) { sbPlaying = true; sb.play(); }
 
   return g;

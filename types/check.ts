@@ -110,6 +110,8 @@ void condenseAwaitable;
 g.style((n: NodeSpec) => (n.data && n.data.status === "done" ? { "--smv-fill": "#e8f6ec" } : null));
 g.theme("dark");
 g.fitView({ pad: 24, animate: true });
+g.fitView({ inset: { bottom: 56 } });           // F15 — keep clear of the pane's own chrome
+g.fitView({ inset: 0 });                        // …or opt out of the measurement entirely
 g.layout({ dir: "TB" });
 
 // ---- M3: the layout solver seam + the optional dagre adapter --------------------------
@@ -245,6 +247,9 @@ g.camera({ fit: true, pad: 24, dur: 800 });
 g.camera({ x: 120, y: -40, k: 1.25, dur: 500 });
 g.camera({ by: { dx: -200, dy: 0 }, dur: 400 });
 g.camera({ zoom: 1.6 });
+g.camera({ nodes: ["ingest", "build"], maxK: 2.5 });        // F17 — the fit lid (default 1.5)
+g.camera({ fit: true, inset: { bottom: 56, top: 12 } });    // F15 — explicit pane chrome
+g.props({ ingest: { "--smv-fill": "#7c5cff" } }, { merge: true });  // F18 — patch the layer
 
 const spotlight: HighlightSelection = { nodes: ["build"], edges: ["e3"], variant: "focus", dim: true };
 g.highlight(spotlight).clearHighlight();
@@ -255,6 +260,7 @@ const directed: StoryboardStep[] = [
   { op: "camera", args: [{ node: "clean", dur: 700 }], dur: 700 },
   { op: "highlight", args: [{ nodes: ["clean"], dim: true }] },
   { op: "caption", args: ["Cleaning the data", { place: "bottom" }] },
+  { op: "props", args: [{ clean: { "--smv-fill": "#7c5cff" } }, { merge: true }] },
   { op: "wait", ms: 800 },
   { op: "clearHighlight" },
   { op: "expand", args: ["clean"], dur: 900 },

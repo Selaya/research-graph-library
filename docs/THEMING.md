@@ -68,6 +68,8 @@ All defined at `:where(.smv-root)` (light) / `.smv-root[data-smv-theme="dark"]` 
 | `--smv-container` | collapsed-container node fill | `#f2f4f9` | `#161b24` |
 | `--smv-header` | expanded-container header strip fill | `#e7eaf3` | `#222836` |
 | `--smv-condense` | condense/split phase glow, loop badge, delta badge | `#f0a000` | `#e0a53a` |
+| `--smv-status-fill` | **written by the status selectors**, not themeable directly — the done/active/failed tint mixed over whatever `--smv-fill` resolved to, so a role colour and a status can both show (F18) | — | — |
+| `--smv-status-mix` | how much of that tint survives the mix (default `70%`; `100%` restores the old "status wins the fill" look) | `70%` | `70%` |
 | `--smv-radius` | node corner radius (read by `render.js`, not CSS) | `8px` | `8px` |
 | `--smv-traversed` | **written per commit**, not themeable — a 0..1 float driving traversed-edge width (`run-render.js`) | — | — |
 | `--smv-emph` | the emphasis stroke colour, indirected from `--smv-accent`/`--smv-condense`/`--smv-ok-stroke`/`--smv-muted` by `[data-emph]`'s variant (D14) | — | — |
@@ -80,6 +82,20 @@ below for exactly which attribute wins which property on a given element. If you
 your rule to the state you actually want to change (e.g.
 `.smv-node[data-status="done"] { --smv-fill: ...; }`).
 
+Status colour is its own channel (`--smv-status-fill`) that **composes** with the fill
+underneath it rather than replacing it: the box paints
+`var(--smv-status-fill, var(--smv-fill))`, and each status defines that as its own token
+mixed `70%` over whatever `--smv-fill` resolved to. With no per-node override the two sides
+of the mix are the same colour, so the built-in picture is exactly what it always was; with
+one (a `g.style(fn)` role colour, a `g.props()` beat) the node keeps your hue *and* shows
+the done/failed tint. Set `--smv-status-mix: 100%` to go back to "status wins the fill".
+The mix sits behind `@supports (color: color-mix(...))`, so a viewer without `color-mix`
+simply paints `--smv-fill`. One consequence worth knowing: `[data-container]` wins
+`--smv-fill` over the status selectors, so a **collapsed container** carrying a
+spec-authored `data.status` now shows that status mixed over container grey where it used
+to stay plain grey. Put `.smv-node[data-container] { --smv-status-mix: 0% }` in your sheet if you want the old
+flat container back.
+
 `g.style(fn)` is the per-node escape hatch: `fn(node)` returns a plain object of
 `--smv-*` values written as **inline** custom properties on that node's `<g>` at commit
 time — highest specificity of all, and the only mechanism meant to vary per-node data
@@ -90,8 +106,11 @@ CSS selectors below for anything state-shaped.
 `{id: {"--smv-*": value}}` layer merged **over** `g.style(fn)` at commit time, for nodes
 **and** edges, so a storyboard step can recolour one element for one beat without the mount
 owning a style function that knows about the story. It is replace-not-accumulate (one call
-is the whole layer) and it is snapshotted state, so a backward scrub restores it. `g.props(null)`
-clears the layer and whatever `g.style(fn)` sets shows through again. Same rule as everywhere
+is the whole layer) and it is snapshotted state, so a backward scrub restores it.
+`g.props(patch, { merge: true })` makes a call a patch instead — ids the patch does not name
+keep their overrides, named ids merge key by key, a `null` value drops one key and a `null`
+entry drops one id — which is what a handler recolouring one node from a run event wants.
+`g.props(null)` clears the layer and whatever `g.style(fn)` sets shows through again. Same rule as everywhere
 else: only `--smv-*` keys, anything else throws.
 
 ## `data-*` attribute reference
@@ -161,8 +180,10 @@ g.style((node) => {
 
 `g.style(fn)` re-runs `fn` for every node at the next commit and on every commit after
 (it's stored, not one-shot) — call `g.style(null)` to clear it. Because these are inline
-custom properties, they win over `data-status`'s CSS-level `--smv-fill` override too, so
-a "high priority, done" node still shows your color, not the built-in green.
+custom properties, they win over `data-status`'s CSS-level `--smv-fill` override, so a
+"high priority, done" node shows your color — tinted with the built-in green rather than
+losing it, since status composes over your fill (`--smv-status-fill`, above). Set
+`--smv-status-mix: 0%` on the nodes you want to own outright.
 
 ## Worked example 2 — a CSS-only theme
 

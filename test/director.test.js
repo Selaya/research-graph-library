@@ -503,3 +503,139 @@ test("destroy() removes the overlay and stops any further rendering", () => {
   dir.caption("again");
   assert.equal(root.children.length, 0, "a destroyed director never touches the DOM again");
 });
+
+// ---------------------------------------------------------------------------
+// F15/F16/F17 — the camera's three defaults: it dodges the chrome the library mounts over
+// the pane, it resolves a hidden target to what is drawn in its place, and a multi-node
+// fit is not an extreme close-up.
+// ---------------------------------------------------------------------------
+
+test("camera target: inset keeps the shot clear of the pane chrome, and shrinks the fit to match (F15)", () => {
+  // 56px of transport + total bar along the bottom: the usable pane is 800x544 at the top,
+  // so the framed box centres at y = 272 and the fit is scaled to the smaller box.
+  const inset = { bottom: 56 };
+  const t = resolveCameraTarget({ fit: true, pad: 0, inset }, LAYOUT, SIZE, CUR);
+  const k = Math.min(800 / 340, 544 / 210);
+  closeT(t, { x: 400 - 210 * k, y: 272 - 135 * k, k }, "inset fit");
+
+  // A bare number is all four sides; the default (no inset) is the pane itself.
+  const all = resolveCameraTarget({ fit: true, pad: 0, inset: 40 }, LAYOUT, SIZE, CUR);
+  close(all.k, Math.min(720 / 340, 520 / 210), "number inset");
+  closeT(resolveCameraTarget({ fit: true, pad: 0, inset: 0 }, LAYOUT, SIZE, CUR),
+    resolveCameraTarget({ fit: true, pad: 0 }, LAYOUT, SIZE, CUR), "inset:0 is the old behaviour");
+});
+
+test("camera target: size.inset is the measured default, and opts.inset overrides it (F15)", () => {
+  const size = { ...SIZE, inset: { bottom: 56 } };
+  closeT(
+    resolveCameraTarget({ node: "a", pad: 0 }, LAYOUT, size, CUR),
+    resolveCameraTarget({ node: "a", pad: 0, inset: { bottom: 56 } }, LAYOUT, SIZE, CUR),
+    "size.inset is used when the target names none",
+  );
+  closeT(
+    resolveCameraTarget({ node: "a", pad: 0, inset: 0 }, LAYOUT, size, CUR),
+    resolveCameraTarget({ node: "a", pad: 0 }, LAYOUT, SIZE, CUR),
+    "…and the target's own inset wins",
+  );
+});
+
+test("camera target: maxK lids a FITTED scale, never an explicit k (F17)", () => {
+  const t = resolveCameraTarget({ nodes: ["a", "b"], maxK: 1.5 }, LAYOUT, SIZE, CUR);
+  close(t.k, 1.5, "the union fit is lidded");
+  close(t.x + 190 * t.k, 400, "…and the union is still centred at the lidded k");
+  close(resolveCameraTarget({ nodes: ["a", "b"], k: 3, maxK: 1.5 }, LAYOUT, SIZE, CUR).k, 3, "explicit k wins");
+  // The lid only ever lowers: a fit that already lands under it is untouched.
+  const wide = { nodes: LAYOUT.nodes, bounds: { x: 0, y: 0, w: 4000, h: 3000 } };
+  close(resolveCameraTarget({ fit: true, maxK: 1.5 }, wide, SIZE, CUR).k, Math.min(752 / 4000, 552 / 3000));
+});
+
+test("camera target: a collapsed descendant resolves to its nearest drawn ancestor, silently (F16)", () => {
+  // `kid` is inside collapsed container `a`: the layout drew `a`, so that is the shot.
+  const up = (id) => (id === "kid" ? "a" : id === "ghost" ? null : id);
+  const warns = captureWarn(() => {
+    closeT(
+      resolveCameraTarget({ node: "kid" }, LAYOUT, SIZE, CUR, up),
+      resolveCameraTarget({ node: "a" }, LAYOUT, SIZE, CUR),
+      "resolved to the ancestor",
+    );
+    closeT(
+      resolveCameraTarget({ nodes: ["kid", "b"] }, LAYOUT, SIZE, CUR, up),
+      resolveCameraTarget({ nodes: ["a", "b"] }, LAYOUT, SIZE, CUR),
+      "…in a union too",
+    );
+  });
+  assert.deepEqual(warns, [], "resolving is documented behaviour, not misuse");
+});
+
+test("camera target: a truly unknown id still warns, and still stays put (F16)", () => {
+  const up = (id) => (id === "kid" ? "a" : null);
+  const warns = captureWarn(() => {
+    closeT(resolveCameraTarget({ node: "ghost" }, LAYOUT, SIZE, CUR, up), CUR, "unknown id");
+  });
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /\[smv:camera\].*"ghost"/);
+
+  // One that resolves to an ancestor nothing drew either is just as unknown.
+  const warns2 = captureWarn(() => resolveCameraTarget({ nodes: ["kid", "gone"] }, LAYOUT, SIZE, CUR, () => "nope"));
+  assert.equal(warns2.length, 1);
+  assert.match(warns2[0], /"kid", "gone"/);
+});
+
+test("highlight: a collapsed descendant is emphasised through its drawn ancestor (F16)", () => {
+  const { dir, calls } = makeHost({ resolveId: (id) => (id === "kid" ? "a" : null) });
+  const warns = captureWarn(() => dir.highlight({ nodes: ["kid"], variant: "warn" }));
+  assert.deepEqual(warns, [], "no warning: this is the documented resolution");
+  assert.deepEqual(calls.filter((c) => c[0] === "emph"), [["emph", "a", "warn"]]);
+
+  // The spotlight follows: the stand-in is the selection, so it is not dimmed.
+  calls.length = 0;
+  dir.highlight({ nodes: ["kid"], dim: true });
+  assert.deepEqual(calls.filter((c) => c[0] === "dim").sort(), [["dim", "b", true], ["dim", "e1", true]]);
+});
+
+test("highlight: an id that resolves to nothing drawn still warns under its own name (F16)", () => {
+  const { dir, calls } = makeHost({ resolveId: () => null });
+  const warns = captureWarn(() => dir.highlight({ nodes: ["ghost"] }));
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /\[smv:highlight\].*"ghost"/);
+  assert.deepEqual(calls.filter((c) => c[0] === "emph"), [["emph", "ghost", "focus"]], "behaviour is unchanged");
+});
+
+// ---------------------------------------------------------------------------
+// F18 — props({merge:true}): a patch, not a replacement.
+// ---------------------------------------------------------------------------
+
+test("props({merge:true}) patches the layer: unnamed ids keep their overrides", () => {
+  const { dir } = makeHost();
+  dir.props({ a: { "--smv-fill": "red" }, b: { "--smv-fill": "blue" } });
+  dir.propsLayer();
+  dir.props({ b: { "--smv-fill": "green" } }, { merge: true });
+  assert.deepEqual(dir.snapshot().props, [["a", { "--smv-fill": "red" }], ["b", { "--smv-fill": "green" }]]);
+
+  // Default is still replace — one call IS the layer (D16).
+  dir.props({ b: { "--smv-fill": "green" } });
+  assert.deepEqual(dir.snapshot().props, [["b", { "--smv-fill": "green" }]]);
+});
+
+test("props({merge:true}) merges key-by-key; a null value drops one key, a null entry drops the id", () => {
+  const { dir } = makeHost();
+  dir.props({ a: { "--smv-fill": "red", "--smv-stroke": "black" }, b: { "--smv-fill": "blue" } });
+  dir.props({ a: { "--smv-stroke": null }, b: null }, { merge: true });
+  assert.deepEqual(dir.snapshot().props, [["a", { "--smv-fill": "red" }]]);
+
+  // Dropping the last key drops the id with it, so no empty entries accumulate.
+  dir.props({ a: { "--smv-fill": null } }, { merge: true });
+  assert.deepEqual(dir.snapshot().props, []);
+});
+
+test("props({merge:true}) validates before it writes, and the layer reaches the renderer", () => {
+  const { dir } = makeHost();
+  dir.props({ a: { "--smv-fill": "red" } });
+  dir.propsLayer();
+  assert.throws(() => dir.props({ a: { color: "red" } }, { merge: true }), /props only sets --smv-\* properties/);
+  assert.deepEqual(dir.snapshot().props, [["a", { "--smv-fill": "red" }]], "a rejected patch changes nothing");
+
+  dir.props({ b: { "--smv-fill": "blue" } }, { merge: true });
+  // Both ids are in the next commit's layer, and a's key is NOT cleared out from under it.
+  assert.deepEqual([...dir.propsLayer()], [["a", { "--smv-fill": "red" }], ["b", { "--smv-fill": "blue" }]]);
+});

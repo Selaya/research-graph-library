@@ -9,7 +9,7 @@
 // overlay, snapshotted alongside the spec (G2) and never tweened. A CSS transition here
 // would run on the wall clock, which the frame renderer (M4b) cannot reproduce.
 
-import { MIN_K, MAX_K } from "./viewport.js";
+import { MIN_K, MAX_K, paneBox } from "./viewport.js";
 import { GraphError } from "./store.js";
 
 const FIT_PAD = 24;
@@ -17,7 +17,13 @@ const FIT_PAD = 24;
 /** Every key `resolveCameraTarget()` reads off a target object (docs/RECORDING.md §1). A key
  *  outside this set is presumed a typo (`nod` for `node`) rather than a future extension —
  *  it is warned about, not silently absorbed into the relative-move fallback. */
-const CAMERA_KEYS = new Set(["x", "y", "k", "node", "nodes", "fit", "pad", "by", "zoom", "ease", "dur"]);
+const CAMERA_KEYS = new Set(["x", "y", "k", "node", "nodes", "fit", "pad", "by", "zoom", "ease", "dur", "inset", "maxK"]);
+
+/** F17 — the lid `g.camera({nodes})` applies to a FITTED scale when the call names no `maxK`
+ *  of its own: two nodes in a short pane fit at k≈3, an extreme close-up rather than "look
+ *  at these two". An explicit `k` is a scale request and is never lidded. index.js supplies
+ *  it; resolveCameraTarget stays unopinionated, so a hand-composed shot gets the raw fit. */
+export const NODES_MAX_K = 1.5;
 
 /** `variant ∈ focus | warn | ok | mute` (docs/RECORDING.md §1) — the only strings `[data-emph]`
  *  has CSS for; anything else renders, unstyled, with no indication why. */
@@ -63,7 +69,7 @@ function boundsOf(layoutResult, ids) {
 }
 
 /**
- * resolveCameraTarget(opts, layoutResult, size, current) -> {x,y,k} — PURE.
+ * resolveCameraTarget(opts, layoutResult, size, current, resolveId) -> {x,y,k} — PURE.
  *
  * Resolution order, first match wins:
  *   absolute `x`/`y` (+ optional `k`) -> `node` -> `nodes` -> `fit:true` -> relative
@@ -75,8 +81,13 @@ function boundsOf(layoutResult, ids) {
  * "stay put" rather than flying the camera to the origin. Every derived `k` is clamped to
  * the viewport's MIN_K..MAX_K first, so the x/y that centre the shot are computed from the
  * scale the viewport will really apply (absolute x/y are the caller's own and pass through).
+ *
+ * Box targets take two more options (F15/F17): `inset: {top,right,bottom,left}` (or a bare
+ * number, defaulting to `size.inset`) is the pane chrome to keep clear of, and `maxK` lids
+ * a FITTED scale — never an explicit `k`. `resolveId(id)` maps an id nothing drew to the
+ * ancestor that stands in for it (F16); without it, only drawn ids resolve.
  */
-export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 800, h: 600 }, current = { x: 0, y: 0, k: 1 }) {
+export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 800, h: 600 }, current = { x: 0, y: 0, k: 1 }, resolveId = null) {
   const W = size && size.w > 0 ? size.w : 800;
   const H = size && size.h > 0 ? size.h : 600;
   const k0 = Number.isFinite(current.k) && current.k > 0 ? current.k : 1;
@@ -96,26 +107,41 @@ export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 
     };
   }
 
+  // F16 — a target that is a collapsed descendant resolves to the nearest DRAWN ancestor
+  // (index.js passes viewstate's visibleAncestor): the container standing in for it is
+  // what the viewer can actually see. Only a truly unknown id is left to warn.
+  const drawn = (layoutResult && layoutResult.nodes) || null;
+  const resolve = (id) => {
+    if (drawn && drawn[id]) return id;
+    const up = typeof resolveId === "function" ? resolveId(id) : null;
+    return up != null && drawn && drawn[up] ? up : null;
+  };
+
   let box = null;
   if (opts.node != null) {
-    box = boundsOf(layoutResult, [opts.node]);
+    const id = resolve(opts.node);
+    box = id ? boundsOf(layoutResult, [id]) : null;
     if (!box) issues.push(`unknown node id "${opts.node}"`);
   } else if (Array.isArray(opts.nodes)) {
-    box = boundsOf(layoutResult, opts.nodes);
-    const nodes = (layoutResult && layoutResult.nodes) || null;
-    const missing = opts.nodes.filter((id) => !(nodes && nodes[id]));
+    const ids = opts.nodes.map(resolve);
+    box = boundsOf(layoutResult, ids.filter(Boolean));
+    const missing = opts.nodes.filter((_, i) => !ids[i]);
     if (missing.length) issues.push(`unknown node id(s) ${missing.map((id) => `"${id}"`).join(", ")}`);
   } else if (opts.fit === true) box = (layoutResult && layoutResult.bounds) || null;
   if (box) {
     const pad = Number.isFinite(opts.pad) ? opts.pad : FIT_PAD;
+    // F15 — fit inside the pane MINUS the chrome the library mounted over it, and centre on
+    // that rect, so the framed box never lands under the transport/total/caption bars.
+    const p = paneBox({ w: W, h: H }, pad, opts.inset ?? (size && size.inset));
     let k = opts.k;
     if (!Number.isFinite(k)) {
-      k = Math.min((W - 2 * pad) / Math.max(box.w, 1), (H - 2 * pad) / Math.max(box.h, 1));
+      k = Math.min(p.w / Math.max(box.w, 1), p.h / Math.max(box.h, 1));
       if (!Number.isFinite(k) || k <= 0) k = 1;
+      if (Number.isFinite(opts.maxK) && opts.maxK > 0) k = Math.min(k, opts.maxK);
     }
     k = clampK(k);
     warnStep("camera", issues);
-    return { x: W / 2 - (box.x + box.w / 2) * k, y: H / 2 - (box.y + box.h / 2) * k, k };
+    return { x: p.cx - (box.x + box.w / 2) * k, y: p.cy - (box.y + box.h / 2) * k, k };
   }
 
   // Relative. A zoom keeps whatever is under the pane centre under the pane centre, so
@@ -137,7 +163,7 @@ export function resolveCameraTarget(opts = {}, layoutResult = null, size = { w: 
 /**
  * createDirector(internals) -> the emphasis + caption state machine.
  *   internals = { root, doc, lastLayout(), emphasize(id, value), dim(id, value), captions,
- *                 ticker, reduced }
+ *                 ticker, reduced, resolveId(id) }
  * `captions:false` suppresses the overlay only — the caption text is still state, still
  * snapshotted, and still shows up in g.cues(), so a suppressed run still renders subtitles.
  */
@@ -227,14 +253,23 @@ export function createDirector(internals = {}) {
       .filter((k) => !HIGHLIGHT_KEYS.has(k))
       .map((k) => `unrecognized key "${k}"`);
     if (sel.variant != null && !VARIANTS.has(sel.variant)) issues.push(`unknown variant "${sel.variant}"`);
-    const missing = [...(sel.nodes || []), ...(sel.edges || [])].filter((id) => !known.has(id));
+    // F16 — a node inside a collapsed container is emphasised THROUGH the container that
+    // stands in for it, the same resolution the camera does; an id that resolves to
+    // nothing drawn keeps its own name so it still shows up in the warning.
+    const up = (id) => {
+      if (known.has(id)) return id;
+      const a = internals.resolveId ? internals.resolveId(id) : null;
+      return a != null && known.has(a) ? a : id;
+    };
+    const nodes = (sel.nodes || []).map(up);
+    const missing = [...nodes, ...(sel.edges || [])].filter((id) => !known.has(id));
     if (missing.length) issues.push(`unknown id(s) ${missing.map((id) => `"${id}"`).join(", ")}`);
     warnStep("highlight", issues);
 
     emph.clear();
     dimmed.clear();
     const variant = sel.variant || "focus";
-    for (const id of sel.nodes || []) emph.set(id, variant);
+    for (const id of nodes) emph.set(id, variant);
     for (const id of sel.edges || []) emph.set(id, variant);
     if (sel.dim) for (const id of drawn) if (!emph.has(id)) dimmed.add(id);
     apply();
@@ -255,11 +290,17 @@ export function createDirector(internals = {}) {
 
   /** `map` = {id: {"--smv-fill": "#7c5cff"}}; null clears the whole layer. Replace, not
    *  accumulate — like highlight, this call IS the override state. Validated in full before
-   *  anything is written, so a rejected key leaves the previous layer intact. */
-  function setPropsMap(map) {
+   *  anything is written, so a rejected key leaves the previous layer intact.
+   *
+   *  F18 — `{merge:true}` makes it a PATCH instead: ids the patch does not name keep their
+   *  overrides, named ids merge key-by-key, and a null value drops one key (a null entry
+   *  drops the whole id). Recolouring one node from an event handler no longer has to
+   *  re-send every other node's colour to keep it. */
+  function setPropsMap(map, o) {
+    const merge = !!(o && o.merge);
     const next = new Map();
     for (const [id, p] of Object.entries(map || {})) {
-      if (!p) continue;
+      if (!p) { if (merge) next.set(id, null); continue; }
       for (const k of Object.keys(p)) {
         if (!k.startsWith("--smv-")) {
           throw new GraphError("props-key", `props only sets --smv-* properties (D7): "${k}" on "${id}" is not one`);
@@ -267,8 +308,17 @@ export function createDirector(internals = {}) {
       }
       next.set(id, { ...p });
     }
-    props.clear();
-    for (const [id, p] of next) props.set(id, p);
+    if (!merge) {
+      props.clear();
+      for (const [id, p] of next) props.set(id, p);
+      return;
+    }
+    for (const [id, p] of next) {
+      if (p === null) { props.delete(id); continue; }
+      const cur = { ...(props.get(id) || {}) };
+      for (const [k, v] of Object.entries(p)) { if (v == null) delete cur[k]; else cur[k] = v; }
+      if (Object.keys(cur).length) props.set(id, cur); else props.delete(id);
+    }
   }
 
   /** What renderer.styleCommit merges in, as `Map<id, {key: value|null}>` — every key the

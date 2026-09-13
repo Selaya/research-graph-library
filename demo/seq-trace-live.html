@@ -457,9 +457,8 @@
       " logged events — one 500, one fallback, 201 Created.", { place: "bottom" });
     phaseEl.textContent = "trace complete — click any activation for its span";
     showSpan(SPANS[0], acts[0]);
-    // Camera moves cancel-and-retarget, so the nudge has to wait for the fit to land.
-    return Promise.resolve(g.camera({ fit: true, pad: 30, dur: 560 * P }))
-      .then(function () { return g.camera({ by: { dx: 0, dy: -22 }, dur: 240 * P }); });
+    // The fit already clears the transport/total bars on its own.
+    return g.camera({ fit: true, pad: 30, dur: 560 * P });
   }
   function outro() {
     storyDone = true;
