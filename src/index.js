@@ -21,7 +21,7 @@ import { attachA11y } from "./a11y.js";
 import { attachTapToggle } from "./interact.js";
 import { createRunTransport } from "./run-transport.js";
 import { createRunRender } from "./run-render.js";
-import { createStoryboard } from "./storyboard.js";
+import { createStoryboard, STORYBOARD_OPS as OPS } from "./storyboard.js";
 import { createTransport } from "./transport.js";
 import { applyPipelinePreset } from "./preset-pipeline.js";
 
@@ -904,10 +904,78 @@ export function mount(el, spec = {}, opts = {}) {
       return commitOrDefer(null, undefined, { applied: true });
     },
 
-    update(id, patch) {
-      const item = store.update(id, patch);
+    /** `patch.data` merges; `data: { key: undefined }` REMOVES that key, and
+     *  `{ replace: true }` swaps the whole `data` payload instead of merging into it.
+     *  `collapsed` is not stored view state — it is folded into the view once, at first
+     *  sight — so a `collapsed` patch is routed to the real expand()/collapse() rather
+     *  than quietly doing nothing. */
+    update(id, patch, o) {
+      const item = store.update(id, patch, o);
       bus.emit("update", { id, patch, item });
+      if (patch && patch.collapsed !== undefined && store.hasNode(id)) {
+        vs.isContainer(id); // fold any spec-level `collapsed:true` in before reading the set
+        const was = vs.collapsed.has(id);
+        const view = patch.collapsed ? g.collapse(id) : g.expand(id);
+        // Only the view half went through expand()/collapse(). When that actually moved,
+        // its relayout carries the rest of the patch too; when it was a no-op (already in
+        // that state) the other fields in the same patch still have to reach the screen.
+        if (vs.collapsed.has(id) !== was || Object.keys(patch).every((k) => k === "collapsed")) return view;
+      }
       return commitOrDefer(store.hasNode(id) ? id : null, undefined, { applied: true });
+    },
+
+    /** F30 — dry-run the structural guards. `ops` is either a `batch()`-shaped function
+     *  (called with a probe that has the mutation methods) or an array of storyboard-shaped
+     *  `{op, args}` steps. Everything runs against a throwaway clone of the store, so
+     *  nothing commits and nothing renders; every GraphError the ops would have thrown
+     *  comes back in `errors` (an op that fails simply does not land in the clone, and the
+     *  ops after it are still checked). */
+    validate(ops) {
+      const probe = new Store(store.snapshot());
+      const errors = [];
+      const guard = (fn) => (...args) => {
+        try { fn(...args); } catch (err) {
+          if (!(err instanceof GraphError)) throw err;
+          errors.push(err);
+        }
+      };
+      const copy = (item) => (item ? cloneItem(item) : undefined);
+      const viewProbe = (id) => {
+        if (!probe.hasNode(id)) errors.push(new GraphError("missing", `node "${id}" does not exist`));
+      };
+      const api = {
+        node: (id) => copy(probe.node(id)),
+        edge: (id) => copy(probe.edge(id)),
+        children: (id) => probe.children(id).map(cloneItem),
+        spec: () => probe.spec(),
+        condense: guard((ids, n) => {
+          if (!n || n.id == null || n.id === "") throw new GraphError("node-id", "condense needs a new node with a non-empty id");
+          probe.condense([...ids], n);
+        }),
+        // View-only ops: nothing to commit, but the real expand()/collapse() throw on an
+        // unknown id, so a patch that folds a node it removed earlier still has to fail here.
+        expand: (id) => viewProbe(id), collapse: (id) => viewProbe(id),
+        expandAll() {}, collapseAll() {},
+        batch: (fn) => { fn(api); },
+      };
+      for (const m of ["addNode", "addEdge", "removeNode", "removeEdge", "update", "split"]) {
+        api[m] = guard((...args) => probe[m](...args));
+      }
+      const applyProbe = (step) => {
+        const op = (step && step.op) || "";
+        if (op === "batch") {
+          for (const k of (step.steps || (step.args && step.args[0]) || [])) applyProbe(k);
+          return;
+        }
+        if (op && typeof api[op] === "function") { api[op](...(step.args || [])); return; }
+        // Director/transport ops and bare `label` markers carry nothing structural to check.
+        if (OPS.has(op)) return;
+        if (!op && step && step.label != null) return;
+        errors.push(new GraphError("validate-op", `unknown op "${op}" in validate()`));
+      };
+      if (typeof ops === "function") ops(api);
+      else for (const step of ops || []) applyProbe(step);
+      return { ok: errors.length === 0, errors };
     },
 
     /** D5 — children bloom out of the container's *previous* centre. */

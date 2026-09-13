@@ -154,7 +154,8 @@ g.condense(["a", "b"], { id: "merged" }).cancel();
 
 ```js
 g.addNode(node, { after })  g.addEdge(edge)  g.removeNode(id)  g.removeEdge(id)
-g.update(id, patch)         g.batch(fn)      g.style(fn)       g.theme(t)
+g.update(id, patch, opts)   g.batch(fn)      g.style(fn)       g.theme(t)
+g.validate(ops | fn)        // dry-run the structural guards; { ok, errors: [GraphError] }
 g.expand(id)   g.collapse(id)   g.expandAll()   g.collapseAll()
 g.condense([ids], newNode)   g.split(id, { nodes, edges })
 g.run(opts)    g.storyboard(steps)   g.timeline()   g.finished   g.finish()
@@ -170,6 +171,44 @@ caused into one shared commit. An op that throws partway through leaves every ea
 committed (no rollback). `fn` must be synchronous: a `Promise`-returning `fn` throws
 `GraphError('batch-async')` immediately, rather than let its post-`await` code run after
 `batch()` has already returned and drained.
+
+**Validate before you commit.** `g.validate(ops)` runs exactly those guards against a
+throwaway clone of the store and commits nothing, so a diff-and-apply UI can refuse a whole
+patch up front instead of discovering the bad op halfway through:
+
+```js
+const { ok, errors } = g.validate([
+  { op: "addNode", args: [{ id: "verify" }] },
+  { op: "addEdge", args: [{ id: "e9", source: "build", target: "verify" }] },
+]);
+if (!ok) return show(errors.map((e) => `${e.code}: ${e.message}`));
+g.batch((b) => { b.addNode({ id: "verify" }); b.addEdge({ id: "e9", source: "build", target: "verify" }); });
+```
+
+It takes either an array of storyboard-shaped `{op, args}` steps (nested `batch` steps
+included) or a `batch()`-shaped function called with a probe carrying the same mutation
+methods plus `node`/`edge`/`children`/`spec`. Every `GraphError` the ops would have thrown
+comes back in `errors` rather than being thrown — a failing op simply does not land in the
+clone, and the ops after it are still checked. Director and transport steps (`camera`,
+`run.play`, `wait`, `label` markers…) are skipped; an `op` that `storyboard()` itself would
+not accept reports `validate-op`. `expand` / `collapse` steps are checked for a live id.
+
+**`update()`.** `patch.data` merges into the existing `data`. An explicit `undefined`
+removes a key, and `{ replace: true }` swaps the whole payload:
+
+```js
+g.update("deploy", { data: { fail: undefined } });            // the key is gone
+g.update("deploy", { data: { duration: "8s" } }, { replace: true });   // data is now exactly this
+g.update("deploy", { data: {} }, { replace: true });          // data is gone entirely
+```
+
+A `data` left with no keys is dropped from the record, so `g.node(id).data` reads
+`undefined` rather than `{}` (and `spec()` still round-trips through JSON).
+
+`collapsed` is view state rather than a rendered spec field, so a `collapsed` patch is
+routed to the real `expand()` / `collapse()` instead of quietly doing nothing. Anything
+else in the same patch still renders, even when the container was already in the requested
+state (the awaitable then resolves `applied: false`, exactly as `expand()`/`collapse()` do).
 
 **Errors.** Every structural misuse throws a synchronous `GraphError` — a real exported
 class, so `instanceof` works, and every message already embeds its code (`[smv:<code>] …`):
@@ -201,6 +240,22 @@ catch (e) { if (e instanceof GraphError) console.log(e.code); }   // "dup-id"
 | `storyboard-op` | an unknown storyboard op name (checked inside `batch` children too) |
 | `storyboard-label` | `sb.seek(label)` given an unknown storyboard label |
 | `batch-async` | `g.batch(fn)` was handed a `Promise`-returning `fn` |
+| `validate-op` | `g.validate()` got a step whose `op` is not a known op name (reported in `errors`, never thrown) |
+
+**Condense (N → 1).** The set must be **convex** — no path may leave it and re-enter
+(`non-convex`) — but a `loop: true` back edge never counts against that: a retry loop
+around the set re-enters it rather than passing through it, and is redirected onto the
+merged node like any other boundary edge.
+
+```js
+await g.condense(["call", "verify"], { id: "attempt", parent: null });
+```
+
+The merged node inherits the sources' common parent, and `parent: null` says so explicitly
+(handy when the spec comes from a form or a diff, where "absent" has to be expressible).
+When the sources have **different** parents there is no common one to inherit: the merged
+node lands at the top level and warns — name a `parent` yourself for a cross-container
+merge.
 
 **Split (1 → N).** The inverse of condense, same three-phase choreography:
 

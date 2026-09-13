@@ -577,21 +577,46 @@ export function compileRun(spec = {}, opts = {}) {
   }
   for (const id of childrenOf.keys()) rollUp(id);
   // A container is not an executable step, so it can never carry `data.fail` itself — but it
-  // must not report 'done' when the work inside it did not succeed. Its failure instant is
-  // the earliest of its descendants', mirroring the window rollup above.
-  const failRolled = new Set();
-  function rollUpFail(id) {
-    if (failRolled.has(id)) return failedAt.get(id);
-    failRolled.add(id);
-    let at = failedAt.get(id);
-    for (const c of childrenOf.get(id) || []) {
-      const cf = rollUpFail(c);
-      if (cf != null && (at == null || cf < at)) at = cf;
+  // must not report 'done' when the work inside it did not succeed. HOW a descendant's
+  // failure rolls up is a per-container policy, `statusAgg`, mirroring `durationAgg`:
+  //   'earliest-fail' (default) — failed from the earliest descendant failure onward.
+  //   'latest'                  — the most recent descendant outcome wins, so a retried
+  //                               call that succeeds later clears the container again.
+  //   'none'                    — a descendant's failure never tints the container.
+  // Each container reads its own leaf descendants (nested containers roll up through the
+  // same leaves), so the policies never have to agree with each other.
+  const statusMarks = new Map(); // container id -> ascending [{t, fail}], 'latest' only
+  for (const id of childrenOf.keys()) {
+    let agg = nodes.get(id) && nodes.get(id).statusAgg;
+    if (agg != null && agg !== "earliest-fail" && agg !== "latest" && agg !== "none") {
+      // `[smv:<area>]` is the library-wide misuse-warning prefix; the older unparseable-
+      // duration warning above predates it and keeps its `compileRun:` form.
+      console.warn(`[smv:run] node "${id}" has an unknown statusAgg (${JSON.stringify(agg)}); using 'earliest-fail'`);
+      agg = null;
     }
+    if (agg === "none") continue;
+    const marks = [];
+    const stack = [...childrenOf.get(id)];
+    const walked = new Set();
+    while (stack.length) {
+      const c = stack.pop();
+      if (walked.has(c)) continue;
+      walked.add(c);
+      if (childrenOf.has(c)) { for (const k of childrenOf.get(c)) stack.push(k); continue; }
+      const f = failedAt.get(c), win = nodeWindow.get(c);
+      if (f != null) marks.push({ t: f, fail: true });
+      else if (win) marks.push({ t: win.to, fail: false });
+    }
+    if (agg === "latest") {
+      // Ties sort failure last so a success landing on the same instant never hides it.
+      marks.sort((a, b) => a.t - b.t || (a.fail ? 1 : 0) - (b.fail ? 1 : 0));
+      if (marks.length) statusMarks.set(id, marks);
+      continue;
+    }
+    let at = null;
+    for (const m of marks) if (m.fail && (at == null || m.t < at)) at = m.t;
     if (at != null) failedAt.set(id, at);
-    return at;
   }
-  for (const id of childrenOf.keys()) rollUpFail(id);
 
   const stalled = tokens.some((tk) => !Number.isFinite(tk.endT));
   events.push({ t: duration, type: "done", stalled });
@@ -642,7 +667,11 @@ export function compileRun(spec = {}, opts = {}) {
         const fAt = failedAt.get(id);
         // 'failed' outranks 'done' from the failure instant on: both are terminal, and the
         // window's `to` for a failing node IS that instant.
-        status = fAt != null && t >= fAt ? "failed"
+        let failed = fAt != null && t >= fAt;
+        const marks = statusMarks.get(id);
+        // statusAgg:'latest' — whichever descendant finished most recently is the story.
+        if (marks) { failed = false; for (const m of marks) { if (m.t > t) break; failed = m.fail; } }
+        status = failed ? "failed"
           : t >= win.to ? "done" : t >= win.from ? "active" : "pending";
         for (const s of segs) {
           if (holds(s, t)) occupancy++;

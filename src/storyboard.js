@@ -19,6 +19,7 @@ const OPS = new Set([
   // M4d — the per-step --smv-* override layer (D16); method-shaped like the rest.
   "props",
 ]);
+export { OPS as STORYBOARD_OPS };
 
 /** The same --smv-* key-shape check director.setPropsMap() runs at commit time (D16), run
  *  again here so a malformed props step fails at build time like every other op does,

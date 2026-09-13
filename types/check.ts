@@ -28,6 +28,8 @@ import {
   type HighlightSelection,
   type Cue,
   type LayoutResult,
+  type ValidateProbe,
+  type ValidateResult,
   type LayoutSolver,
   type SolverInput,
   type SolverResult,
@@ -40,7 +42,7 @@ import { dagreSolver, dagreLayout } from "./adapters-dagre.js";
 const spec: GraphSpec = {
   nodes: [
     { id: "ingest", label: "Ingest", data: { duration: "45m" } },
-    { id: "clean", label: "Clean data", collapsed: true, durationAgg: "sum" },
+    { id: "clean", label: "Clean data", collapsed: true, durationAgg: "sum", statusAgg: "latest" },
     { id: "clean.dedupe", parent: "clean", label: "Dedupe" },
     { id: "build", label: "Build", join: "all" },
     { id: "deploy", label: "Deploy" },
@@ -75,6 +77,23 @@ addP.cancel();
 
 const upd: Awaitable<MutationResult> = g.update("check", { data: { status: "done" } });
 void upd;
+// `data: {key: undefined}` unsets a key; `{replace: true}` swaps the payload; a `collapsed`
+// patch routes to expand()/collapse().
+g.update("check", { data: { status: undefined } });
+g.update("check", { data: { status: "done" } }, { replace: true });
+g.update("clean", { collapsed: true });
+
+// validate(ops | fn) — the same guards, against a throwaway clone, nothing committed.
+const verdict: ValidateResult = g.validate([
+  { op: "addNode", args: [{ id: "check2" }] },
+  { op: "batch", steps: [{ op: "removeNode", args: ["check2"] }] },
+]);
+if (!verdict.ok) { const codes: GraphErrorCode[] = verdict.errors.map((e) => e.code); void codes; }
+const verdict2: ValidateResult = g.validate((probe: ValidateProbe) => {
+  probe.addNode({ id: "check3" });
+  probe.condense(["check3"], { id: "merged", parent: null });
+});
+void verdict2;
 // removeNode() resolves the full removed-ids cascade on top of {canceled, applied}.
 const rm: Awaitable<RemoveNodeResult> = g.removeNode("check");
 rm.then((r) => { const nodeIds: string[] = r.ids.nodes; const edgeIds: string[] = r.ids.edges; void [nodeIds, edgeIds]; });
@@ -104,7 +123,8 @@ const splitAwaitable: Awaitable<CondenseSplitResult> = g.split("build", {
 });
 splitAwaitable.then((r) => { if (r.applied && r.ids) { const created: string[] = r.ids.created; void created; } });
 
-const condenseAwaitable: Awaitable<CondenseSplitResult> = g.condense(["build.compile", "build.link"], { id: "build" });
+// `parent: null` on the merged spec = "inherit the sources' common parent".
+const condenseAwaitable: Awaitable<CondenseSplitResult> = g.condense(["build.compile", "build.link"], { id: "build", parent: null });
 void condenseAwaitable;
 
 g.style((n: NodeSpec) => (n.data && n.data.status === "done" ? { "--smv-fill": "#e8f6ec" } : null));
