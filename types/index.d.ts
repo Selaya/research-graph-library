@@ -393,6 +393,14 @@ export interface NodeRunState {
   status: "pending" | "active" | "done" | "failed";
   progress: number;
   occupancy: number;
+  /** Mode B only. Occupants that are not working yet — a landed arrival, or one still held
+   *  by a join that has not fired. `waiting + active === occupancy`. */
+  waiting?: number;
+  /** Mode B only. Occupants currently dwelling (an explicit `start()` picked them up). */
+  active?: number;
+  /** Mode B only. The live dwell outran the node's declared `data.duration` (which in live
+   *  mode is an expectation, never a schedule). Rendered as `data-over-budget`. */
+  overBudget?: boolean;
 }
 export interface EdgeRunState {
   traversed: number;
@@ -496,6 +504,27 @@ export interface LiveRunOpts extends RunOptsBase {
   /** Re-seed the live event log (re-seeding/tests). The frontier starts at the seeded
    *  log's own span, so the events handed in are immediately reachable. */
   log?: LiveEvent[];
+  /** Explicit epoch for the frontier, ms. Use it when the run resumes a session that has
+   *  already been running for `now` ms, so later `{ at }` stamps are not clamped back onto
+   *  a frontier that restarted at the seeded log's span. */
+  now?: number;
+  /** Shortest crossing, in ms, a hop may be squashed to when a `start()` claims it while it
+   *  is still in flight (default 0 — the start collapses the hop). Clamped to `hopMs`. Set
+   *  it when replaying real timestamps, where a parent's dispatch instant IS the child's
+   *  start instant and every token would otherwise teleport. */
+  minHopMs?: number;
+  /** Whether a bare `start()` may mint a token where nothing is waiting (default `true`).
+   *  `false` makes a warned-about phantom start a no-op; `start(id, { spawn: true })` still
+   *  mints one deliberately. A root always seeds itself either way. */
+  spawnOnStart?: boolean;
+}
+
+/** What `LiveRun.reset()` accepts — `options()` returns exactly this shape. */
+export interface LiveResetOpts extends Omit<LiveRunOpts, "mode"> {
+  mode?: "live";
+  /** Re-emit every seeded entry through this handle's emitter as it is re-seeded, in log
+   *  order, each payload carrying `replay: true`. */
+  replay?: boolean;
 }
 export type RunOpts = SimRunOpts | LiveRunOpts;
 
@@ -540,7 +569,10 @@ export interface SimRun extends RunControllerBase {
 
 /** Mode B — event-log/replayed. `t` can never exceed `now()`; `following` tracks it live. */
 export interface LiveRun extends RunControllerBase {
-  start(id: string, o?: { at?: number }): number;
+  /** `{ spawn: true }` says "mint a token here on purpose" — without it, a start on a
+   *  non-root with nothing waiting, nothing crossing towards it and no finished attempt to
+   *  retry warns (`[smv:live]`), and is ignored entirely under `spawnOnStart: false`. */
+  start(id: string, o?: { at?: number; spawn?: boolean }): number;
   finish(id: string, o?: { at?: number; n?: number }): number;
   /** Terminal sibling of `finish`: consumes every current occupant of `id` WITHOUT fanning
    *  tokens out (the branch dies), leaves the node on status `'failed'`, and emits a
@@ -550,6 +582,8 @@ export interface LiveRun extends RunControllerBase {
    *  no-op, exactly as `finish` is. */
   fail(id: string, o?: { at?: number; reason?: string }): number;
   spawn(id: string, n: number, o?: { at?: number }): number;
+  /** Re-seed the log under the same transport identity/listeners: `{ log, now, replay }`. */
+  reset(o?: LiveResetOpts, time?: number): number;
   /** Re-attach the view clock to the frontier immediately (a "jump to live" snap). */
   follow(): number;
   readonly following: boolean;

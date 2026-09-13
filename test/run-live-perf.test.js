@@ -46,16 +46,30 @@ function buildLog(chainLen, targetEvents) {
   return events;
 }
 
+/** `RunState.nodes` entries gained `waiting`/`active` (F11) and `overBudget` (F13) after
+ *  this fixture was captured from the pre-heap implementation. The fixture stays the oracle
+ *  for every value it actually recorded — these purely additive keys are dropped before the
+ *  comparison rather than back-filled into it, and are covered by
+ *  test/run-live-frictions.test.js instead. */
+function asRecorded(st) {
+  const nodes = {};
+  for (const [id, n] of Object.entries(st.nodes)) {
+    const { waiting, active, overBudget, ...recorded } = n;
+    nodes[id] = recorded;
+  }
+  return { ...st, nodes };
+}
+
 test("replayLive: heap-based queue/in-flight tracking matches the old array/indexOf implementation over a 20k-event log", () => {
   const spec = buildSpec(fixture.chainLen);
   const events = buildLog(fixture.chainLen, fixture.nEvents);
   const opts = { hopMs: fixture.hopMs };
 
   const mid = replayLive(spec, events, fixture.midT, opts);
-  assert.deepEqual(mid, fixture.mid);
+  assert.deepEqual(asRecorded(mid), fixture.mid);
 
   const final = replayLive(spec, events, fixture.finalT, opts);
-  assert.deepEqual(final, fixture.final);
+  assert.deepEqual(asRecorded(final), fixture.final);
   assert.equal(final.done, true);
 });
 

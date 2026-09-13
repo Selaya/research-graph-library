@@ -391,7 +391,9 @@
       g.camera({ nodes: prev ? [prev.id, a.id] : [a.id], k: 1, pad: prev ? 120 : 200, dur: 340 * P });
       if (a.note && !a.fail) g.caption(a.note, { place: "bottom" });
     });
-    at(a.startRep, function (now) { run.start(a.id, { at: now }); });
+    // `token: false` (a span that HANDLES another, like the 500's fallback) has no token
+    // coming up its wire, so its start() deliberately mints one: say so with { spawn: true }.
+    at(a.startRep, function (now) { run.start(a.id, { at: now, spawn: a.token === false }); });
     at(a.endRep, function (now) {
       if (!a.fail) { run.finish(a.id, { at: now }); return; }
       run.fail(a.id, { at: now, reason: a.span.attrs["error.type"] + " · " + a.span.attrs["http.route"] });

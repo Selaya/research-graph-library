@@ -79,6 +79,7 @@ export function createRunRender(internals, run) {
   // both are cached so an unchanged edge/node costs zero DOM writes.
   const traversedAt = new Map();  // visible edge id -> last written value
   const runStatusAt = new Map();  // node id -> last written data-run
+  const overBudgetAt = new Map(); // node id -> last written data-over-budget
 
   let edgeAlias = new Map();      // spec edge id -> the edge id actually on screen
   let containerLoops = new Map(); // collapsed container id -> [loop edge ids it swallowed]
@@ -187,6 +188,17 @@ export function createRunRender(internals, run) {
     if (internals.bus) internals.bus.emit("runstatus", { id, status });
   }
 
+  /** Live mode's only reading of `data.duration` beyond the progress fill (F13): the dwell
+   *  outran it. Cached like data-run, so an on-budget node costs no DOM write. */
+  function setOverBudget(id, over) {
+    if (overBudgetAt.get(id) === over) return;
+    overBudgetAt.set(id, over);
+    const el = renderer.node(id);
+    if (!el) return;
+    if (over) el.setAttribute("data-over-budget", "");
+    else el.removeAttribute("data-over-budget");
+  }
+
   /** stateAt(t) with the condense progress floors folded in (never mutates the engine's
    *  own objects — stateAt returns fresh ones, but the floor stays a render concern). */
   function sample() {
@@ -208,8 +220,9 @@ export function createRunRender(internals, run) {
     // --- per-node: progress fill, occupancy badge, join pips ---
     for (const [id, r] of vis.nodes) {
       const n = st.nodes[id];
-      if (!n) { setRunStatus(id, "pending"); continue; }
+      if (!n) { setRunStatus(id, "pending"); setOverBudget(id, false); continue; }
       setRunStatus(id, n.status);
+      setOverBudget(id, !!n.overBudget);
       const iw = Math.max(0, r.w - 2 * FILL_INSET);
       const ih = Math.max(0, r.h - 2 * FILL_INSET);
       if (n.status === "active" && n.progress > 0 && iw > 0) {
@@ -341,6 +354,7 @@ export function createRunRender(internals, run) {
       indexView(ev && ev.meta);
       traversedAt.clear();
       runStatusAt.clear();
+      overBudgetAt.clear();
       draw();
     }));
   }
@@ -366,7 +380,11 @@ export function createRunRender(internals, run) {
         const el = renderer.node(id);
         if (el) el.removeAttribute("data-run");
       }
-      traversedAt.clear(); runStatusAt.clear(); floors.clear();
+      for (const id of overBudgetAt.keys()) {
+        const el = renderer.node(id);
+        if (el) el.removeAttribute("data-over-budget");
+      }
+      traversedAt.clear(); runStatusAt.clear(); overBudgetAt.clear(); floors.clear();
       fills.clear(); pips.clear(); badges.clear(); loops.clear(); dots.clear(); ghostEls.clear();
       layer.remove();
     },

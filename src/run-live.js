@@ -109,7 +109,12 @@ function findCurrent(tk, t) {
  *   spec   = a store.spec() snapshot (flat: no container remap, see header note)
  *   events = append-only log, sorted defensively on entry:
  *            {t, type: 'start'|'finish'|'spawn'|'fail', id, n?}
- *   opts   = { hopMs = 300, bornAt }
+ *   opts   = { hopMs = 300, minHopMs = 0, bornAt }
+ *            `minHopMs` (F14) is the shortest crossing a hop may be squashed to when a
+ *            start() claims it mid-flight: real trace timestamps make a parent's dispatch
+ *            instant the child's start instant, which otherwise teleports the token. The
+ *            claimed start is pushed out to `hop.t0 + minHopMs` so the wire is still drawn.
+ *            Clamped to `hopMs` — a minimum can never outlast the hop it shortens.
  *            `bornAt` (optional Map edgeId -> live ms) is when an edge ENTERED the run.
  *            The log is history: a finish stamped before an edge existed must not be
  *            re-resolved over it (the transport fills this in from the host's add events).
@@ -119,6 +124,7 @@ function findCurrent(tk, t) {
 export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
   const T = Math.max(0, Number.isFinite(+t) ? +t : 0);
   const hopMs = Number.isFinite(opts.hopMs) && opts.hopMs >= 0 ? opts.hopMs : DEFAULT_HOP_MS;
+  const minHop = Number.isFinite(opts.minHopMs) && opts.minHopMs > 0 ? Math.min(opts.minHopMs, hopMs) : 0;
   const bornAt = opts.bornAt instanceof Map && opts.bornAt.size ? opts.bornAt : null;
 
   const nodes = new Map();
@@ -153,8 +159,11 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
   const secOf = new Map();
   for (const n of nodes.values()) secOf.set(n.id, parseDuration(n.data && n.data.duration));
 
-  // ---- join policies: identical rule to Mode A, arrival-counted only (D4 M2: "an explicit
-  // start(id) ALWAYS activates — the real log outranks the declared policy"). ----
+  // ---- join policies: identical rule to Mode A (F10) — arrivals are counted and ONE token
+  // is released per group of `needed`, so a fan-in does not turn N arrivals into N occupants
+  // and N downstream tokens. Unlike Mode A the join re-arms: a live fan-in fires as often as
+  // its arrivals allow. D4 M2 still holds over it — "an explicit start(id) ALWAYS activates,
+  // the real log outranks the declared policy" — and so does spawn(), which injects. ----
   const joinNeeded = new Map();
   for (const id of nodes.keys()) {
     const expected = inNonLoop.get(id).length;
@@ -186,6 +195,7 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
   const joinArrivals = new Map();
   const loopIteration = new Map();
   const inFlight = new Map();    // nodeId -> [{landAt, tk, eseg, wseg, item}] hops still traveling
+  const overBudget = new Set();  // nodeId -> its live dwell ran past the declared data.duration
   for (const id of nodes.keys()) { nodeQueue.set(id, []); nodeStatus.set(id, "pending"); inFlight.set(id, []); }
   for (const e of edges) edgeSegs.set(e.id, []);
   for (const id of joinNeeded.keys()) joinArrivals.set(id, []);
@@ -206,15 +216,50 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     arr.push(arrivedAt);
   }
 
+  /** Merges the arrivals waiting at a join into one releasable occupant, `needed` at a
+   *  time — Mode A's rule (F10): the last of the group carries on, its partners end there
+   *  (the renderer simply stops drawing them, as compileRun's merged tokens do). Surplus
+   *  arrivals stay `held` and form the next group, which is what makes a live fan-in able
+   *  to fire again and again instead of once. */
+  function releaseJoin(nodeId, at) {
+    const needed = joinNeeded.get(nodeId) || 0;
+    if (needed < 2) return;
+    const q = nodeQueue.get(nodeId);
+    const held = q.filter((o) => o.state === "held");
+    while (held.length >= needed) {
+      const group = held.splice(0, needed);
+      const keep = group[group.length - 1];
+      for (const o of group) {
+        if (o === keep) continue;
+        closeSeg(o.seg, at);
+        const i = q.indexOf(o);
+        if (i >= 0) q.splice(i, 1);
+      }
+      keep.state = "waiting";
+    }
+  }
+
   /** A token lands (waiting, not yet started) on `nodeId` — via a hop arrival or spawn().
    *  A landing on a node that had gone 'done' un-does that (D4 M2: "target stays pending
    *  until its own start" — a fresh arrival is not a re-activation by itself). 'failed' is
    *  deliberately NOT un-done here: the failure is what happened, and an arrival is not a
-   *  retry. The retry is the explicit start() in doStart, which activates as it always did. */
-  function land(nodeId, arrivedAt, tk, seg) {
+   *  retry. The retry is the explicit start() in doStart, which activates as it always did.
+   *  `joined = false` (spawn) injects the token outright: an explicit injection is never
+   *  held by, and never counts towards, a declared join policy. */
+  function land(nodeId, arrivedAt, tk, seg, joined = true) {
     if (nodeStatus.get(nodeId) === "done") nodeStatus.set(nodeId, "pending");
-    nodeQueue.get(nodeId).push({ tokenId: tk.id, arrivedAt, state: "waiting", seg });
+    const needed = joined ? (joinNeeded.get(nodeId) || 0) : 0;
+    nodeQueue.get(nodeId).push({ tokenId: tk.id, arrivedAt, state: needed > 1 ? "held" : "waiting", seg });
+    if (!joined) return;
     noteArrival(nodeId, arrivedAt);
+    releaseJoin(nodeId, arrivedAt);
+  }
+
+  /** F13 — a live dwell that outran the node's declared `data.duration`. The duration is
+   *  an expectation in Mode B, never a schedule, so this is the only thing it can say. */
+  function noteDwell(nodeId, t0, t1) {
+    const sec = secOf.get(nodeId);
+    if (sec != null && sec > 0 && (t1 - t0) / 1000 > sec) overBudget.add(nodeId);
   }
 
   /** Removes the hop that is landing right now — always the node's earliest in-flight hop
@@ -240,7 +285,15 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
 
   function doStart(nodeId, at) {
     const q = nodeQueue.get(nodeId);
-    const idx = q.findIndex((o) => o.state === "waiting");
+    // A fresh activation is judged against its own dwell — but only a start() on an EMPTY
+    // node is a fresh activation: with concurrent occupants, one more unit of work must not
+    // erase the verdict an over-long dwell that already finished earned for this node.
+    if (!q.length) overBudget.delete(nodeId);
+    // An explicit start() ALWAYS activates (D4 M2: the real log outranks the declared
+    // policy), so it picks up an arrival still held by an unfired join as readily as a
+    // released one — it just takes the released ones first.
+    let idx = q.findIndex((o) => o.state === "waiting");
+    if (idx < 0) idx = q.findIndex((o) => o.state === "held");
     if (idx >= 0) {
       const occ = q[idx];
       closeSeg(occ.seg, at);
@@ -254,14 +307,18 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     const hop = takeInFlight(nodeId, at);
     if (hop) {
       // Land it early: the edge fill truncates to the start instant and the wait collapses.
-      hop.eseg.t1 = Math.max(hop.eseg.t0, at);
-      hop.wseg.t0 = at;
-      hop.wseg.t1 = at;
-      noteArrival(nodeId, at);
-      const seg = { kind: "node", id: nodeId, t0: at, t1: Infinity };
+      // With minHopMs (F14) the truncation stops short of zero, so a start() stamped at the
+      // upstream finish's own instant still draws the token crossing the wire.
+      const t0 = Math.min(hop.landAt, minHop > 0 ? Math.max(at, hop.eseg.t0 + minHop) : at);
+      hop.eseg.t1 = Math.max(hop.eseg.t0, t0);
+      hop.wseg.t0 = t0;
+      hop.wseg.t1 = t0;
+      noteArrival(nodeId, t0);
+      const seg = { kind: "node", id: nodeId, t0, t1: Infinity };
       hop.tk.segments.push(seg);
-      q.push({ tokenId: hop.tk.id, arrivedAt: at, state: "active", seg });
-      nodeStatus.set(nodeId, "active");
+      q.push({ tokenId: hop.tk.id, arrivedAt: t0, state: "active", seg });
+      // A minHop-delayed start is still crossing at T: it is not occupying the node yet.
+      if (t0 <= T) nodeStatus.set(nodeId, "active");
       return;
     }
     // "if none is present" (source/entry node, or an already-terminal node being restarted —
@@ -280,34 +337,46 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     nodeStatus.set(nodeId, "active");
   }
 
+  /** One unit of work leaving `nodeId`: a token onto each of its non-loop out-edges. */
+  function fanOut(nodeId, at) {
+    for (const e of outNormal.get(nodeId)) {
+      // The log is history: an edge that did not exist yet when this finish was written
+      // never carried anything out of it (D4 — Mode B replays a real event log "as things
+      // actually happened", so a later addEdge must not fabricate a past traversal).
+      if (bornAt) { const b = bornAt.get(e.id); if (b != null && b > at) continue; }
+      const child = newToken();
+      const eseg = { kind: "edge", id: e.id, t0: at, t1: at + hopMs };
+      child.segments.push(eseg);
+      edgeSegs.get(e.id).push(eseg);
+      const landAt = at + hopMs;
+      const wseg = { kind: "node", id: e.target, t0: landAt, t1: Infinity, wait: true };
+      child.segments.push(wseg);
+      const hop = { landAt, tk: child, eseg, wseg, item: null };
+      heapPush(inFlight.get(e.target), hop, flightLess);
+      // Only materialize the landing into the target's queue if it has actually happened
+      // by T — a hop still in flight at T stays represented purely by `eseg` above (and
+      // by `inFlight`, so an early start(target) can still claim it).
+      if (landAt <= T) {
+        hop.item = { t: landAt, seq: seq++, pri: PRI_LAND, type: "__land", id: e.target, tk: child, seg: wseg };
+        heapPush(queue, hop.item, queueLess);
+      }
+    }
+  }
+
   function doFinish(nodeId, at, n) {
     const q = nodeQueue.get(nodeId);
     const k = Number.isFinite(n) ? Math.max(0, Math.min(Math.floor(n), q.length)) : q.length;
     const finished = q.splice(0, k);
+    let heldFanned = false;
     for (const occ of finished) {
+      if (occ.state === "active" && occ.seg) noteDwell(nodeId, occ.seg.t0, at);
       closeSeg(occ.seg, at);
-      for (const e of outNormal.get(nodeId)) {
-        // The log is history: an edge that did not exist yet when this finish was written
-        // never carried anything out of it (D4 — Mode B replays a real event log "as things
-        // actually happened", so a later addEdge must not fabricate a past traversal).
-        if (bornAt) { const b = bornAt.get(e.id); if (b != null && b > at) continue; }
-        const child = newToken();
-        const eseg = { kind: "edge", id: e.id, t0: at, t1: at + hopMs };
-        child.segments.push(eseg);
-        edgeSegs.get(e.id).push(eseg);
-        const landAt = at + hopMs;
-        const wseg = { kind: "node", id: e.target, t0: landAt, t1: Infinity, wait: true };
-        child.segments.push(wseg);
-        const hop = { landAt, tk: child, eseg, wseg, item: null };
-        heapPush(inFlight.get(e.target), hop, flightLess);
-        // Only materialize the landing into the target's queue if it has actually happened
-        // by T — a hop still in flight at T stays represented purely by `eseg` above (and
-        // by `inFlight`, so an early start(target) can still claim it).
-        if (landAt <= T) {
-          hop.item = { t: landAt, seq: seq++, pri: PRI_LAND, type: "__land", id: e.target, tk: child, seg: wseg };
-          heapPush(queue, hop.item, queueLess);
-        }
-      }
+      // F10 — the arrivals an UNFIRED join is still holding are one piece of work, not N.
+      // A bare finish() consuming them releases a single token downstream, exactly as the
+      // satisfied join would, instead of minting one per arrival (the ×N badge that then
+      // propagates forever). Released/active occupants keep fanning out one each.
+      if (occ.state === "held") { if (heldFanned) continue; heldFanned = true; }
+      fanOut(nodeId, at);
     }
     // A finish() that found nothing occupying the node (never started, or already fully
     // drained by an earlier finish) fans nothing out above and must not flip the status —
@@ -324,7 +393,10 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
   function doFail(nodeId, at) {
     const q = nodeQueue.get(nodeId);
     if (!q.length) return;
-    for (const occ of q.splice(0, q.length)) closeSeg(occ.seg, at);
+    for (const occ of q.splice(0, q.length)) {
+      if (occ.state === "active" && occ.seg) noteDwell(nodeId, occ.seg.t0, at);
+      closeSeg(occ.seg, at);
+    }
     nodeStatus.set(nodeId, "failed");
   }
 
@@ -334,8 +406,22 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
       const tk = newToken();
       const seg = { kind: "node", id: nodeId, t0: at, t1: Infinity, wait: true };
       tk.segments.push(seg);
-      land(nodeId, at, tk, seg);
+      land(nodeId, at, tk, seg, false);
     }
+  }
+
+  /** F14 — the landing instant a minHop-delayed start() booked on `nodeId` but has not
+   *  reached yet at `at`. A terminal event stamped inside that window would close the
+   *  occupant's node segment BEFORE its own t0: the node would paint 'done' while its token
+   *  is still drawn crossing the wire, and the segment would vanish (negative length). Real
+   *  spans are routinely shorter than a 100-200ms minimum hop, so this is the normal case,
+   *  not a corner: the terminal event waits for the landing instead. */
+  function landingOf(nodeId, at, k) {
+    const q = nodeQueue.get(nodeId);
+    let m = at;
+    const n = Math.min(k, q.length);
+    for (let i = 0; i < n; i++) { const o = q[i]; if (o.seg && o.seg.t0 > m) m = o.seg.t0; }
+    return m;
   }
 
   let steps = 0;
@@ -343,6 +429,16 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     const ev = heapPop(queue, queueLess);
     if (ev.cancelled) continue; // takeInFlight consumed this landing early — lazy delete
     if (ev.type === "__land") { dropHop(ev.id); land(ev.id, ev.t, ev.tk, ev.seg); continue; }
+    if (minHop > 0 && (ev.type === "finish" || ev.type === "fail")) {
+      const k = ev.type === "finish" && Number.isFinite(ev.n) ? Math.max(0, Math.floor(ev.n)) : Infinity;
+      const landAt = landingOf(ev.id, ev.t, k);
+      if (landAt > ev.t) {
+        // Re-queue at the landing (it is in the future, so the heap order still holds).
+        // Past T it simply has not happened yet in this sample — a later T replays it.
+        if (landAt <= T) heapPush(queue, { ...ev, t: landAt, seq: seq++, pri: PRI_LOG }, queueLess);
+        continue;
+      }
+    }
     if (ev.type === "start") doStart(ev.id, ev.t);
     else if (ev.type === "finish") doFinish(ev.id, ev.t, ev.n);
     else if (ev.type === "fail") doFail(ev.id, ev.t);
@@ -363,18 +459,29 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
   const nodesOut = {};
   for (const id of nodes.keys()) {
     const status = nodeStatus.get(id) || "pending";
-    const occ = nodeQueue.get(id);
+    // A minHop-delayed start is booked on the node but has not landed at T yet; nothing
+    // else can sit in the future, so only a live minHopMs makes the filter worth running.
+    const q = nodeQueue.get(id);
+    const occ = minHop > 0 ? q.filter((o) => !(o.seg && o.seg.t0 > T)) : q;
+    const sec = secOf.get(id);
     let progress = 0;
+    let active = 0;
+    let over = overBudget.has(id);
     // Both terminal statuses read as a full bar: the node is no longer working, and a
     // half-drawn fill on a failed step reads as "still going" (Mode A agrees — a failing
     // node's dwell segment is closed, so its span is fully elapsed).
     if (status === "done" || status === "failed") progress = 1;
-    else for (const o of occ) {
+    for (const o of occ) {
       if (o.state !== "active") continue;
-      const p = activeProgress(o.seg, T, secOf.get(id));
+      active++;
+      if (sec != null && sec > 0 && (T - o.seg.t0) / 1000 > sec) over = true;
+      if (status === "done" || status === "failed") continue;
+      const p = activeProgress(o.seg, T, sec);
       if (p > progress) progress = p;
     }
-    nodesOut[id] = { status, progress, occupancy: occ.length };
+    // `waiting` counts every occupant that is not working yet — a landed arrival AND one
+    // still held by an unfired join: both are things an explicit start() would pick up.
+    nodesOut[id] = { status, progress, occupancy: occ.length, waiting: occ.length - active, active, overBudget: over };
   }
 
   const edgesOut = {};

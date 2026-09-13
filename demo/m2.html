@@ -286,7 +286,9 @@
     // A fast hand-off is fine — a start() that beats the hop claims the token in flight —
     // but this demo deliberately lets the pulse finish traveling so it is visible.
     await sleep(280);
-    run.start("build");
+    // The scripted feed skips the prep container, so nothing ever arrives at "build":
+    // { spawn: true } declares that this start() mints its token on purpose.
+    run.start("build", { spawn: true });
     await sleep(120);
     run.finish("build");
     await sleep(60);
