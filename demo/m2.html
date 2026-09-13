@@ -65,9 +65,10 @@
 
 <p class="legend">
   Legend — dashed pips under a node = live occupancy, <code>×N</code> badge = several
-  tokens sharing one node, chip = <code>data.duration</code>. The graph stays interactive
-  after the checks finish: Tab into it, arrow between steps, Enter/Space toggles a
-  container.
+  tokens sharing one node, a dashed node outline = a live step that ran past its declared
+  <code>data.duration</code>. The graph stays interactive after the checks finish: Tab into
+  it, arrow between steps, Enter/Space toggles a container, and a click (or Enter) reports
+  the node through <code>g.on('nodeclick')</code>.
 </p>
 
 <div id="report"></div>
@@ -88,6 +89,11 @@
   "use strict";
 
   var errors = [];
+  // F36 — the documented "story finished" convention: the instance lives on `window.smv`
+  // and `g.finished` resolves when `g.finish()` ends the run. `__smvExit` is published
+  // alongside it because it also carries this page's own error list (and test/e2e-m2.mjs
+  // reads the same checks off `window.__smvM2`).
+  window.__smvExit = { done: false, errors: errors };
   window.addEventListener("error", function (e) {
     errors.push(String((e && e.message) || (e && e.error) || e));
   });
@@ -113,7 +119,7 @@
       { id: "prep.a", label: "Prep A", data: { duration: "20m" } },
       { id: "prep.b", label: "Prep B", data: { duration: "15m" } },
       { id: "prep.c", label: "Prep C", data: { duration: "25m" } },
-      { id: "build", label: "Build" },
+      { id: "build", label: "Build", data: { duration: "60ms" } },
       { id: "verifyA", label: "Verify A", collapsed: true },
       { id: "verifyA.unit", parent: "verifyA", label: "Unit" },
       { id: "verifyA.e2e", parent: "verifyA", label: "E2E" },
@@ -133,7 +139,9 @@
       { id: "e7", source: "verifyA.e2e", target: "verifyB.unit" },
       { id: "e8", source: "verifyB.unit", target: "verifyB.e2e" },
       { id: "e9", source: "verifyB.e2e", target: "ship" },
-      { id: "e10", source: "build", target: "ship", label: "final" },
+      // F25 — an edge label is a spec of its own: upright text on a pill, so it stays
+      // readable where it crosses the diagonal arrow.
+      { id: "e10", source: "build", target: "ship", label: { text: "final", pill: true } },
     ],
   };
 
@@ -155,9 +163,23 @@
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
     window.__smvM2 = { done: true, errors: errors, checks: {} };
+    window.__smvExit.done = true;
     return;
   }
-  window.__g = g; // e2e drives a11y (keyboard) and export checks straight off this
+  publish(g);
+
+  /** The live instance, under every name the page's readers use: `window.smv` is the
+   *  library's own convention (its `finished` promise is the finish signal), `__g` is what
+   *  test/e2e-m2.mjs drives a11y and the exports off. */
+  function publish(inst) {
+    window.smv = inst;
+    window.__g = inst;
+    // F27 — a public click event, so the page never has to resolve a node from a
+    // pointerdown itself. The keyboard path (Enter/Space) publishes it too.
+    inst.on("nodeclick", function (ev) {
+      phaseEl.textContent = "clicked " + ev.id;
+    });
+  }
 
   // ---------------------------------------------------------------------------
 
@@ -178,7 +200,8 @@
   // Occupancy badges live in the run-render decoration layer (g.smv-tokens), a SIBLING of
   // .smv-node, not nested inside it — and carry no per-node id of their own (the pool key
   // is internal). At most one node has occupancy > 1 in this script, so the plain class
-  // query is unambiguous.
+  // query is unambiguous. The badge sits in its own gutter above the box, so it never
+  // collides with a duration chip.
   function occupancyBadge() {
     var el = document.querySelector('#stage .smv-tokens text.smv-token-badge');
     return el ? el.textContent : null;
@@ -286,10 +309,16 @@
     // A fast hand-off is fine — a start() that beats the hop claims the token in flight —
     // but this demo deliberately lets the pulse finish traveling so it is visible.
     await sleep(280);
-    // The scripted feed skips the prep container, so nothing ever arrives at "build":
-    // { spawn: true } declares that this start() mints its token on purpose.
+    // The scripted feed skips the prep chain, so nothing ever arrives at "build":
+    // { spawn: true } declares that this start() mints its token on purpose, instead of
+    // taking the [smv:live] "minting a token out of nothing" warning.
     run.start("build", { spawn: true });
+    checks.liveBuildActive = run.state().nodes.build.active;
     await sleep(120);
+    // Build declares a 60ms duration and has now been working for ~120ms: in live mode a
+    // duration is an expectation, and the one judgement the engine makes about it is this
+    // over-budget flag (drawn as a dashed outline on the node).
+    checks.liveBuildOverBudget = run.state().nodes.build.overBudget;
     run.finish("build");
     await sleep(60);
     run.spawn("buffer", 3);
@@ -300,6 +329,10 @@
     checks.liveNowT = run.time();
     checks.liveOccupancyBadge = occupancyBadge();
     checks.liveOccupancyState = nowState.nodes.buffer && nowState.nodes.buffer.occupancy;
+    // Occupancy split into the two halves a page actually wants to narrate: three spawned
+    // tokens are parked on "buffer" waiting for a start(), none of them working yet.
+    checks.liveBufferWaiting = nowState.nodes.buffer && nowState.nodes.buffer.waiting;
+    checks.liveBufferActive = nowState.nodes.buffer && nowState.nodes.buffer.active;
 
     run.seek(pastT);
     var pastState = run.state();
@@ -314,7 +347,9 @@
     await sleep(60);
     run.start("buffer");
     await sleep(150);
-    checks.liveAfterFollowStatus = run.state().nodes.buffer.status;
+    var afterFollow = run.state().nodes.buffer;
+    checks.liveAfterFollowStatus = afterFollow.status;
+    checks.liveBufferActiveAfterStart = afterFollow.active;
   }
 
   // ---------------------------------------------------------------------------
@@ -322,8 +357,10 @@
   // collapsed, so e2e's real-keyboard a11y pass has something to expand with Enter.
   // ---------------------------------------------------------------------------
   async function phaseSettle(checks) {
-    if (!g.viewstate.collapsed.has("verifyA")) await g.collapse("verifyA");
-    if (!g.viewstate.collapsed.has("verifyB")) await g.collapse("verifyB");
+    // A `collapsed` patch routes to collapse()/expand() and resolves {applied:false} when
+    // the container is already in that state, so this needs no view-state bookkeeping.
+    await g.update("verifyA", { collapsed: true });
+    await g.update("verifyB", { collapsed: true });
     await sleep(80);
     checks.finalNodeIds = nodeIds();
   }
@@ -332,18 +369,25 @@
     reportEl.textContent = JSON.stringify(checks, null, 2);
   }
 
+  var ran = false;
+
   async function runAll() {
     runBtn.disabled = true;
     var checks = {};
     try {
-      // Fresh graph every run: phaseSplit() below condense()s prep.a/b/c then split()s the
-      // merge back apart — an irreversible structural mutation of the SPEC. Replaying the
-      // script a second time on the SAME instance would hand condense() ids it already
-      // consumed (prep.a/b/c no longer exist; prep.x/y/z do), throwing a GraphError. Destroy
-      // and remount so each run starts from the same clean SPEC a page reload would give it.
-      g.destroy();
-      g = doMount();
-      window.__g = g;
+      // Fresh graph on every REPEAT run: phaseSplit() below condense()s prep.a/b/c then
+      // split()s the merge back apart — an irreversible structural mutation of the SPEC.
+      // Replaying the script a second time on the SAME instance would hand condense() ids
+      // it already consumed (prep.a/b/c no longer exist; prep.x/y/z do), throwing a
+      // GraphError. Destroy and remount so each repeat starts from the same clean SPEC a
+      // page reload would give it — and so the first pass keeps the instance whose
+      // `finished` promise readers latched onto at load.
+      if (ran) {
+        g.destroy();
+        g = doMount();
+        publish(g);
+      }
+      ran = true;
 
       await phaseLabelBefore(checks);
       await phaseSplit(checks);
@@ -361,6 +405,8 @@
     writeReport(checks);
     runBtn.disabled = false;
     window.__smvM2 = { done: true, errors: errors, checks: checks };
+    window.__smvExit.done = true;
+    g.finish("checks");   // resolves g.finished for anyone waiting on the library's signal
     return checks;
   }
 

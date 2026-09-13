@@ -82,9 +82,10 @@
     A PR triggers checkout → a cached install → a 6-way build matrix (5 OS/runtime combos
     plus lint) fanning out inside one collapsible container, all AND-joining into a
     required <em>gate</em> check. <code>windows/node20</code> fails partway through with a
-    real symlink error, so the gate never sees all six arrivals and the run stalls there —
-    exactly what a red PR check looks like. Integration tests (with a bounded flaky-retry
-    loop) and the preview publish sit downstream, wired up but unreached this run.
+    real symlink error and takes its own re-run arc twice before it gives up, so the gate
+    never sees all six arrivals and the run stalls there — exactly what a red PR check looks
+    like. Integration tests (with a bounded flaky-retry loop) and the preview publish sit
+    downstream, wired up but unreached this run.
   </p>
 </header>
 
@@ -109,8 +110,13 @@
   <li>The <b>Build matrix</b> box starts collapsed with a <code>durationAgg:"max"</code>
     chip (the slowest job, not the sum) — it expands mid-story so you can watch all 6 jobs
     run in parallel at different rates.</li>
-  <li><code>windows/node20</code> turns red and carries a <code>data.fail</code> reason —
-    watch for the warn highlight + caption calling it out.</li>
+  <li><code>windows/node20</code> carries <code>data.fail: { reason, retries: 2 }</code> and
+    a <code>loop:true, onFail:true</code> re-run arc, so it fails three times over — the arc
+    ticks <code>iter 2/2</code> — and only the last attempt is terminal. Watch the warn
+    highlight + caption calling it out.</li>
+  <li>The <b>Build matrix</b> box declares <code>statusAgg:"earliest-fail"</code>: in a
+    pipeline one red cell means the whole matrix is red, and it stays red even though five
+    legs go green afterwards. (A sequence-diagram lifeline would say <code>"latest"</code>.)</li>
   <li><code>gate</code> is an implicit <b>AND-join</b> of all 6 legs; because one leg
     failed it never fires, so <em>integration tests</em> and <em>publish preview</em>
     never light up this run.</li>
@@ -162,12 +168,18 @@
     { id: "matrix.ubuntu20", label: "ubuntu · node20", duration: "100s" },
     { id: "matrix.ubuntu22", label: "ubuntu · node22", duration: "112s" },
     { id: "matrix.macos20", label: "macos · node20", duration: "134s" },
-    { id: "matrix.windows20", label: "windows · node20", duration: "70s", fail: "EPERM: symlink 'node_modules/.bin/tsc' -> 'tsc' (no admin privilege)" },
+    { id: "matrix.windows20", label: "windows · node20", duration: "70s",
+      // A real CI re-run: the job fails, the re-run arc below fires while the budget lasts,
+      // and only the attempt that finds it spent is terminal.
+      fail: { reason: "EPERM: symlink 'node_modules/.bin/tsc' -> 'tsc' (no admin privilege)", retries: 2 } },
     { id: "matrix.lint", label: "lint", duration: "22s" },
   ];
 
   var WAVE_MATRIX = [
-    { op: "addNode", args: [{ id: "matrix", label: "Build matrix", collapsed: true, durationAgg: "max" }] },
+    // statusAgg is the failure half of durationAgg. 'earliest-fail' (the default, named here
+    // because it IS the policy a matrix wants) keeps the box red from the first red cell on,
+    // even as the five healthy legs go green behind it.
+    { op: "addNode", args: [{ id: "matrix", label: "Build matrix", collapsed: true, durationAgg: "max", statusAgg: "earliest-fail" }] },
   ].concat(MATRIX_JOBS.map(function (j) {
     var data = { duration: j.duration };
     if (j.fail) data.fail = j.fail;
@@ -175,6 +187,10 @@
   })).concat(MATRIX_JOBS.map(function (j) {
     return { op: "addEdge", args: [{ id: "m-in:" + j.id, source: "install", target: j.id }] };
   })).concat([
+    // The re-run arc for the flaky leg: onFail makes it the failure's own loop, so each
+    // retry really crosses it and the badge reads iter n/2.
+    { op: "addEdge", args: [{ id: "m-retry", source: "matrix.windows20", target: "matrix.windows20",
+                              loop: true, onFail: true, maxIterations: 2 }] },
     { op: "addNode", args: [{ id: "gate", label: "Gate (required checks)" }] },
   ]).concat(MATRIX_JOBS.map(function (j) {
     return { op: "addEdge", args: [{ id: "m-out:" + j.id, source: j.id, target: "gate" }] };
@@ -188,7 +204,24 @@
     { op: "addEdge", args: [{ id: "e3", source: "integration", target: "publish" }] },
   ];
 
+  // Pacing: a log curve over the graph's own declared durations, same trick as
+  // demo/pipeline.html, so 12s / 70s / 134s read as visibly different speeds instead of
+  // one near-uniform dwell. In ?auto=1 the playback multiplier keeps the whole story inside
+  // the 45s budget without touching the declared schedule the clock tile reports.
+  var RUN_OPTS = {
+    hopMs: 200,
+    playbackSpeed: AUTO ? 3 : 1,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 380;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 260 + 1000 * f;
+    },
+  };
+
   var STEPS = [
+    // Compiling through the storyboard keeps the whole timeline declared in one place, so
+    // the transport bar has a run from step 0 and cues() sees it.
+    { op: "run", args: [RUN_OPTS] },
     { label: "assemble" },
     { op: "batch", steps: WAVE_SETUP, dur: 500 },
     { op: "batch", steps: WAVE_MATRIX, dur: 700 },
@@ -199,7 +232,7 @@
     { op: "expand", args: ["matrix"], dur: 700 },
     { op: "camera", args: [{ node: "matrix.windows20", pad: 70, dur: 650 }] },
     { op: "highlight", args: [{ nodes: ["matrix.windows20"], edges: ["m-out:matrix.windows20"], variant: "warn", pulse: true }] },
-    { op: "caption", args: ["windows/node20 failed: EPERM on a symlink. Gate needs all 6 legs — it never fires.", { place: "bottom" }] },
+    { op: "caption", args: ["windows/node20: EPERM on a symlink, re-run twice, still red. Gate needs all 6 legs — it never fires.", { place: "bottom" }] },
     { op: "wait", ms: 1600 },
     { label: "gate blocked" },
     { op: "caption", args: [null] },
@@ -216,19 +249,13 @@
     { label: "done" },
   ];
 
-  var RUN_AT = 5, EXPAND_AT = 7, COLLAPSE_AT = 20;
-
-  // Pacing: a log curve over the graph's own declared durations, same trick as
-  // demo/pipeline.html, so 12s / 70s / 134s read as visibly different speeds instead of
-  // one near-uniform dwell — and stays comfortably inside the 45s auto-mode budget.
-  var RUN_OPTS = {
-    hopMs: 200,
-    dwell: function (sec, ctx) {
-      if (sec == null) return 380;
-      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
-      return 260 + 1000 * f;
-    },
-  };
+  function stepIndex(pred) {
+    for (var i = 0; i < STEPS.length; i++) if (pred(STEPS[i])) return i;
+    return -1;
+  }
+  var RUN_AT = stepIndex(function (s) { return s.op === "run.play" && s.until === "gate"; });
+  var EXPAND_AT = stepIndex(function (s) { return s.op === "expand"; });
+  var COLLAPSE_AT = stepIndex(function (s) { return s.op === "collapse"; });
 
   // ---------------------------------------------------------------------------
 
@@ -246,9 +273,9 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto", // plays the whole story unattended when the URL carries ?auto=1
     });
-    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+    window.smv = g; // the story-finished convention: check-demos awaits window.smv.finished
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -278,7 +305,7 @@
   }
 
   var MATRIX_IDS = MATRIX_JOBS.map(function (j) { return j.id; });
-  var obs = { failReason: null, failedAt: null, gateArrived: 0, gateNeeded: 6 };
+  var obs = { failReason: null, failedAt: null, attempts: 0, retries: 0, gateArrived: 0, gateNeeded: 6 };
 
   function sampleFrame() {
     var run = g.run();
@@ -300,26 +327,33 @@
     }
 
     var w = st.nodes["matrix.windows20"];
+    var arc = st.loops && st.loops["m-retry"];
     if (w && w.status === "failed") {
-      mFail.textContent = "windows/node20 ✗";
+      mFail.textContent = "windows/node20 ✗ after " + obs.attempts + " attempts";
       mFail.className = "bad";
+    } else if (arc && arc.iteration > 0) {
+      mFail.textContent = "windows/node20 re-run " + arc.iteration + "/" + arc.max;
     }
 
     mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
   }
   g.ticker.add(sampleFrame);
 
-  g.run().on("fail", function (ev) {
+  // Run events are mirrored onto the instance, so one registration outlives every
+  // recompile the storyboard's `run` step (and each graph mutation) makes.
+  g.on("run:fail", function (ev) {
     if (ev && ev.nodeId === "matrix.windows20") {
       obs.failReason = ev.reason || null;
       obs.failedAt = ev.t;
+      obs.attempts = ev.attempt || obs.attempts + 1;
+      obs.retries = ev.retries || 0;
+      if (ev.terminal) obs.terminalAt = ev.t;
     }
   });
 
   var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
 
   var checks = {};
-  var storyDone = false;
 
   sb.on("step", function (ev) {
     paintRail();
@@ -327,6 +361,8 @@
     if (ev.index === RUN_AT) {
       checks.gateAfterRun = { arrived: obs.gateArrived, needed: obs.gateNeeded };
       checks.failReasonAfterRun = obs.failReason;
+      checks.windowsAttempts = obs.attempts;
+      checks.windowsRetryBudget = obs.retries;
     }
     if (ev.index === EXPAND_AT) {
       checks.matrixExpanded = !g.viewstate.collapsed.has("matrix");
@@ -337,32 +373,16 @@
     phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
 
-  function transportPlay() {
-    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
-    if (btn) btn.click(); else sb.play();
-  }
-
-  var started = false;
+  var started = AUTO; // autoplay: "auto" already started the story under ?auto=1
   function start() {
     if (started) return;
     started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
-    transportPlay();
+    sb.play();
   }
 
   playBtn.addEventListener("click", start);
@@ -372,16 +392,18 @@
     reportEl.textContent =
       "gate arrivals when run reached   " + JSON.stringify(checks.gateAfterRun) + "\n" +
       "windows/node20 fail reason       " + checks.failReasonAfterRun + "\n" +
+      "windows/node20 attempts (budget) " + checks.windowsAttempts + " (" + checks.windowsRetryBudget + ")\n" +
       "matrix expanded on cue           " + checks.matrixExpanded + "\n" +
       "matrix collapsed again           " + checks.matrixCollapsedAgain + "\n" +
       "errors                           " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
 
-  async function auto() {
-    g.run().speed(3); // stay well inside the 45s auto budget
-    await sleep(200);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
+  // One signal for the end of the story, however it was started: the storyboard running
+  // out of steps (or a destroy) settles g.finished.
+  async function onFinished() {
+    await g.finished;
+    paintRail();
+    phaseEl.textContent = "story complete";
     await sleep(300);
     writeReport();
     phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
@@ -390,12 +412,14 @@
 
   paintRail();
   if (AUTO) {
-    auto().catch(function (err) {
-      errors.push("auto: " + String((err && err.message) || err));
-      writeReport();
-      window.__smvExit = { done: true, errors: errors, checks: checks };
-    });
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
   }
+  onFinished().catch(function (err) {
+    errors.push("finish: " + String((err && err.message) || err));
+    writeReport();
+    window.__smvExit = { done: true, errors: errors, checks: checks };
+  });
 })();
 </script>
 

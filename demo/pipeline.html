@@ -107,7 +107,8 @@
   Legend — chip = duration (<code>durationAgg:'sum'</code> rolls a container up), ✋ manual /
   ⚡ automated, <code>×N</code> = collapsed substep count, pips under <em>Report</em> = join slots,
   dashed arc = the back edge (<code>loop:true, maxIterations:5</code>, this run capped at 3),
-  slim bar under the graph = total pipeline duration.
+  slim bar under the graph = the preset's <code>total:'both'</code> readout — the sum of every
+  declared step next to the critical path through them.
 </p>
 
 <div id="report"></div>
@@ -127,7 +128,10 @@
     errors.push("unhandledrejection: " + String(e && e.reason));
   });
 
-  var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
+  // The same `?auto=1` that `autoplay: "auto"` honours below. The mount plays the story on
+  // its own; this flag only says whether the page should also run its scrub-verification
+  // pass afterwards and print the report.
+  var AUTO = /[?&]auto=(1|true)(&|$)/.test(window.location.search);
 
   // ---------------------------------------------------------------------------
   // The spec (§5.1 flavour). `clean` carries NO duration of its own: its 2h chip is a
@@ -227,17 +231,26 @@
       layout: { dir: "LR", nodesep: 26, ranksep: 46 },
       animation: { duration: 420, easing: "cubic-out" },
       controls: true,
-      preset: "pipeline",
+      // `total: 'both'` labels the two numbers the bar can show: the sum of every declared
+      // step, and the critical path through them (they differ here because of the fan-out).
+      preset: { name: "pipeline", total: "both" },
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",   // plays by itself when the URL carries ?auto=1
     });
     g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
     window.__smvM1 = { done: true, errors: errors, checks: {} };
+    window.__smvExit = { done: true, errors: errors };
     return;
   }
+
+  // The story-finished convention: the instance on `window.smv` (its `g.finished` promise
+  // resolves when the storyboard runs out of steps), plus the `__smvExit` hook the checker
+  // prefers because it also carries this page's own error list.
+  window.smv = g;
+  window.__smvExit = { done: false, errors: errors };
 
   var sb = g.storyboard();
   var LABELS = sb.labels();
@@ -367,12 +380,12 @@
   });
 
   var checks = {};
-  var storyDone = false;
 
   sb.on("step", function (ev) {
     paintRail();
     // The graph grows and shrinks a lot across this story; a scripted demo re-fits
-    // explicitly (D10 allows exactly that — it is never automatic).
+    // explicitly (D10 allows exactly that — it is never automatic). The fit frames inside
+    // the chrome the library mounted (transport bar, total bar, caption strip) by itself.
     g.fitView({ animate: true });
     if (ev.index === EXPAND_AT) {
       checks.substepsAfterExpand = substepsOnScreen();
@@ -387,37 +400,22 @@
     phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+  sb.on("done", function () { paintRail(); phaseEl.textContent = "story complete"; });
 
   // ---------------------------------------------------------------------------
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
-
-  function transportPlay() {
-    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
-    if (btn) btn.click(); else sb.play();
-  }
 
   var started = false;
-  function start() {
+  function start(alreadyPlaying) {
     if (started) return;
     started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
-    transportPlay();
+    if (!alreadyPlaying) sb.play();
   }
 
-  playBtn.addEventListener("click", start);
+  playBtn.addEventListener("click", function () { start(false); });
   resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
 
   function writeReport() {
@@ -436,9 +434,8 @@
 
   /** The headless verification path: play through, scrub back before the condense, forward. */
   async function auto() {
-    await sleep(300);              // mount's initial fit gets one beat
-    start();
-    await waitFor(function () { return storyDone; }, 60000);
+    start(true);                   // mount's `autoplay: "auto"` is already playing it
+    await g.finished;              // { reason: "storyboard" } — the library's own signal
     await sleep(500);              // the last commit settles
 
     Object.assign(checks, {
@@ -483,6 +480,7 @@
     writeReport();
     phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
     window.__smvM1 = { done: true, errors: errors, checks: checks };
+    window.__smvExit.done = true;
   }
 
   paintRail();
@@ -492,6 +490,7 @@
       checks.nan = checks.nan || scanNaN();
       writeReport();
       window.__smvM1 = { done: true, errors: errors, checks: checks };
+      window.__smvExit.done = true;
     });
   }
 })();

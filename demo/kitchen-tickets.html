@@ -85,10 +85,11 @@
     Expo fires one dinner ticket at four stations at once — grill, sauté, fry, garde manger —
     then plating waits for all four (an <code>all</code>-join) before the pass. The pass is a
     quality check: usually it sends one plate back to the grill for a quick fix (a bounded
-    retry loop), and once — this run — a steak comes back <em>under</em> and the ticket is
-    declared failed outright (<code>data.fail</code>) instead of looping. Run several
-    tickets: watch the fry station get sped up on its own branch, then step through the
-    plating join one event at a time.
+    retry loop), and once — this run — a steak comes back <em>under</em>, so the pass takes
+    its own retry budget (<code>data.fail: {reason, retries}</code>): one remake, and when
+    that plate is still under the ticket is failed outright. Run several tickets: watch the
+    fry station re-timed on its own branch, then step through the plating join one event at
+    a time.
   </p>
 </header>
 
@@ -119,10 +120,13 @@
   <li><code>plate</code> is an implicit <code>join:"all"</code> — four in-edges, four pips.</li>
   <li><code>pass → grill</code> is a bounded retry (<code>loop:true, maxIterations:2</code>) —
     watch the iteration badge and the dashed back-edge arc.</li>
-  <li>Ticket 3 sets <code>data.fail:"steak under, remake"</code> on the pass step itself: no
-    loop, no fan-out, the branch just stops — a first-class failed outcome, not a hang.</li>
-  <li><code>run.speed(2, {branch:"fry"})</code> speeds up only the fry branch mid-run; a
-    paused <code>run.step()</code> walks the plating join one event at a time.</li>
+  <li>Ticket 3 gives the pass a real retry budget —
+    <code>data.fail:{reason:"steak under, remake", retries:1}</code>. Attempt 1 fails and
+    fires a <code>loop</code>, attempt 2 spends the budget, and only then does
+    <code>failed</code> stick: no fan-out, the branch stops — a first-class failed outcome.</li>
+  <li>Each ticket is a storyboard <code>{op:"run"}</code> step, so the compile itself is on
+    the declared timeline: ticket 2 re-times the fry branch with a <code>rates</code> entry.
+    A paused <code>run.step()</code> then walks the plating join one event at a time.</li>
 </ul>
 
 <div id="report"></div>
@@ -185,7 +189,16 @@
     },
   };
 
+  // Ticket 2 is the same kitchen with one branch really re-timed: a rate event scoped to the
+  // fry station, declared as a compile input so the reported total stays honest.
+  var RUN_OPTS_FRY = {
+    hopMs: RUN_OPTS.hopMs,
+    dwell: RUN_OPTS.dwell,
+    rates: [{ t: 0, scope: "fry", factor: 2 }],
+  };
+
   var STEPS = [
+    { op: "run", args: [RUN_OPTS] },
     { label: "ticket 1" },
     { op: "camera", args: [{ fit: true }] },
     { op: "caption", args: ["Ticket 1 — expo fires the ticket at four stations at once.", { place: "bottom" }] },
@@ -198,21 +211,21 @@
     { op: "caption", args: ["The pass sends one plate back to the grill for a quick fix — a bounded retry loop.", { place: "bottom" }] },
     { op: "camera", args: [{ nodes: ["pass", "grill"], pad: 70 }] },
     { op: "run.play" },
-    { label: "ticket 2 · branch speed" },
+    { label: "ticket 2 · fry re-timed" },
     { op: "camera", args: [{ fit: true }] },
-    { op: "caption", args: ["Ticket 2 — same ticket, but the fry station gets sped up on its own branch this time.", { place: "bottom" }] },
-    { op: "run.seek", ms: 0 },
+    { op: "caption", args: ["Ticket 2 — same ticket, but the fry station is really re-timed: a rate event on that branch alone.", { place: "bottom" }] },
+    { op: "run", args: [RUN_OPTS_FRY] },
     { op: "highlight", args: [{ nodes: ["fry"], variant: "ok", pulse: true }] },
     { op: "run.play" },
     { op: "clearHighlight" },
-    { label: "ticket 3 · failed check" },
+    { label: "ticket 3 · remake, then failed" },
     { op: "camera", args: [{ fit: true }] },
-    { op: "caption", args: ["Ticket 3 — this time the steak comes back under. The pass fails the ticket outright: no loop, no fan-out.", { place: "bottom" }] },
-    { op: "update", args: ["pass", { data: { duration: "1m", fail: "steak under, remake" } }] },
-    { op: "run.seek", ms: 0 },
+    { op: "caption", args: ["Ticket 3 — the steak comes back under. The pass declares a retry budget: one remake, then the ticket fails.", { place: "bottom" }] },
+    { op: "update", args: ["pass", { data: { fail: { reason: "steak under, remake", retries: 1 } } }] },
+    { op: "run", args: [RUN_OPTS] },
     { op: "highlight", args: [{ nodes: ["pass"], variant: "warn" }] },
     { op: "run.play" },
-    { op: "caption", args: ["Pass reports 'failed', not 'done' — a first-class outcome, and the branch just stops.", { place: "bottom" }] },
+    { op: "caption", args: ["Attempt 1 fails and fires a loop for the remake; attempt 2 spends the budget, so 'failed' sticks and the branch stops.", { place: "bottom" }] },
   ];
 
   // ---------------------------------------------------------------------------
@@ -235,9 +248,9 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",
     });
-    g.run(RUN_OPTS);
+    window.smv = g;
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -275,9 +288,12 @@
     var st = run.state();
     var j = st.joins.plate;
     var lp = st.loops.remake;
+    if (run.time() === 0) { lastFail = null; failLog.length = 0; }   // a fresh ticket clears the log
     mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
     mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "—";
-    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/2";
+    mLoop.textContent = lastFail
+      ? "attempt " + lastFail.attempt + "/" + (lastFail.retries + 1)
+      : (lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/2");
     STATIONS.forEach(function (id) {
       var n = st.nodes[id];
       var el = mOcc[id];
@@ -288,31 +304,29 @@
       else el.textContent = "idle";
     });
     var pass = st.nodes.pass;
-    mFail.textContent = pass && pass.status === "failed" ? "FAILED — steak under, remake" : (pass && pass.status === "done" ? "passed" : "—");
+    if (pass && pass.status === "failed") {
+      mFail.textContent = "FAILED — " + ((lastFail && lastFail.reason) || "steak under, remake");
+    } else if (lastFail) {
+      mFail.textContent = "remaking — " + lastFail.reason;
+    } else {
+      mFail.textContent = pass && pass.status === "done" ? "passed" : "—";
+    }
   }
   g.ticker.add(sampleFrame);
 
-  var failEventSeen = false;
-  g.run().on("fail", function (ev) {
-    if (ev && ev.nodeId === "pass") failEventSeen = true;
+  // Run events are mirrored on the instance, so one subscription outlives every `run` step
+  // the storyboard compiles. A retry emits one `fail` per attempt: only the last is terminal.
+  var lastFail = null;
+  var failLog = [];
+  g.on("run:fail", function (ev) {
+    if (!ev || ev.nodeId !== "pass") return;
+    lastFail = ev;
+    failLog.push("attempt " + ev.attempt + "/" + (ev.retries + 1) + (ev.terminal ? " · terminal" : " · retrying"));
   });
-
-  // Demonstrate per-branch speed + step() once ticket 2's storyboard segment begins playing.
-  var didBranchSpeedDemo = false;
-  var didStepDemo = false;
 
   sb.on("step", function (ev) {
     paintRail();
-    g.fitView({ animate: true });
     phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
-
-    // Right after "ticket 2 · branch speed" resumes playback, nudge the fry branch to 2x —
-    // a live demonstration of g.run().speed(factor, {branch}) mid-run.
-    if (!didBranchSpeedDemo && sb.position().label === "ticket 2 · branch speed") {
-      didBranchSpeedDemo = true;
-      var run = g.run();
-      run.speed(2, { branch: "fry" });
-    }
   });
   sb.on("seek", paintRail);
   sb.on("done", function () {
@@ -325,12 +339,13 @@
 
   /** One last, explicit demonstration: reset to t=0, pause, and single-step the transport
    *  event-by-event (`run.step()`, no `token`) until the plating join fires, logging its
-   *  arrived/needed count at every boundary. Ticket 3's `data.fail` is still on `pass`, so
+   *  arrived/needed count at every boundary. Ticket 3's retry budget is still on `pass`, so
    *  this replay also proves the fan-out into `plate` runs to completion before it ever
    *  reaches — and stops at — the failed pass step. */
   function stepThroughJoin() {
     var run = g.run();
     if (!run) return;
+    var storyFails = failLog.slice();   // the story's own attempts, before this replay re-emits them
     run.pause();
     run.seek(0);
     var lines = ["run.step() through the plating join, from t=0 —"];
@@ -344,11 +359,10 @@
       guard++;
     }
     lines.push("plate join fired after " + guard + " step()s.");
-    lines.push("fail event on 'pass' observed earlier in the run: " + failEventSeen);
+    lines.push("fail events on 'pass' earlier in the run: " + (storyFails.length ? storyFails.join(" · ") : "none"));
     lines.push("errors: " + (errors.length ? JSON.stringify(errors, null, 2) : "none"));
     reportEl.textContent = lines.join("\n");
     run.seek(run.duration);
-    didStepDemo = true;
     checksReady = true;
   }
 
@@ -366,26 +380,25 @@
     });
   }
 
-  function transportPlay() {
-    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
-    if (btn) btn.click(); else sb.play();
-  }
-
   var started = false;
   function start() {
     if (started) return;
     started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
-    transportPlay();
+    sb.play();
   }
 
   playBtn.addEventListener("click", start);
   resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
 
+  // `autoplay: "auto"` already started the story off ?auto=1, and g.finished resolves when
+  // the script runs out of steps; __smvExit stays the page's own "and the report is written".
   async function auto() {
-    await sleep(250);
-    start();
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    await g.finished;
     await waitFor(function () { return checksReady; }, 42000);
     await sleep(300);
     window.__smvExit = { done: true, errors: errors };

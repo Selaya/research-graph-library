@@ -91,7 +91,7 @@
     A mobile/TV release, end to end: <strong>plan → develop → build &amp; sign → QA →
     release</strong>, as five compound phases across three device types (iOS, Android,
     Smart TV). The story assembles the pipeline, runs one release <em>the way it works
-    today</em> — a code-review retry loop ticking in place, a signing fan-out, a regression
+    today</em> — a code review that bounces on a real retry arc, a signing fan-out, a regression
     fan-out at three different speeds into an <code>all</code>-join, a deploy fan-out into GA —
     then lands automation on three of those areas and re-runs it. Watch the duration chips
     odometer (<strong>11h&nbsp;→&nbsp;45s</strong>, <strong>7d&nbsp;→&nbsp;12m</strong>,
@@ -121,7 +121,7 @@
   <div class="tile"><i>chapter</i><span id="m-chapter">—</span></div>
   <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
   <div class="tile"><i>live tokens</i><span id="m-tokens">0</span></div>
-  <div class="tile"><i>review loop</i><span id="m-loop">iter 0/4</span></div>
+  <div class="tile"><i>review retries</i><span id="m-loop">iter 0/3</span></div>
   <div class="tile"><i>join · all</i><span id="m-join">—</span></div>
   <div class="tile" id="t-total"><i>hands-on total</i><span id="m-total">—</span></div>
 </div>
@@ -130,10 +130,13 @@
   Legend — chip = duration (a phase's chip is a <code>durationAgg:'sum'</code> rollup of its
   steps, so it stays honest through expand/collapse and through a condense), ✋ manual /
   ⚡ automated, <code>×N</code> = tokens sitting on one node, pips under a node = join slots
-  (<code>join:"all"</code>), dashed arc = the review retry loop
-  (<code>loop:true, maxIterations:4</code>, this run capped at 3), thickened edge = a
+  (<code>join:"all"</code>), dashed arc = the review retry arc
+  (<code>loop:true, onFail:true, maxIterations:4</code>, this run's retry budget capped at
+  3, so “address feedback” bounces three times and <code>recover</code>s on the fourth round),
+  thickened edge = a
   redirected edge that condense merged and re-weighted, slim bar under the graph = total
-  hands-on duration of the whole pipeline.
+  hands-on duration of the pipeline (the preset labels the critical path beside it when the
+  two differ).
 </p>
 
 <div id="report"></div>
@@ -160,6 +163,12 @@
 
   var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
 
+  // The page-rolled finish hook, installed up front so a headless checker waits for the
+  // page's OWN verification pass (the scrub-back and scrub-forward below) and not merely
+  // for `g.finished`, and so it can read this error list. `window.smv` + `g.finished` are
+  // the library convention and are wired up too; this one just outlasts them.
+  window.__smvExit = { done: false, errors: errors };
+
   // ===========================================================================
   // 1. The graph
   //
@@ -170,18 +179,29 @@
   // `all`-join — which is exactly the shape automation later collapses.
   // ===========================================================================
 
-  var W = 176, H = 40;   // uniform leaf boxes: the label never crowds the duration chip
-
-  function phase(id, label) { return { id: id, label: label, durationAgg: "sum" }; }
+  // Boxes are measured, not hand-sized: `preset: "pipeline"` installs its own
+  // `layout.measure` reserve, so the duration chip and the ✋/⚡ glyph get their own room
+  // and a long label truncates before it reaches them.
+  //
+  // `container: true` lets a phase declare itself a container BEFORE it has any children,
+  // which is what this story needs: each wave plants the next phase empty, the camera pans
+  // to that header-only dashed box, and the following wave blooms the steps inside it.
+  // `statusAgg` is the rollup policy for a phase's colour — Development runs a real retry
+  // loop, so it follows the LATEST outcome of its steps instead of staying red from the
+  // first bounce.
+  function phase(id, label, statusAgg) {
+    var n = { id: id, label: label, container: true, durationAgg: "sum" };
+    if (statusAgg) n.statusAgg = statusAgg;
+    return n;
+  }
   function manual(id, parent, label, duration, extra) {
-    var n = { id: id, parent: parent, label: label, w: W, h: H,
+    var n = { id: id, parent: parent, label: label,
               data: { duration: duration, mode: "manual" } };
     if (extra) for (var k in extra) n[k] = extra[k];
     return n;
   }
   function automated(id, label, duration) {
-    return { id: id, label: label, w: W, h: H,
-             data: { duration: duration, mode: "automated" } };
+    return { id: id, label: label, data: { duration: duration, mode: "automated" } };
   }
   function add(node) { return { op: "addNode", args: [node] }; }
   function link(id, s, t, extra) {
@@ -218,7 +238,7 @@
     link("p1", "plan.ticket", "plan.triage"),
     link("p2", "plan.triage", "plan.commit"),
     // …and the seam into Development, which the next beat pans to before filling it.
-    { op: "addNode", args: [phase("dev", "Development")] },
+    { op: "addNode", args: [phase("dev", "Development", "latest")] },
     link("p3", "plan.commit", "dev"),
   ];
 
@@ -228,15 +248,23 @@
     add(manual("dev.code", "dev", "Implement", "3d")),
     add(manual("dev.pr", "dev", "Open PR", "15m")),
     add(manual("dev.review", "dev", "Code review", "1d")),
-    add(manual("dev.rework", "dev", "Address feedback", "4h")),
+    // A real retry: the reviewer is not satisfied, so this step FAILS and the loop edge
+    // below is its retry arc. `recover: true` makes the attempt AFTER the budget is spent
+    // the one that works, so three rounds of feedback bounce and the fourth lands.
+    add(manual("dev.rework", "dev", "Address feedback", "4h",
+               { data: { duration: "4h", mode: "manual",
+                         fail: { reason: "changes requested", recover: true } } })),
     add(manual("dev.merge", "dev", "Merge to main", "20m")),
     link("d1", "dev.branch", "dev.code"),
     link("d2", "dev.code", "dev.pr"),
     link("d3", "dev.pr", "dev.review"),
     link("d4", "dev.review", "dev.rework"),
     link("d5", "dev.rework", "dev.merge"),
-    // The retry loop: iteration 1 flies the arc, 2..n tick in place on the review node.
-    link("rework", "dev.rework", "dev.review", { loop: true, maxIterations: 4 }),
+    // The retry loop. `onFail: true` makes it the failing step's retry arc: its
+    // maxIterations (capped to 3 by RUN_OPTS.iterations) IS the retry budget. Iteration 1
+    // flies the arc back to review, 2..n tick in place on the review node with the
+    // iteration badge; each bounce emits its own non-terminal `fail`.
+    link("rework", "dev.rework", "dev.review", { loop: true, maxIterations: 4, onFail: true }),
     { op: "addNode", args: [phase("build", "Build & sign")] },
     link("d6", "dev.merge", "build"),
   ];
@@ -314,18 +342,24 @@
    *  priced through P(); the automation act deliberately is NOT — its beats are tuned to
    *  the condense choreography's own fixed 900ms and read correctly as they are, so it
    *  uses the exact `camAt`/`holdAt` spellings instead. */
-  var PACE = 1.5;
+  var PACE = AUTO ? 0.45 : 1.5;
   var P = function (ms) { return Math.round(ms * PACE); };
+  /** The act-3 beats are cut against fixed choreography, so they are not on the PACE dial;
+   *  headless still trims them, since nobody is watching. */
+  var X = function (ms) { return AUTO ? Math.min(ms, 380) : ms; };
 
   function cap(text, o) { return o ? { op: "caption", args: [text, o] } : { op: "caption", args: [text] }; }
-  function camAt(target) { return { op: "camera", args: [target] }; }        // exact ms
+  function camAt(target) {                                                   // exact ms
+    if (target.dur != null) target.dur = X(target.dur);
+    return { op: "camera", args: [target] };
+  }
   function cam(target) {                                                     // × PACE
     var t = {};
     for (var k in target) t[k] = target[k];
     t.dur = P(target.dur == null ? 600 : target.dur);
     return camAt(t);
   }
-  function holdAt(ms) { return { op: "wait", ms: ms }; }                     // exact ms
+  function holdAt(ms) { return { op: "wait", ms: X(ms) }; }                  // exact ms
   function hold(ms) { return holdAt(P(ms)); }                                // × PACE
   function grow(steps, ms) { return { op: "batch", steps: steps, dur: P(ms) }; }
   function spot(ids, variant, dim) {
@@ -348,7 +382,9 @@
     hold(800),
 
     cap("Development — branch, implement, open a PR, review, merge."),
-    cam({ node: "dev", k: 0.8, pad: 40, dur: 900 }),
+    // Development is the widest phase, so it is framed as a FIT (no `k`): the camera now
+    // subtracts the transport and total bars for itself, so the whole row is in shot.
+    cam({ node: "dev", pad: 40, dur: 900 }),
     grow(WAVE_DEV, 1000),
     hold(900),
 
@@ -388,11 +424,11 @@
     { op: "run.play", until: "plan.commit" },
 
     cap("Development. Three days of writing code is the honest part of this pipeline."),
-    cam({ node: "dev", k: 0.8, pad: 40, dur: 800 }),
+    cam({ node: "dev", pad: 40, dur: 800 }),
     { op: "run.play", until: "dev.pr" },
 
     spot(["dev.review", "dev.rework"], "warn"),
-    cap("Review round-trips on the dashed loop edge — capped at 3 of a possible 4."),
+    cap("Review bounces: “changes requested” three times on the dashed retry arc, then it passes."),
     { op: "run.play", until: "dev.merge" },
     { op: "clearHighlight" },
 
@@ -456,7 +492,7 @@
     hold(900),
     { op: "run.play", until: "plan.commit" },
 
-    cam({ node: "dev", k: 0.8, pad: 40, dur: 800 }),
+    cam({ node: "dev", pad: 40, dur: 800 }),
     { op: "run.play", until: "dev.merge" },
 
     // The shared prefix is deliberately just as slow: writing the code still takes three
@@ -497,7 +533,10 @@
   // ===========================================================================
 
   var RUN_OPTS = {
-    iterations: { rework: 3 },      // 3 of the edge's max 4
+    iterations: { rework: 3 },      // 3 attempts of the retry arc's max 4
+    // Pure playback multiplier (it does not touch the compiled/declared timeline, so the
+    // run-clock tile and the total bar keep reporting the work, not the viewing speed).
+    playbackSpeed: AUTO ? 2.4 : 1,
     hopMs: P(150),
     rates: [
       { t: 0, scope: "qa.android", factor: 1.7 },   // one regression branch sprints,
@@ -534,18 +573,20 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      // The library's own story convention: play by ourselves only when the URL says so
+      // (`?auto=1`), and settle `g.finished` when the script runs out of steps.
+      autoplay: "auto",
     });
+    window.smv = g;   // what check-demos looks for when it awaits the story
     g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
-    window.__smvSDLC = { done: true, errors: errors, checks: {} };
+    window.__smvExit = { done: true, errors: errors, checks: {} };
     return;
   }
 
   var sb = g.storyboard();
-  window.__sdlc = { g: g, sb: sb, steps: STEPS };   // handle for the headless check
 
   // ---- chapter rail ---------------------------------------------------------
   var LABELS = sb.labels();
@@ -696,25 +737,47 @@
   };
   var FAN = { "qa.ios": 1, "qa.android": 1, "qa.tv": 1, q1: 1, q2: 1, q3: 1 };
 
+  // Run events are mirrored onto the graph instance as `run:<type>`, so this listener is
+  // independent of the run handle and outlives any recompile.
+  obs.reviewAttempts = 0;
+  g.on("run:fail", function (ev) {
+    if (!ev || ev.nodeId !== "dev.rework") return;
+    obs.reviewAttempts = Math.max(obs.reviewAttempts, ev.attempt || 0);
+    obs.reviewReason = ev.reason || null;
+    obs.reviewTerminal = !!ev.terminal;
+  });
+
+  /** The bottom edge a token may actually be seen at: the pane, minus whatever chrome the
+   *  library mounted over it (the transport bar and the preset's total-duration bar). This
+   *  is the same chrome `fitView()` / `camera({fit})` now subtract for themselves, measured
+   *  here only because the page is grading its own camera work. */
+  function visibleBottom(paneRect) {
+    var bars = document.querySelectorAll("#pipe .smv-transport, #pipe .smv-totalbar");
+    var bottom = paneRect.bottom;
+    for (var i = 0; i < bars.length; i++) {
+      var r = bars[i].getBoundingClientRect();
+      if (r.height > 0 && r.top > paneRect.top) bottom = Math.min(bottom, r.top);
+    }
+    return bottom;
+  }
+
   /** How far outside the visible pane the worst currently-active STEP is, in px (0 = all
    *  in frame). Containers are excluded on purpose: a phase box is legitimately allowed to
-   *  be wider than the shot; the steps lighting up inside it are not. The transport bar
-   *  owns the bottom 34px of the pane, so that strip does not count as visible. */
-  var TRANSPORT_H = 34;
+   *  be wider than the shot; the steps lighting up inside it are not. */
   function activeOverflowPx() {
     var pane = document.querySelector("#pipe");
     if (!pane || typeof pane.getBoundingClientRect !== "function") return 0;
     var p = pane.getBoundingClientRect();
-    var worst = 0;
+    var bottom = visibleBottom(p);
+    var worst = 0, worstId = null;
     var list = document.querySelectorAll('#pipe .smv-node[data-run="active"]:not([data-container])');
     for (var i = 0; i < list.length; i++) {
       var r = list[i].getBoundingClientRect();
       if (!r.width && !r.height) continue;                 // culled, or not yet laid out
-      worst = Math.max(worst,
-        p.left - r.left, r.right - p.right,
-        p.top - r.top, r.bottom - (p.bottom - TRANSPORT_H));
+      var out = Math.max(p.left - r.left, r.right - p.right, p.top - r.top, r.bottom - bottom);
+      if (out > worst) { worst = out; worstId = list[i].getAttribute("data-id"); }
     }
-    return Math.max(0, Math.round(worst));
+    return { px: Math.max(0, Math.round(worst)), id: worstId };
   }
 
   var totalLabel = function () {
@@ -803,18 +866,19 @@
     // an "overflow" that no viewer ever sees a token in.
     if (run.playing) {
       var chapter = sb.position().label || "—";
-      var over = activeOverflowPx();
+      var o = activeOverflowPx(), over = o.px;
       if (over > (obs.overflow[chapter] || 0)) obs.overflow[chapter] = over;
       else if (obs.overflow[chapter] === undefined) obs.overflow[chapter] = 0;
       if (over > obs.worstOverflow || obs.worstOverflow === undefined) {
         obs.worstOverflow = over;
         obs.worstOverflowAt = chapter;
+        obs.worstOverflowId = o.id;
       }
     }
 
     mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
     mTokens.textContent = String(st.tokens.length);
-    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/4";
+    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/3";
     mJoin.textContent = shown
       ? shown.name + " " + shown.j.arrived + "/" + shown.j.needed + (shown.j.fired ? " ✓" : "")
       : "—";
@@ -830,7 +894,6 @@
 
   var AT_SIGN = indexOfLabel("automate");
   var checks = {};
-  var storyDone = false;
 
   sb.on("step", function (ev) {
     paintRail();
@@ -854,25 +917,14 @@
     else paintRail();
   });
   sb.on("done", function () {
-    storyDone = true;
     paintRail();
     phaseEl.textContent = "story complete";
     tTotal.setAttribute("data-hot", "");
   });
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 60000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 40);
-      })();
-    });
-  }
 
-  var started = false;
+  var started = AUTO;   // `autoplay: "auto"` already started the story under ?auto=1
   function start() {
     if (started) return;
     started = true;
@@ -890,12 +942,15 @@
       "branch progress spread      " + JSON.stringify(checks.branchProgress) + "\n" +
       "all-join fired at           " + checks.joinArrivedAtFire + "/" + checks.joinNeeded + "\n" +
       "review loop                 " + checks.loopIteration + " of max " + checks.loopMax + "  (" + checks.loopBadge + ")\n" +
+      "review bounces               " + checks.reviewAttempts + " × “" + checks.reviewReason + "”"
+        + " (terminal " + checks.reviewTerminal + ")\n" +
       "condense · signing          " + JSON.stringify(checks["build.signer"]) + "\n" +
       "condense · regression       " + JSON.stringify(checks["qa.suite"]) + "\n" +
       "condense · delivery         " + JSON.stringify(checks["rel.progressive"]) + "\n" +
       "total-duration bar          " + JSON.stringify(checks.totalSeen) + "\n" +
       "active step off-screen px   " + JSON.stringify(checks.overflow) +
-        " (worst " + checks.worstOverflow + "px in “" + checks.worstOverflowAt + "”)\n" +
+        " (worst " + checks.worstOverflow + "px on " + checks.worstOverflowId +
+        " in “" + checks.worstOverflowAt + "”)\n" +
       "scrub back to “automate”    " + JSON.stringify(checks.scrubBack) + "\n" +
       "scrub forward to the end    " + JSON.stringify(checks.scrubForward) + "\n" +
       "NaN in DOM                  " + (checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
@@ -906,10 +961,10 @@
    *  condense, then forward to the end again — every structural change replays from
    *  snapshots (G2). */
   async function auto() {
-    await sleep(300);              // mount's initial fit gets one beat
-    start();
-    await waitFor(function () { return storyDone; }, 180000);
-    await sleep(600);
+    // `autoplay: "auto"` is already playing the story; `g.finished` settles when the
+    // script runs out of steps — no page-rolled "is it over yet" polling.
+    await g.finished;
+    await sleep(400);
 
     Object.assign(checks, {
       fanOutTokens: obs.fanOutTokens,
@@ -920,15 +975,19 @@
       loopIteration: obs.loopIteration,
       loopMax: obs.loopMax,
       loopBadge: obs.loopBadge || loopBadgeText(),
+      reviewAttempts: obs.reviewAttempts,
+      reviewReason: obs.reviewReason || null,
+      reviewTerminal: !!obs.reviewTerminal,
       totalSeen: obs.totalSeen,
       overflow: obs.overflow,
       worstOverflow: obs.worstOverflow || 0,
       worstOverflowAt: obs.worstOverflowAt || null,
+      worstOverflowId: obs.worstOverflowId || null,
     });
 
     phaseEl.textContent = "scrubbing back to “automate”…";
     await sb.seek("automate");
-    await sleep(1100);
+    await sleep(AUTO ? 500 : 1100);
     var MERGED = [SIGN_AUTO.id, REG_AUTO.id, SHIP_AUTO.id];
     var MANUAL = SIGN_SET.concat(REG_SET, SHIP_SET);
     checks.scrubBack = {
@@ -943,7 +1002,7 @@
 
     phaseEl.textContent = "scrubbing forward to the end…";
     await sb.seek(STEPS.length);
-    await sleep(1200);
+    await sleep(AUTO ? 500 : 1200);
     checks.scrubForward = {
       index: sb.position().index,
       done: sb.position().done,
@@ -957,16 +1016,18 @@
     checks.nan = scanNaN();
     writeReport();
     phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
-    window.__smvSDLC = { done: true, errors: errors, checks: checks, atSign: AT_SIGN };
+    window.__smvExit = { done: true, errors: errors, checks: checks, atSign: AT_SIGN };
   }
 
   paintRail();
   if (AUTO) {
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
     auto().catch(function (err) {
       errors.push("auto: " + String((err && err.message) || err));
       checks.nan = checks.nan || scanNaN();
       writeReport();
-      window.__smvSDLC = { done: true, errors: errors, checks: checks };
+      window.__smvExit = { done: true, errors: errors, checks: checks };
     });
   }
 })();
