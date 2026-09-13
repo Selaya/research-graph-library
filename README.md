@@ -154,7 +154,7 @@ g.expand(id)   g.collapse(id)   g.expandAll()   g.collapseAll()
 g.condense([ids], newNode)   g.split(id, { nodes, edges })
 g.run(opts)    g.storyboard(steps)   g.timeline()
 g.camera(target)   g.highlight(sel)   g.clearHighlight()   g.caption(text, o)   g.cues()
-g.props({ id: { "--smv-fill": "#7c5cff" } })   // per-step overrides; null clears
+g.props({ id: { "--smv-fill": "#7c5cff" } }, { merge })   // overrides; null clears
 g.layout(opts) g.fitView()   g.bounds()  g.layoutResult()  g.spec()  g.destroy()
 g.on(type, fn) / g.off(type, fn)
 ```
@@ -233,10 +233,13 @@ drive the presentation, not just the graph:
 ```js
 await g.camera({ node: "clean", k: 1.8, pad: 60, dur: 700 });   // also {nodes:[…]},
 g.camera({ fit: true });     g.camera({ zoom: 1.6 });           // {x,y,k}, {by:{dx,dy}}
+g.camera({ nodes: ["a", "b"], maxK: 2 });   // fit lid, 1.5 by default for a union
+g.camera({ fit: true, inset: { bottom: 80 } });   // pane chrome to stay clear of
 g.highlight({ nodes: ["a"], edges: ["e1"], variant: "focus", dim: true });  // spotlight
 g.highlight({ nodes: ["a"], variant: "warn", pulse: true });     // + an attention beat
 g.clearHighlight();
 g.props({ clean: { "--smv-fill": "#7c5cff" } });   g.props(null);  // override layer
+g.props({ clean: { "--smv-fill": "#f50" } }, { merge: true });   // …or patch it
 g.caption("Three manual steps become one.", { place: "bottom" });  g.caption(null);
 g.cues();   // every label + caption with its absolute ms offset — the voice-over sheet
 ```
@@ -254,9 +257,15 @@ best with whatever it could resolve.
 
 Camera moves ride the shared clock and cancel-and-retarget like everything else; the
 first one in a script takes the viewport (auto-refit stops, the camera joins the scrub
-snapshots). A highlight *is* the emphasis state (replace, not accumulate) and survives
+snapshots). Every fit — `g.fitView()`, `camera({fit})`, `camera({node|nodes})` — frames
+inside the pane *minus the chrome the library mounted over it* (transport bar, the preset's
+total-duration bar, the caption strip), so the last rank never lands underneath them; pass
+`inset: {top,right,bottom,left}` for chrome of your own, or `inset: 0` to opt out. Targeting
+a node inside a collapsed container aims at the ancestor drawn in its place instead of
+warning. A highlight *is* the emphasis state (replace, not accumulate) and survives
 relayouts and backward scrubs — and so does the `props` override layer, which sits over
-your `style()` function on the same `--smv-*` channel. `pulse: true` breathes the
+your `style()` function on the same `--smv-*` channel (`g.props(patch, { merge: true })`
+patches that layer instead of replacing it). `pulse: true` breathes the
 emphasis off the shared ticker (never a CSS animation, so it records frame-perfectly;
 reduced motion holds it still). Every storyboard step takes an optional `dur` (ms) —
 per-step pacing for any op, and the number the scrubber, `g.cues()` and the coming

@@ -40,6 +40,16 @@ until playback reached it and threw a bare `TypeError` instead of the library's 
 
 - `node` frames one node's box; `nodes` the union box; `fit:true` the whole graph.
   `pad` (default 24) pads the framing; `k` on a box target is an explicit scale instead.
+  A `nodes` union is fitted at `maxK: 1.5` unless the target says otherwise, so two nodes
+  in a short pane read as "look at these two" rather than an extreme close-up.
+- A framed box is fitted and centred inside the pane **minus the chrome the library itself
+  mounted** over it — the transport bar, the preset's total-duration bar, the caption
+  strip. `inset: {top,right,bottom,left}` (or a bare number) replaces that measurement with
+  your own; `inset: 0` opts out. No more hand-tuned `by:{dy:-40}` nudge after every fit.
+- A `node`/`nodes` id that is currently inside a **collapsed** container resolves to the
+  nearest drawn ancestor — the box the viewer can actually see. Only an id that resolves
+  to nothing drawn warns (`[smv:camera]`), so a script no longer has to filter its ids
+  through `g.layoutResult()` before every shot. `highlight` resolves ids the same way.
 - `x`/`y`/`k` is an absolute transform (screen px + scale).
 - `zoom` (or a bare `k`) scales about the pane centre — "lean in on this", not on the
   world origin. `by:{dx,dy}` is a screen-px pan, applied after any zoom.
@@ -73,6 +83,7 @@ Under `prefers-reduced-motion` it holds still at full strength instead of disapp
 
 ```json
 { "op": "props", "args": [{ "clean": { "--smv-fill": "#7c5cff" }, "e1": { "--smv-stroke": "#f5a" } }] }
+{ "op": "props", "args": [{ "e1": { "--smv-stroke": null } }, { "merge": true }] }
 { "op": "props", "args": [null] }
 ```
 
@@ -83,6 +94,13 @@ layer), and state like it too: snapshotted, restored by a backward scrub, and re
 a node that leaves and comes back. `args:[null]` clears the layer and the styled picture
 returns — clearing an override does not strip what `style()` was already setting. Only
 `--smv-*` keys are accepted (D7); anything else throws.
+
+A second argument, `{"merge": true}`, makes the call a **patch** instead: ids the patch
+does not name keep their overrides, named ids merge key by key, a `null` value drops one
+key and a `null` entry drops one id. That is what an event handler recolouring a single
+node wants — no re-sending every other node's colour to keep it. `args:[null]` still clears
+the whole layer. Status colour (`done`/`failed`) now composes with whatever colour you set
+rather than being hidden by it — see docs/THEMING.md.
 
 **`caption`** — one narration overlay (`role="status"`, bottom-centred).
 

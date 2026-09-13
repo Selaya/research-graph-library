@@ -859,9 +859,9 @@ Same `internals`-taking contract as condense-anim.js: no renderer import, no glo
 document, runs against a fake host in tests.
 
 ```js
-resolveCameraTarget(opts, layoutResult, size, current) → {x, y, k}   // PURE
+resolveCameraTarget(opts, layoutResult, size, current, resolveId?) → {x, y, k}   // PURE
 createDirector(internals) → d
-  internals = { root, lastLayout(), emphasize(id, value), dim(id, value), captions }
+  internals = { root, lastLayout(), emphasize(id, value), dim(id, value), captions, resolveId }
 d.highlight(sel), d.clearHighlight(), d.caption(text, opts) , d.captionText()
 d.reassert()                       // apply(force): rewrite every data-emph/data-dim
 d.snapshot() → {emphasis, caption} / d.restore(snap), d.destroy()
@@ -879,6 +879,16 @@ d.snapshot() → {emphasis, caption} / d.restore(snap), d.destroy()
   `setTo` clamps `k` but copies x/y verbatim, so an unclamped fit would centre the shot at
   a scale the viewport never applies and land it off-screen by the clamp ratio. FIT_MAX_K
   is structurally absent from the camera path.
+- **M5 (F15/F16/F17).** A box target is fitted and centred in `paneBox(size, pad, inset)`
+  (viewport.js, shared with `fit()`): `opts.inset ?? size.inset`, so index.js can pass the
+  MEASURED chrome through `size` while a target's own `inset` still wins (`0` opts out).
+  `maxK` lids a FITTED `k` only — an explicit `k` is a scale request — and index.js
+  supplies `maxK: 1.5` for a `nodes[]` union (`NODES_MAX_K`), which is why the pure
+  function itself stays unopinionated. `resolveId(id)` maps an id the layout did not draw
+  to the ancestor standing in for it (index.js passes `vs.visibleAncestor`); only an id
+  that resolves to nothing drawn still warns. `highlight()` resolves `sel.nodes` the same
+  way through `internals.resolveId` — edges are left alone (a hidden edge is a meta-edge,
+  a different id, not an ancestor).
 - Emphasis: `Map<id, variant>` + dim `Set`, replace-not-accumulate (D14). `apply()` diffs
   desired vs a `written` shadow (Map + Set) and writes only what differs;
   `apply(force)` clears the shadow first — that is `reassert()`, for elements the
@@ -892,7 +902,10 @@ d.snapshot() → {emphasis, caption} / d.restore(snap), d.destroy()
 ## `src/viewport.js` additions
 
 ```js
-vp.fit(bounds, {pad=24, duration=0, ease, maxK=FIT_MAX_K}) → Promise<{canceled}>
+vp.fit(bounds, {pad=24, duration=0, ease, maxK=FIT_MAX_K, inset}) → Promise<{canceled}>
+paneInsets(root, svgEl) → {top,right,bottom,left}     // PURE-ish: reads client rects only
+paneBox(size, pad, inset) → {cx, cy, w, h}            // PURE
+normInset(number | {top,right,bottom,left}) → {top,right,bottom,left}
 vp.fit(bounds, pad, animate)              // M0 spelling still works (object-vs-scalar sniff)
 vp.moveTo({x?,y?,k?}, {duration=0, ease}={}) → { promise, cancel }
 vp.setInteractive(bool)                   // attach/detach ALL pointer+wheel listeners
@@ -908,12 +921,24 @@ vp.target                                 // getter: where a live tween is headi
 - `tick()` uses the tween's own `ease` (default still cubicOut). `fit`'s `maxK` overrides
   the FIT_MAX_K=1.5 auto-fit lid (`MAX_K`/`FIT_MAX_K` now exported). No
   `prefersReducedMotion()` in this file — index.js owns `reduced` and passes the duration.
+- **M5 (F15).** `paneInsets()` measures the chrome the library itself mounts over the pane
+  (`.smv-transport`, `.smv-totalbar`, `.smv-caption`): each BAR is assigned to the pane edge
+  it hugs (wide → nearer of top/bottom, tall → left/right), deepest intrusion per side wins,
+  anything covering half the pane is a host panel and is ignored, every side capped at 40%.
+  All zeros without `getBoundingClientRect`, so every fake-DOM test fits as before. `fit()`
+  and `resolveCameraTarget()` both frame through `paneBox()`, so they agree by construction.
 
 ## `src/render.js` + `src/styles.js` + `src/storyboard.js`
 
 - `r.emphasize(id, value)` / `r.dim(id, value)` — lookup in nodeEls then edgeEls, write
   `data-emph` / `data-dim` on the group. NOT folded into `mark()`: `data-condense` is the
   condense choreography's channel and a highlight outliving a merge must not fight it.
+- CSS (M5/F18): status colour also writes `--smv-status-fill`, a `color-mix` of its token
+  over whatever `--smv-fill` resolved to, and the box paints
+  `var(--smv-status-fill, var(--smv-fill))`. Because the status rules also set `--smv-fill`,
+  an un-overridden node mixes a colour with itself (no visual change); an inline props/style
+  fill composes with the tint instead of hiding it. Guarded by `@supports color-mix` so an
+  old viewer keeps the plain fill.
 - CSS: `[data-emph]` variants (focus/warn/ok/mute) via a `--smv-emph` indirection over the
   existing color vars; `.smv-node[data-dim],.smv-edge[data-dim]{opacity:.28}` (scoped, so
   it can't leak onto host markup — the opacity property beats the per-frame presentation
@@ -935,6 +960,12 @@ vp.target                                 // getter: where a live tween is headi
   Deliberately not routed through `viewport.fit()` — see the FIT_MAX_K note above.
 - `g.highlight(sel)` / `g.clearHighlight()` / `g.caption(text, o?)` — thin delegates to
   the director; return `g`.
+- **M5 (F15/F17/F18):** `chromeInset()` = `paneInsets(root, renderer.svg)`, read by
+  `fitView`, `camera` and relayout's auto-refit (and the one mount-time fit, which now runs
+  AFTER the transport mounts so there is chrome to measure). `g.camera` injects
+  `maxK: NODES_MAX_K` for a `nodes[]` target that names none, and passes
+  `vs.visibleAncestor` as the resolver. `g.props(map, opts)` forwards `{merge:true}` to the
+  director, which patches the override map instead of replacing it.
 - `g.cues() → [{kind:"label"|"caption", at, label?, text?, index}]` — absolute ms offsets
   off the same `durOf()` table the scrubber reads (D12); truthful under `captions:false`.
 - **`durOf(step)`** replaces NOMINAL_STEP_MS: `step.dur` wins; else label 0, wait its ms,

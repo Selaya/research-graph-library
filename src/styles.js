@@ -221,6 +221,17 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-root.smv-has-transport .smv-caption{bottom:46px}
 .smv-root.smv-has-transport .smv-caption[data-place="top"]{bottom:auto}
 
+/* F18 — status composes OVER the role colour instead of losing to it (props/style write
+   --smv-fill inline, outranking the rules above). No override = a colour mixed with itself,
+   so the default is unchanged; --smv-status-mix (100% = "status wins") tunes it. THEMING.md.
+   @supports-guarded: a viewer without color-mix keeps painting --smv-fill. */
+@supports (color:color-mix(in srgb,red 50%,blue)){
+.smv-node rect.smv-node-box{fill:var(--smv-status-fill,var(--smv-fill))}
+.smv-node[data-status="done"],.smv-node[data-run="done"]{--smv-status-fill:color-mix(in srgb,var(--smv-ok) var(--smv-status-mix,70%),var(--smv-fill))}
+.smv-node[data-status="active"],.smv-node[data-run="active"]{--smv-status-fill:color-mix(in srgb,var(--smv-active) var(--smv-status-mix,70%),var(--smv-fill))}
+.smv-node[data-run="failed"]{--smv-status-fill:color-mix(in srgb,var(--smv-fail) var(--smv-status-mix,70%),var(--smv-fill))}
+}
+
 /* D15 — record mode: the affordance transitions above run on the wall clock, so two
    captures of one frame would differ. Kill every one of them. */
 [data-smv-record] *,[data-smv-record] *::before,[data-smv-record] *::after{
