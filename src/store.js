@@ -232,7 +232,7 @@ export class Store {
       if (sIn && tIn) continue; // internal edge disappears
       const src = sIn ? newNode.id : e.source;
       const tgt = tIn ? newNode.id : e.target;
-      const key = `${src} ${tgt}`;
+      const key = `${src}\0${tgt}`;
       const prev = redirected.get(key);
       if (prev) prev.weight += e.weight || 1;
       else redirected.set(key, { proto: e, src, tgt, weight: e.weight || 1 });
