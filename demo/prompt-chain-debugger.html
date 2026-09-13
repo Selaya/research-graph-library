@@ -118,8 +118,9 @@
     <em>safety filter</em> and <em>respond</em>. The trace is fed in as it happens with
     <code>g.run({mode:"live"})</code> — <code>start</code> / <code>finish</code> /
     <code>spawn</code> / <code>fail</code> — and every step carries the payload a debugger
-    would want: prompt, model, tokens in/out, latency. The safety filter <b>blocks</b> the
-    first draft, so the chain takes its bounded retry edge back to <em>compose answer</em>.
+    would want: prompt, model, tokens in/out, latency. The first draft runs <b>over its
+    declared budget</b> and the safety filter then <b>blocks</b> it, so the chain takes its
+    bounded retry edge back to <em>compose answer</em>.
   </p>
 </header>
 
@@ -157,24 +158,35 @@
   <li><b>Runtime fan-out:</b> <em>retrieve docs</em> gets <code>run.spawn(id, 3)</code> on
     top of its own token — the <code>×4</code> occupancy badge is four chunk reads sharing
     one node.</li>
-  <li><b>join:"all":</b> <em>compose answer</em> has two non-loop in-edges, so it waits for
-    both branches; the join tile counts arrivals, and all five context tokens (4 chunks +
-    the profile) sit on the node before it starts.</li>
+  <li><b>join:"all":</b> live mode honours <code>join</code>, so <em>compose answer</em>'s two
+    non-loop in-edges really gate it: arrivals are <em>held</em> on the node (the pips fill,
+    <code>state().nodes.compose.waiting</code> counts them) and each group of two is released
+    as <b>one</b> unit of work — five context tokens (4 chunks + the profile) do not become
+    five drafts downstream.</li>
+  <li><b>Over budget:</b> each node's chip is its declared <code>data.duration</code>, which
+    in live mode is an <em>expectation</em>, not a schedule. The first draft outruns its
+    1.2&nbsp;s budget, so <code>state().nodes.compose.overBudget</code> flips and the
+    renderer marks the node <code>data-over-budget</code> — the dashed boundary. The retry
+    comes in under budget and the mark clears.</li>
   <li><b>The block:</b> <code>run.fail("safety", {reason})</code> is
     <code>finish()</code>'s terminal sibling — it consumes <em>every</em> occupant and fans
     nothing out, so <em>respond</em> stays dark. Watch the node turn red and the caption
     name the rule.</li>
   <li><b>The retry:</b> the dashed arc back to <em>compose answer</em> is
-    <code>loop:true, maxIterations:2</code>. Restarting the failed branch with an explicit
-    <code>start()</code> is what ticks it — the badge reads <code>1/2</code>.</li>
+    <code>loop:true, maxIterations:2</code>. Restarting the finished branch with
+    <code>start("compose", {spawn:true})</code> — the explicit "yes, mint a token here"
+    form — is what ticks it; the badge reads <code>1/2</code>.</li>
   <li><b>Time travel:</b> once the trace ends, clicking a node scrubs the live run back to
     that step (<code>run.seek</code>) and shows its payload; <b>Back to live</b> is
-    <code>run.follow()</code>. The transport bar under the graph scrubs the same log.</li>
+    <code>run.follow()</code>. Clicks arrive on <code>g.on("nodeclick")</code>, so a pan
+    never reads as a tap and Enter on a focused node inspects it too. The transport bar
+    under the graph scrubs the same log.</li>
 </ul>
 
 <p class="legend">
-  Chips under each node are <code>data.duration</code> — the latency that step actually
-  took. Dashed pips are live occupancy; the highlighted node is
+  Chips on each node are <code>data.duration</code> — the budget that step is allowed; the
+  real latency it reported is in the inspector. Dashed pips are live occupancy; the
+  highlighted node is
   <code>g.highlight({variant:"focus", dim:true})</code>, the spotlight the inspector is
   pointed at.
 </p>
@@ -200,28 +212,35 @@
   var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
 
   // ---------------------------------------------------------------------------
-  // The chain. Durations are the real per-step latencies the trace reports, so the
-  // pipeline preset's chips double as the latency readout.
+  // The chain. In live mode a declared duration is an expectation, not a schedule
+  // (docs/LIVE.md, "Durations are expectations"): it paces the progress fill, the preset
+  // draws it as the node's chip, and a dwell that outruns it sets state().nodes[id]
+  // .overBudget -> the data-over-budget dashed boundary. So these are the step's BUDGET;
+  // the latency the trace actually reported rides on the payload below.
   // ---------------------------------------------------------------------------
   var SPEC = {
     nodes: [
-      { id: "classify", label: "Classify intent", data: { duration: "0.31s" } },
-      { id: "retrieve", label: "Retrieve docs", data: { duration: "0.48s" } },
-      { id: "profile", label: "Load user profile", data: { duration: "0.09s" } },
-      { id: "compose", label: "Compose answer", join: "all", data: { duration: "2.4s" } },
-      { id: "safety", label: "Safety filter", data: { duration: "0.22s" } },
-      { id: "respond", label: "Respond", data: { duration: "0.35s" } },
+      { id: "classify", label: "Classify intent", data: { duration: "1.1s" } },
+      { id: "retrieve", label: "Retrieve docs", data: { duration: "1.5s" } },
+      { id: "profile", label: "Load user profile", data: { duration: "0.95s" } },
+      { id: "compose", label: "Compose answer", join: "all", data: { duration: "1.2s" } },
+      { id: "safety", label: "Safety filter", data: { duration: "1.1s" } },
+      { id: "respond", label: "Respond", data: { duration: "1s" } },
     ],
     edges: [
       { id: "e1", source: "classify", target: "retrieve" },
       { id: "e2", source: "classify", target: "profile" },
-      { id: "e3", source: "retrieve", target: "compose", label: "4 chunks" },
+      { id: "e3", source: "retrieve", target: "compose", label: { text: "4 chunks", pill: true } },
       { id: "e4", source: "profile", target: "compose" },
-      { id: "e5", source: "compose", target: "safety", label: "draft" },
+      { id: "e5", source: "compose", target: "safety", label: { text: "draft", pill: true } },
       { id: "e6", source: "safety", target: "respond" },
       // The retry edge. loop:true MUST carry maxIterations > 0 or addEdge throws
-      // [smv:unbounded-loop] at mount time.
-      { id: "retry", source: "safety", target: "compose", loop: true, maxIterations: 2 },
+      // [smv:unbounded-loop] at mount time. The label is an object, so it is upright,
+      // sits on a pill, and gets the preset's raised truncation cap instead of 90px.
+      {
+        id: "retry", source: "safety", target: "compose", loop: true, maxIterations: 2,
+        label: { text: "retry · drop chunk #3", pill: true, place: "start" },
+      },
     ],
   };
 
@@ -262,8 +281,9 @@
       },
     },
     {
-      node: "compose", title: "Compose answer", dwell: 1320, result: "ok",
-      caption: "4 · compose answer — join:\"all\" held it until both branches arrived (5 tokens).",
+      node: "compose", title: "Compose answer", dwell: 1400, result: "ok",
+      caption: "4 · compose answer — join:\"all\" held the arrivals until both branches landed, "
+        + "then released them; the draft runs past its 1.2s budget (dashed boundary).",
       pay: {
         kind: "model", who: "claude-sonnet-4.5", tin: 4318, tout: 402, ms: 2400,
         rows: [["context", "4 chunks + profile"], ["temperature", "0.3"], ["stream", "on"]],
@@ -285,9 +305,10 @@
       },
     },
     {
-      node: "compose", title: "Compose answer · retry 1/2", dwell: 1180, result: "ok",
-      edges: ["retry"],
-      caption: "6 · the loop edge ticks 1/2 — compose re-runs with chunk #3 struck out.",
+      node: "compose", title: "Compose answer · retry 1/2", dwell: 1000, result: "ok",
+      edges: ["retry"], restart: true,
+      caption: "6 · start(\"compose\", {spawn:true}) ticks the loop edge 1/2 — compose re-runs "
+        + "with chunk #3 struck out, and comes in under budget.",
       pay: {
         kind: "model", who: "claude-sonnet-4.5", tin: 4102, tout: 318, ms: 1900,
         rows: [["context", "3 chunks + profile"], ["dropped", "#3 internal"], ["attempt", "2 of 2"]],
@@ -345,6 +366,7 @@
     });
     // Mode B: no compiled schedule at all — the graph animates off the log below.
     run = g.run({ mode: "live", hopMs: HOP });
+    window.smv = g;   // the documented handle: `g.finished` resolves when the trace ends.
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -357,7 +379,7 @@
   var busy = false;
   var storyDone = false;
   var totals = { tin: 0, tout: 0, ms: 0 };
-  var observed = { failReason: null, loopAt: 0, spawnOcc: 0 };
+  var observed = { failReason: null, loopAt: 0, spawnOcc: 0, spawnSplit: "—", overBudget: [] };
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function fmtS(ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; }
@@ -416,11 +438,15 @@
       g.camera({ node: "safety", k: 1.5, pad: 70, dur: 520 });
     }
 
-    s.at = run.start(s.node);           // the stamped time — what a later seek() aims at
+    // `spawn: true` on a restart says "yes, mint a token here" out loud: the retry has no
+    // arrival waiting on it, and that is exactly what the live guard asks a page to declare.
+    s.at = run.start(s.node, s.restart ? { spawn: true } : undefined);
     if (s.spawn) {
       await sleep(200);
       run.spawn(s.node, s.spawn);       // runtime fan-out: the ×4 occupancy badge
-      observed.spawnOcc = Math.max(observed.spawnOcc, run.state().nodes[s.node].occupancy);
+      var occ = run.state().nodes[s.node];
+      observed.spawnOcc = Math.max(observed.spawnOcc, occ.occupancy);
+      observed.spawnSplit = occ.active + " active + " + occ.waiting + " waiting";
     }
     await sleep(s.dwell);
 
@@ -454,6 +480,9 @@
     g.camera({ fit: true, pad: 34, dur: 460 });
     phaseEl.textContent = "trace complete — click a node to time-travel";
     writeReport();
+    // The documented end-of-story signal for a hand-driven live page: `g.finished`
+    // resolves, and the bus emits `finish`. Idempotent, so the auto pass can call it again.
+    g.finish("trace");
   }
 
   // ---------------------------------------------------------------------------
@@ -492,36 +521,10 @@
     }
   }
 
-  // The viewport takes pointer capture on pointerdown, so every later event in the gesture
-  // (the click included) is retargeted to the <svg> — the node under the cursor has to be
-  // resolved at pointerdown, exactly like the library's own tap-to-toggle does.
-  var pipeEl = $("#pipe");
-  var tapDown = null;
-
-  function nodeIdFrom(target) {
-    var el = target && target.closest ? target.closest(".smv-node") : null;
-    return el ? el.getAttribute("data-id") : null;
-  }
-
-  pipeEl.addEventListener("pointerdown", function (ev) {
-    tapDown = { id: nodeIdFrom(ev.target), x: ev.clientX || 0, y: ev.clientY || 0 };
-  });
-  pipeEl.addEventListener("pointerup", function (ev) {
-    var d = tapDown;
-    tapDown = null;
-    if (!d || !d.id) return;
-    var dx = (ev.clientX || 0) - d.x, dy = (ev.clientY || 0) - d.y;
-    if (dx * dx + dy * dy > 36) return;   // travelled: that was a pan, not a tap
-    inspectNode(d.id);
-  });
-  pipeEl.addEventListener("pointercancel", function () { tapDown = null; });
-
-  // Keyboard parity with the ARIA tree: arrow to a step, Enter to inspect it.
-  pipeEl.addEventListener("keydown", function (ev) {
-    if (ev.key !== "Enter") return;
-    var id = nodeIdFrom(ev.target);
-    if (id) inspectNode(id);
-  });
+  // One event for both pointers and the keyboard: the library resolves the node, suppresses
+  // a tap that travelled (a pan), and publishes the same event for Enter/Space on a focused
+  // node — so the ARIA tree inspects steps too, with no page-side plumbing.
+  g.on("nodeclick", function (ev) { inspectNode(ev.id); });
 
   // ---------------------------------------------------------------------------
   // Per-frame readouts, straight off run.state() (docs/PRESETS.md's "draw off the run").
@@ -545,7 +548,20 @@
     em.textContent = " · " + (blocked ? "blocked" : storyDone ? "complete" : played.length ? "running" : "idle");
     mStep.appendChild(em);
     mStep.className = blocked ? "bad" : storyDone ? "good" : "";
-    mLat.textContent = num(totals.ms) + " ms";
+    // The one verdict a declared duration can make in live mode: the dwell outran it. It
+    // survives the finish that closed it, and a fresh start() on the node clears it (F13).
+    var over = [];
+    for (var id in st.nodes) {
+      if (!st.nodes[id].overBudget) continue;
+      over.push(id);
+      if (observed.overBudget.indexOf(id) < 0) observed.overBudget.push(id);
+    }
+    mLat.textContent = "";
+    mLat.appendChild(document.createTextNode(num(totals.ms) + " ms"));
+    var em3 = document.createElement("em");
+    em3.textContent = over.length ? " · " + over.length + " over budget" : " · in budget";
+    mLat.appendChild(em3);
+    mLat.className = over.length ? "bad" : played.length ? "good" : "";
     mTok.textContent = num(totals.tin) + " / " + num(totals.tout);
     mClock.textContent = "";
     mClock.appendChild(document.createTextNode(fmtS(run.time())));
@@ -591,9 +607,11 @@
   function writeReport() {
     reportEl.textContent =
       "logged events                    " + run.log().length + "\n" +
-      "retrieve occupancy after spawn   ×" + observed.spawnOcc + "\n" +
+      "retrieve occupancy after spawn   ×" + observed.spawnOcc + " (" + observed.spawnSplit + ")\n" +
       "compose join arrivals            " + JSON.stringify(run.state().joins.compose) + "\n" +
       "retry loop iterations            " + observed.loopAt + " of 2\n" +
+      "ran over its declared budget     " + (observed.overBudget.join(", ") || "none") + "\n" +
+      "still over budget at the end     " + (run.state().nodes.compose.overBudget ? "compose" : "none") + "\n" +
       "safety block reason              " + observed.failReason + "\n" +
       "chain latency / tokens           " + totals.ms + " ms · " + totals.tin + " in / " + totals.tout + " out\n" +
       "errors                           " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
@@ -618,6 +636,7 @@
       events: run.log().length,
       spawnOcc: observed.spawnOcc,
       loop: observed.loopAt,
+      overBudget: observed.overBudget.slice(),
       failReason: observed.failReason,
     } };
   }

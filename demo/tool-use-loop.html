@@ -104,7 +104,7 @@
   <p class="lede">
     Think → act (tool call) → observe → back to think, a real bounded loop
     (<code>loop:true, maxIterations:6</code>) — this run rides it three iterations, a different
-    tool each time, then exits to a final answer.
+    tool driving the next thought each time, then exits to a final answer.
   </p>
 </header>
 
@@ -141,7 +141,11 @@
       active tool.</li>
     <li><b>Act</b> is a collapsed container — the story expands it to reveal its three tool
       children (<code>search</code> / <code>read_file</code> / <code>run_tests</code>), each with
-      its own declared duration.</li>
+      its own declared duration. It declares its ports
+      (<code>entry/exit: [search, read_file, run_tests]</code>), so the edge into it fans the
+      token out to <em>all three</em> tools and <b>Observe</b> joins on the whole set.</li>
+    <li>Click any tool node to read its declared duration in the <b>last tool call</b> tile —
+      that is <code>g.on('nodeclick')</code>, not a hand-rolled pointer handler.</li>
     <li>Once the loop's iteration budget for this run is spent, the token leaves via
       <b>Observe</b>'s own out-edge — not the loop edge — to <b>Final answer</b>.</li>
   </ul>
@@ -175,20 +179,20 @@
   var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
 
   // ---------------------------------------------------------------------------
-  // The spec. `act` is a collapsed container; a container is never itself executable
-  // (README §API / docs/RUN.md D5) — with no internal edges among its three children the
-  // engine's own entry/exit resolution picks the first one, `act.search`, for both, so the
-  // token's one real pass through the container dwells there. The other two tools are real,
-  // inspectable nodes (their own declared durations, visible once the story expands the
-  // container) that this run narrates into rather than physically re-visits — exactly how a
-  // bounded loop's post-iteration-1 ticks already work (docs/RUN.md "Bounded retry loops":
-  // only the first arc-cross is a real hop, everything after is a compressed in-place tick).
+  // The spec. `act` is a collapsed container that declares its own ports
+  // (docs/RUN.md "Containers with several ports"): the edge into it attaches to all three
+  // entry children, so every tool really gets a token, and the edge out is fed by all three
+  // exits, so Observe's implicit AND-join waits for the whole tool call.
   // ---------------------------------------------------------------------------
   var SPEC = {
     nodes: [
       { id: "prompt", label: "User prompt", data: { duration: "1s" } },
       { id: "think", label: "Think", data: { duration: "2s" } },
-      { id: "act", label: "Act (tool call)", collapsed: true, durationAgg: "max" },
+      {
+        id: "act", label: "Act (tool call)", collapsed: true, durationAgg: "max",
+        entry: ["act.search", "act.read_file", "act.run_tests"],
+        exit: ["act.search", "act.read_file", "act.run_tests"],
+      },
       { id: "act.search", parent: "act", label: "search", data: { duration: "2.5s" } },
       { id: "act.read_file", parent: "act", label: "read_file", data: { duration: "1.8s" } },
       { id: "act.run_tests", parent: "act", label: "run_tests", data: { duration: "6s" } },
@@ -266,8 +270,9 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto", // plays by itself only when the URL carries ?auto=1
     });
+    window.smv = g; // the documented story-finished convention: await window.smv.finished
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -305,6 +310,15 @@
   }
   run.on("start", function (ev) { if (ev && ev.nodeId === TOOLS[0].id) narrate(); });
   run.on("loop", function (ev) { if (ev && ev.edgeId === LOOP_EDGE) narrate(); });
+
+  // A public click event — no pointerdown bookkeeping of our own (F27).
+  g.on("nodeclick", function (ev) {
+    var node = ev && ev.id ? g.node(ev.id) : null;
+    if (!node || !FRIENDLY[ev.id]) return;
+    var dur = node.data && node.data.duration;
+    mTool.textContent = (FRIENDLY[ev.id] || ev.id) + (dur ? " · " + dur : "");
+    logLine("clicked " + (FRIENDLY[ev.id] || ev.id) + (dur ? " (declared " + dur + ")" : ""));
+  });
 
   function sampleFrame() {
     var r = g.run();
@@ -367,16 +381,6 @@
   }
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
 
   var storyDone = false;
   sb.on("done", function () {
@@ -421,13 +425,11 @@
     issuesEl.textContent = "errors\n" + JSON.stringify(errors, null, 2);
   }
 
-  /** The headless verification path: speed the run up, play through, done. */
+  /** The headless verification path: `autoplay: 'auto'` is already playing; wait it out. */
   async function auto() {
     try {
-      run.speed(1.6); // safety margin under the 45s auto budget; the story is ~11s at 1x anyway
-      await sleep(250); // mount's initial fit gets one beat
-      play();
-      await waitFor(function () { return storyDone; }, 40000);
+      run.speed(1.6); // playback multiplier only — the declared total stays put
+      await g.finished;
       await sleep(400); // the last commit settles
       var nan = scanNaN();
       if (nan.length) errors.push("NaN in DOM: " + JSON.stringify(nan));

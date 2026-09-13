@@ -93,8 +93,9 @@
   <p class="lede">
     A planner agent fans out to five worker agents — literature search, code search, data
     pull, expert interviews and a benchmark run — each running at its own declared
-    duration. One worker (data pull) hits a rate limit and fails outright
-    (<code>data.fail</code>), so the synthesizer is declared <code>join:{count:4}</code>:
+    duration. One worker (data pull) hits a rate limit, retries twice on its own
+    budget (<code>data.fail:{reason,retries:2}</code>) and then fails for good, so the
+    synthesizer is declared <code>join:{count:4}</code>:
     it fires once the four surviving branches land, never waiting on the fifth. A critic
     then reviews the synthesis and can bounce the plan back to the planner for revision —
     a bounded loop, <code>maxIterations:3</code> — before the swarm hands off a reviewed
@@ -102,7 +103,7 @@
   </p>
   <ul class="lookfor">
     <li><b>Fan-out</b> — one planner token spawns five worker tokens at once.</li>
-    <li><b>The failing worker</b> — data pull turns red and fails; the <code>workers</code> container rolls up to failed too, even though the other four keep going.</li>
+    <li><b>The retrying worker</b> — data pull fails, spends its two retries (one <code>fail</code> event each, <code>terminal:false</code>), then fails for good; the <code>workers</code> container rolls up to failed too, even though the other four keep going.</li>
     <li><b>The count-join firing</b> — synthesizer needs only 4 of 5 arrivals to fire.</li>
     <li><b>The loop iteration badge</b> — <code>revise plan</code> ticks on the planner, up to 3 times.</li>
     <li><b>The final report</b> — the critic's forward edge hands off once revisions are spent.</li>
@@ -138,7 +139,9 @@
 
 <p class="legend">
   Legend — node fill/stroke is a <code>g.props()</code> override colored by agent role
-  (swatches above); chip = declared duration; pips under <em>Synthesize findings</em> =
+  (swatches above; the failed tint arrives as a one-id
+  <code>g.props(patch, {merge:true})</code> patch, so no other agent loses its colour);
+  chip = declared duration; pips under <em>Synthesize findings</em> =
   join slots (<code>join:{count:4}</code> of 5 non-loop in-edges); dashed arc = the
   <code>revise plan</code> back edge (<code>loop:true, maxIterations:3</code>) from
   <em>Critic review</em> to <em>Plan research</em>; the <em>Worker agents</em> box is a
@@ -186,7 +189,8 @@
       { id: "workers", label: "Worker agents", collapsed: false },
       { id: "worker.lit", parent: "workers", label: "Literature search", data: { duration: "6h" } },
       { id: "worker.code", parent: "workers", label: "Code search", data: { duration: "3h" } },
-      { id: "worker.data", parent: "workers", label: "Data pull", data: { duration: "4h", fail: "rate-limited" } },
+      { id: "worker.data", parent: "workers", label: "Data pull",
+        data: { duration: "4h", fail: { reason: "rate-limited", retries: 2 } } },
       { id: "worker.interviews", parent: "workers", label: "Expert interviews", data: { duration: "2d" } },
       { id: "worker.bench", parent: "workers", label: "Benchmark run", data: { duration: "8h" } },
       { id: "synth", label: "Synthesize findings", join: { count: 4 }, data: { duration: "2h" } },
@@ -210,10 +214,9 @@
     ],
   };
 
-  // Colored by role, not by run status — a g.props() override sits over the theme's own
-  // status colors (it wins, inline), so an agent keeps its identity color while it works.
-  // "workers" (the container) and the failing "worker.data" are deliberately left out so
-  // the built-in failed-status styling shows through unobstructed for those two.
+  // Colored by role. The role color is a g.props() override; status colour rides its own
+  // --smv-status-fill channel, so a working agent keeps its identity color AND takes the
+  // built-in done/failed tint over it.
   var PLANNER_PROPS = { "--smv-fill": "#efe9ff", "--smv-stroke": "#6d5bd0" };
   var WORKER_PROPS = { "--smv-fill": "#e6f1fb", "--smv-stroke": "#2f7dc9" };
   var SYNTH_PROPS = { "--smv-fill": "#e3f7f2", "--smv-stroke": "#159a83" };
@@ -223,16 +226,6 @@
 
   var ROLE_PROPS = { planner: PLANNER_PROPS, synth: SYNTH_PROPS, critic: CRITIC_PROPS, report: REPORT_PROPS };
   WORKER_IDS.forEach(function (id) { ROLE_PROPS[id] = WORKER_PROPS; });
-
-  // props() is replace-not-accumulate (one call IS the whole layer, README/THEMING), so
-  // every later recolor merges into this same object and resends it whole, or it would
-  // wipe out every other agent's role color.
-  var propsState = Object.assign({}, ROLE_PROPS);
-  function setProps(id, patch) {
-    propsState = Object.assign({}, propsState);
-    propsState[id] = patch;
-    g.props(propsState);
-  }
 
   function cam(target) { return { op: "camera", args: [target] }; }
   function hi(sel) { return { op: "highlight", args: [sel] }; }
@@ -257,8 +250,8 @@
 
     { label: "rate-limited" },
     cam({ node: "worker.data", pad: 110 }),
+    cap("Data pull is rate-limited. It fails, and takes its own retry budget — two more attempts on the same node."),
     hold(900),
-    // The fail itself is narrated live off run.on("fail") below, the instant it happens.
 
     { label: "count-join" },
     clearHi(),
@@ -266,7 +259,6 @@
     cap("Synthesizer only needs 4 of the 5 branches — join:{count:4} — so the failed data pull can never stall it."),
     playUntil("synth"),
     hold(700),
-    // The fire itself is narrated live off run.on("join") below.
 
     { label: "critic" },
     clearHi(),
@@ -280,7 +272,6 @@
     cap("revise plan — a bounded loop back to the planner (loop:true, maxIterations:3). Watch the iter badge on the planner."),
     playUntil("report"),
     hold(500),
-    // Each of the 3 ticks is narrated live off run.on("loop") below.
 
     { label: "final report" },
     clearHi(),
@@ -309,9 +300,10 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto", // plays by itself only when the URL carries ?auto=1
     });
-    g.props(propsState); // role coloring, visible immediately on load, before any Play click
+    window.smv = g;    // the documented handle check-demos awaits (g.finished)
+    g.props(ROLE_PROPS); // role coloring, visible immediately on load, before any Play click
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -358,15 +350,26 @@
   // reaches them, exactly like the fail/join/loop beats they describe.
   // ---------------------------------------------------------------------------
 
-  var obs = { dataFailNarrated: false, joinNarrated: false, joinArrived: null, joinNeeded: null, loopIterSeen: 0, loopMax: 0 };
+  var obs = { dataAttempts: 0, dataFailNarrated: false, joinNarrated: false, joinArrived: null, joinNeeded: null, loopIterSeen: 0, loopMax: 0 };
 
   run.on("fail", function (ev) {
-    if (!ev || ev.nodeId !== "worker.data" || obs.dataFailNarrated) return;
-    obs.dataFailNarrated = true;
-    setProps("worker.data", FAIL_PROPS);
+    if (!ev || ev.nodeId !== "worker.data") return;
+    obs.dataAttempts = Math.max(obs.dataAttempts, ev.attempt || 1);
     g.highlight({ nodes: ["worker.data"], variant: "warn", pulse: true });
+    if (!ev.terminal) {
+      g.caption(
+        "Data pull hit the rate limit on attempt " + ev.attempt + " of " + ((ev.retries || 0) + 1) +
+        " — the failure is not terminal yet, so the node takes another attempt from its retry budget.",
+        { place: "bottom" }
+      );
+      return;
+    }
+    if (obs.dataFailNarrated) return;
+    obs.dataFailNarrated = true;
+    // One merge patch: every other agent keeps the role colour it already has.
+    g.props({ "worker.data": FAIL_PROPS }, { merge: true });
     g.caption(
-      "Data pull failed — rate-limited (data.fail: \"rate-limited\"). No token continues past it, and " +
+      "Retries spent — data pull failed for good (rate-limited). No token continues past it, and " +
       "the workers container itself now rolls up to failed too — a container can't report done if any child didn't.",
       { place: "bottom" }
     );
@@ -408,29 +411,21 @@
   }
   g.ticker.add(sampleFrame);
 
-  var storyDone = false;
+  var started = false;     // autoplay:'auto' may have started the story before this line
+
   sb.on("step", function (ev) {
+    started = true;
+    playBtn.disabled = true;
     paintRail();
     phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+  sb.on("done", function () { paintRail(); phaseEl.textContent = "story complete"; });
 
   // ---------------------------------------------------------------------------
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
 
-  var started = false;
   function start() {
     if (started) return;
     started = true;
@@ -446,17 +441,17 @@
     reportEl.textContent =
       "story steps               " + STEPS.length + "\n" +
       "final chapter              " + (sb.position().label || "(none)") + "\n" +
-      "data pull failed, narrated " + obs.dataFailNarrated + "\n" +
+      "data pull attempts         " + obs.dataAttempts + " (terminal: " + obs.dataFailNarrated + ")\n" +
       "synth join fired           " + obs.joinArrived + "/" + obs.joinNeeded + "\n" +
       "revise loop iterations     " + obs.loopIterSeen + " of max " + obs.loopMax + "\n" +
       "errors                     " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
 
   async function auto() {
+    // A bare speed() is a pure playback multiplier, so the compiled duration the tiles
+    // report stays the declared one.
     if (run) run.speed(4);
-    await sleep(250);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
+    await g.finished;        // resolves { reason: "storyboard" } when the script runs out
     await sleep(400);
     writeReport();
     phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
