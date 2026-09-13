@@ -220,9 +220,12 @@ export function createRunRender(internals, run) {
         el.setAttribute("height", String(r2(ih)));
       }
       if (n.occupancy > 1) {
+        // F21 — fixed slots: the preset parks its duration chip INSIDE the top-right
+        // corner, so the occupancy badge sits just above the box instead of under it
+        // (the join pips already use the matching gutter below).
         const el = badges.get(id);
-        el.setAttribute("x", String(r2(r.x + r.w / 2 - 6)));
-        el.setAttribute("y", String(r2(r.y - r.h / 2 + 9)));
+        el.setAttribute("x", String(r2(r.x + r.w / 2 - 2)));
+        el.setAttribute("y", String(r2(r.y - r.h / 2 - 7)));
         el.textContent = `×${n.occupancy}`;
       }
       const j = st.joins[id];

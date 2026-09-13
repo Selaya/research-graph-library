@@ -39,10 +39,26 @@ export const NODE_MIN_W = 60;
 export const NODE_MAX_W = 220;
 export const NODE_H = 36;
 
-/** Size a plain (non-container) node from its label. */
-export function sizeNode(node) {
-  if (node.w && node.h) return { w: node.w, h: node.h };
+/** `layout.measure` entry: a number, or a per-node function. Anything else reads as 0. */
+function extraOf(v, node) {
+  const n = typeof v === "function" ? v(node) : v;
+  return Number.isFinite(n) && n > 0 ? Math.ceil(n) : 0;
+}
+
+/**
+ * Size a plain (non-container) node from its label.
+ *
+ * `measure` (F22/F23 — `opts.layout.measure`) lets whatever decorates a node contribute to
+ * its box: `{ extraWidth, extraHeight }`, each a number or `(node) => number`. The extra
+ * width is reserved chrome, NOT label room — it comes back as `reserve`, and render.js
+ * truncates the label to `w - 2*NODE_PAD_X - reserve` so a long label cannot run under a
+ * chip parked in the corner. A node that declares both `w` and `h` opts out entirely.
+ */
+export function sizeNode(node, measure) {
+  if (node.w && node.h) return { w: node.w, h: node.h, reserve: 0 };
   const label = node.label ?? node.id;
-  const w = Math.min(NODE_MAX_W, Math.max(NODE_MIN_W, Math.ceil(textWidth(label)) + NODE_PAD_X * 2));
-  return { w: node.w || w, h: node.h || NODE_H };
+  const reserve = measure ? extraOf(measure.extraWidth, node) : 0;
+  const w = Math.min(NODE_MAX_W, Math.max(NODE_MIN_W, Math.ceil(textWidth(label)) + NODE_PAD_X * 2)) + reserve;
+  const h = NODE_H + (measure ? extraOf(measure.extraHeight, node) : 0);
+  return { w: node.w || w, h: node.h || h, reserve: node.w ? 0 : reserve };
 }

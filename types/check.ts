@@ -305,6 +305,33 @@ try {
   void structCode;
 }
 
+// ---- F21-F27: preset options, node measurement, rich edge labels, click events --------
+const rich: EdgeSpec = {
+  id: "e9", source: "ingest", target: "build",
+  label: { text: "hands the batch to", place: "start", rotate: true, pill: true, maxW: 220 },
+};
+void rich;
+
+const decorated: Graph = mount("#pipe", spec, {
+  preset: { name: "pipeline", total: "critical" },
+  interaction: { tapToggle: false, click: true },
+  layout: {
+    edgeLabelMaxW: 200,
+    measure: { extraWidth: (n: NodeSpec) => (n.data ? 40 : 0), extraHeight: 8 },
+  },
+});
+decorated.on("nodeclick", ({ id, event }) => { void id; void event; });
+const offEdgeClick = decorated.on("edgeclick", ({ id }) => { void id; });
+offEdgeClick();
+void presetPipeline(decorated, { total: "both" }).destroy;
+
+// @ts-expect-error — the total-duration bar has three modes, and 'mean' is not one.
+presetPipeline(decorated, { total: "mean" });
+
+// @ts-expect-error — an edge label object must carry its text.
+const noText: EdgeSpec = { id: "e10", source: "ingest", target: "build", label: { place: "mid" } };
+void noText;
+
 // ---- deliberately wrong usages: these MUST fail to compile -----------------------------
 // @ts-expect-error — split requires a container-free node's `parts.nodes` to be non-empty
 // spec-shaped, not a bare string.

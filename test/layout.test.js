@@ -4,6 +4,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { layout } from "../src/layout.js";
+import { sizeNode } from "../src/measure.js";
+import { createViewState } from "../src/viewstate.js";
+import { Store } from "../src/store.js";
 import { fixtureDiamond, fixtureLoop, fixtureSelfLoop, OPTS } from "./golden/fixtures.js";
 import { countCrossings, DAGRE_CROSSINGS } from "./golden/crossing.js";
 
@@ -237,4 +240,51 @@ test("forward edges strictly advance along the rank axis; siblings never overlap
       assert.ok(!overlap, `nodes overlap: ${JSON.stringify(a)} / ${JSON.stringify(b)}`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// F22/F23 — the measurement hook (`opts.layout.measure`, src/measure.js)
+// ---------------------------------------------------------------------------
+
+test("sizeNode: no measure options means byte-identical sizing (golden layouts are safe)", () => {
+  const node = { id: "a", label: "Ingest" };
+  const bare = sizeNode(node);
+  assert.deepEqual({ w: bare.w, h: bare.h }, { w: sizeNode(node, null).w, h: sizeNode(node, {}).h });
+  assert.equal(bare.h, 36);
+  assert.equal(bare.reserve, 0);
+});
+
+test("sizeNode: extraWidth/extraHeight grow the derived box and report the reserve", () => {
+  const node = { id: "a", label: "Ingest" };
+  const bare = sizeNode(node);
+  const grown = sizeNode(node, { extraWidth: 30, extraHeight: 8 });
+  assert.equal(grown.w, bare.w + 30);
+  assert.equal(grown.h, bare.h + 8);
+  assert.equal(grown.reserve, 30, "the extra width is chrome, not label room");
+
+  // Per-node functions, and anything non-finite reading as zero.
+  const perNode = sizeNode(node, { extraWidth: (n) => (n.id === "a" ? 12 : 0) });
+  assert.equal(perNode.w, bare.w + 12);
+  assert.equal(sizeNode(node, { extraWidth: NaN, extraHeight: -5 }).w, bare.w);
+});
+
+test("sizeNode: a node that declares both w and h opts out of the hook entirely", () => {
+  const fixed = sizeNode({ id: "a", w: 120, h: 44 }, { extraWidth: 30, extraHeight: 8 });
+  assert.deepEqual(fixed, { w: 120, h: 44, reserve: 0 });
+  // An explicit width alone keeps its width (and reserves nothing against it).
+  const halfFixed = sizeNode({ id: "a", label: "Ingest", w: 120 }, { extraWidth: 30 });
+  assert.equal(halfFixed.w, 120);
+  assert.equal(halfFixed.reserve, 0);
+});
+
+test("viewstate threads the measure hook into view().sizes, live on every view()", () => {
+  let measure = null;
+  const vs = createViewState(new Store({ nodes: [{ id: "a", label: "Ingest" }], edges: [] }), () => measure);
+  const bare = vs.view().sizes.a;
+  measure = { extraWidth: 24, extraHeight: 8 };
+  const grown = vs.view().sizes.a;
+  assert.equal(grown.w, bare.w + 24);
+  assert.equal(grown.h, bare.h + 8);
+  assert.equal(grown.reserve, 24);
+  assert.equal(bare.reserve, 0);
 });

@@ -19,7 +19,7 @@ Every mount gets exactly one global `<style data-smv-styles>` injected into the 
 <div class="smv-root" data-smv-theme="auto">
   <svg class="smv smv-grabbing?">...</svg>
   <!-- .smv-transport if opts.controls -->
-  <!-- .smv-totalbar if opts.preset:'pipeline' -->
+  <!-- .smv-totalbar if opts.preset:'pipeline' (key / track / label / alt spans) -->
 </div>
 ```
 
@@ -116,6 +116,7 @@ All written at commit time (`renderer.styleCommit`, `preset-pipeline.js`, `a11y.
 | `data-condense` | `.smv-node` | `"src"` during highlight, `"reveal"` after converge/diverge — shared by both condense and split choreography |
 | `data-reversed` | `.smv-edge` | present on back edges (FAS-pinned) — dashed stroke, reduced opacity |
 | `data-weight` | `.smv-edge` | meta-edge aggregation count (>1); doubles the edge width |
+| `data-pill` | `.smv-edge` | present when the edge's label asked for a backing plate (`label: {pill: true}`) — the `.smv-edge-pill` rect is drawn and the label drops its halo |
 | `data-traversed` | `.smv-edge` | present once a token has crossed the edge; pairs with `--smv-traversed` for the progressive width |
 | `data-frozen` | `.smv-token` | token whose rate is 0 (paused branch) |
 | `data-filled` | `.smv-join-pip` | a join slot that has arrived |

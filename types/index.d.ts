@@ -34,6 +34,19 @@ export interface NodeSpec {
   [key: string]: unknown;
 }
 
+/** A rich edge label (F25). A bare string is the same thing with every default taken. */
+export interface EdgeLabelSpec {
+  text: string;
+  /** Where along the (clipped) path it rides. Default `'mid'`. */
+  place?: "mid" | "start" | "end";
+  /** Lay the text along the line instead of upright. Default `false`; never upside down. */
+  rotate?: boolean;
+  /** Draw an opaque backing plate instead of the background-colored halo. Default `false`. */
+  pill?: boolean;
+  /** Truncation cap in px for THIS label, beating `LayoutOpts.edgeLabelMaxW` (F26). */
+  maxW?: number;
+}
+
 export interface EdgeSpec {
   id: string;
   source: string;
@@ -41,7 +54,7 @@ export interface EdgeSpec {
   /** Back/retry edge; requires `maxIterations` (D3/D4). */
   loop?: boolean;
   maxIterations?: number;
-  label?: string;
+  label?: string | EdgeLabelSpec;
   data?: Record<string, unknown>;
   /** Meta-edge aggregation weight (>1 renders as a heavier line + badge). */
   weight?: number;
@@ -229,12 +242,29 @@ export type LayoutSolver = (input: SolverInput, opts: LayoutOpts) => SolverResul
 // Options
 // ---------------------------------------------------------------------------
 
+import type { PipelinePresetOpts } from "./preset-pipeline.js";
+
 export type ThemeName = "auto" | "light" | "dark";
 export type EasingName = "linear" | "cubic-out" | "cubic-in-out" | "overshoot";
 export type EasingFn = (t: number) => number;
 
+/** F22/F23 - what a decoration layer contributes to node measurement. Each entry is a
+ *  number or a per-node function; anything non-finite reads as 0. A node that declares both
+ *  `w` and `h` opts out. `extraWidth` is reserved CHROME, not label room: the renderer
+ *  truncates the label to the box minus it, so a chip can never be run under. */
+export interface MeasureOpts {
+  extraWidth?: number | ((node: NodeSpec) => number);
+  extraHeight?: number | ((node: NodeSpec) => number);
+}
+
 export interface LayoutOpts {
   dir?: "LR" | "TB" | "RL" | "BT";
+  /** Node measurement contributions (F22/F23). `mount(..., {preset:'pipeline'})` installs
+   *  the preset's own unless you set one. */
+  measure?: MeasureOpts | null;
+  /** Edge-label truncation cap in px for the whole drawing (F26). Default 90; the pipeline
+   *  preset raises it to 180 when you set none. Per-edge `label.maxW` still wins. */
+  edgeLabelMaxW?: number;
   nodesep?: number;
   ranksep?: number;
   marginx?: number;
@@ -289,13 +319,16 @@ export interface MountOpts {
   animation?: AnimationOpts;
   /** Mounts `.smv-transport` (play/pause/step/scrub/speed). */
   controls?: boolean;
-  /** `'pipeline'` applies the bundled preset (duration chips, status glyphs, odometer). */
-  preset?: "pipeline";
+  /** `'pipeline'` applies the bundled preset (duration chips, status glyphs, odometer), and
+   *  installs its measurement/edge-label defaults into `layout` (F22/F23/F26). The object
+   *  form passes options through: `{ name: 'pipeline', total: 'critical' }` (F24). */
+  preset?: "pipeline" | ({ name: "pipeline" } & PipelinePresetOpts);
   /** ARIA + keyboard is on by default; pass `false` to opt out. */
   a11y?: boolean;
-  /** Pointer interactions. `tapToggle` (tap/click a container to expand/collapse) is on
-   *  by default; pass `{ tapToggle: false }` to opt out. */
-  interaction?: { tapToggle?: boolean };
+  /** Pointer interactions. `tapToggle` (tap/click a container to expand/collapse) and
+   *  `click` (the `nodeclick`/`edgeclick` events, F27) are both on by default; either can be
+   *  turned off on its own. */
+  interaction?: { tapToggle?: boolean; click?: boolean };
   storyboard?: StoryboardStep[];
   autoplay?: boolean;
   /** D15 (M4) — `'manual'` drives the shared ticker by hand (`g.ticker.tick(ms)`) instead
@@ -605,6 +638,11 @@ export interface GraphEventMap {
    *  a run is not a spec mutation, so no `commit` announces it. a11y.js uses it to keep the
    *  accessible name in step with the live/simulated run. */
   runstatus: { id: string; status: "pending" | "active" | "done" };
+  /** F27 - a clean tap/click on a node, suppressed when the pointer travelled past the tap
+   *  slop (a pan) or a second pointer joined (a pinch). `event` is the raw `pointerup`. */
+  nodeclick: { id: string; event: unknown };
+  /** The same, for an edge. Only the drawn stroke is hit-testable. */
+  edgeclick: { id: string; event: unknown };
 }
 
 // ---------------------------------------------------------------------------
@@ -813,8 +851,10 @@ export function mount(el: Element | string, spec?: GraphSpec, opts?: MountOpts):
 
 export const version: string;
 
-/** `opts.preset: 'pipeline'` inline, or `presetPipeline(g)` after the fact. */
-export function presetPipeline(g: Graph): { destroy(): void };
+/** `opts.preset: 'pipeline'` inline, or `presetPipeline(g, opts)` after the fact. Applied
+ *  after mount it decorates what is already on screen, but it cannot retro-fit the node
+ *  measurement it wants - pass `PIPELINE_MEASURE` as `layout.measure` yourself for that. */
+export function presetPipeline(g: Graph, opts?: PipelinePresetOpts): { destroy(): void };
 
 declare const _default: { mount: typeof mount; version: string; presetPipeline: typeof presetPipeline };
 export default _default;

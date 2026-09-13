@@ -159,6 +159,10 @@ svg.smv.smv-grabbing{cursor:grabbing}
   stroke:var(--smv-bg); stroke-width:3px; stroke-linejoin:round;
   pointer-events:none;
 }
+/* F25 label.pill: an opaque plate instead of the halo, where the message IS the content. */
+.smv-edge rect.smv-edge-pill{fill:var(--smv-container); stroke:var(--smv-stroke); stroke-width:1; pointer-events:none}
+.smv-edge[data-pill] text.smv-edge-label{stroke:none; fill:var(--smv-text)}
+
 /* Back edges read as loops, not glitches: muted + dashed, a distinct visual channel (D3). */
 .smv-edge[data-reversed] path.smv-edge-line{stroke-dasharray:4 3; opacity:.7}
 .smv-edge[data-reversed] path.smv-edge-arrow{opacity:.7}

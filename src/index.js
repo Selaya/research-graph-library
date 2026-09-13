@@ -23,7 +23,7 @@ import { createRunTransport } from "./run-transport.js";
 import { createRunRender } from "./run-render.js";
 import { createStoryboard } from "./storyboard.js";
 import { createTransport } from "./transport.js";
-import { applyPipelinePreset } from "./preset-pipeline.js";
+import { applyPipelinePreset, PIPELINE_MEASURE, PIPELINE_EDGE_LABEL_MAX_W } from "./preset-pipeline.js";
 
 export const version = "0.1.0";
 
@@ -111,7 +111,10 @@ export function mount(el, spec = {}, opts = {}) {
   injectStyles(root.ownerDocument || doc);
 
   const store = new Store(spec);
-  const vs = createViewState(store);
+  // Declared before the view state because measurement reads it (F22: `layout.measure`),
+  // and `g.layout(o)` mutates this same object in place, so the getter below stays live.
+  const layoutOpts = { dir: "LR", ...(opts.layout || {}) };
+  const vs = createViewState(store, () => layoutOpts.measure);
   const bus = emitter();
   // D15 — recording mode overrides the environment: a manual ticker is stepped frame by
   // frame by the renderer CLI (M4b) instead of riding rAF, and `data-smv-record` on the
@@ -126,7 +129,6 @@ export function mount(el, spec = {}, opts = {}) {
   root.setAttribute("data-smv-theme", opts.theme || "auto");
   if (recording) root.setAttribute("data-smv-record", "");
 
-  const layoutOpts = { dir: "LR", ...(opts.layout || {}) };
   const anim = opts.animation || {};
   // D15 — `motion:"full"` is the recorder saying "the environment is not the audience".
   const reduced = opts.motion === "full" ? false : prefersReducedMotion();
@@ -185,6 +187,7 @@ export function mount(el, spec = {}, opts = {}) {
     renderer.styleCommit({
       nodes: v.nodes, edges: v.edges, reversed: pinnedReversals,
       style: styleFn, sizes, props: director.propsLayer(),
+      edgeLabelMaxW: layoutOpts.edgeLabelMaxW,
     });
   }
 
@@ -300,6 +303,9 @@ export function mount(el, spec = {}, opts = {}) {
     renderer.styleCommit({
       nodes: v.nodes, edges: v.edges,
       reversed: pinnedReversals, style: styleFn, sizes,
+      // F26 — the edge-label truncation cap, drawing-wide (`layout.edgeLabelMaxW`); a
+      // per-edge `label: {maxW}` still beats it.
+      edgeLabelMaxW: layoutOpts.edgeLabelMaxW,
       // D16 — the director's override layer, merged over styleFn by the renderer. Read
       // here (and in styleNow) and nowhere else: propsLayer() rolls its own shadow
       // forward, so exactly one read per style commit is the contract.
@@ -1101,8 +1107,15 @@ export function mount(el, spec = {}, opts = {}) {
   // different meaning.
   Object.assign(g, makeQuery(store));
 
-  // The preset subscribes to "commit", so it has to exist before the first one.
-  if (opts.preset === "pipeline") preset = applyPipelinePreset(g);
+  // The preset subscribes to "commit", so it has to exist before the first one — and its
+  // measurement/edge-label defaults have to be in `layoutOpts` before the initial relayout
+  // below, or the first drawing is the only one that ignores them (F22/F23/F26).
+  const presetOpts = opts.preset && typeof opts.preset === "object" ? opts.preset : null;
+  if ((presetOpts ? presetOpts.name : opts.preset) === "pipeline") {
+    if (layoutOpts.measure === undefined) layoutOpts.measure = PIPELINE_MEASURE;
+    if (layoutOpts.edgeLabelMaxW === undefined) layoutOpts.edgeLabelMaxW = PIPELINE_EDGE_LABEL_MAX_W;
+    preset = applyPipelinePreset(g, presetOpts || {});
+  }
 
   // Highlight reassertion (D14): render.js builds a FRESH <g> for a re-added id, so a
   // commit that revives an emphasised node (a backward seek, an expand) hands back a blank
@@ -1117,9 +1130,16 @@ export function mount(el, spec = {}, opts = {}) {
 
   // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
   if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg });
-  // Tap/click a container toggles it (same public path the keyboard uses).
-  if (!(opts.interaction && opts.interaction.tapToggle === false)) {
-    tap = attachTapToggle(g, { svg: renderer.svg });
+  // Tap/click a container toggles it (same public path the keyboard uses), and every clean
+  // tap publishes `nodeclick`/`edgeclick` (F27). `interaction: {click: false}` drops the
+  // events; `{tapToggle: false}` drops only the expand/collapse.
+  const ia = opts.interaction || {};
+  if (ia.tapToggle !== false || ia.click !== false) {
+    tap = attachTapToggle(g, {
+      svg: renderer.svg,
+      toggle: ia.tapToggle !== false,
+      emit: ia.click === false ? null : (t, p) => bus.emit(t, p),
+    });
   }
 
   if (opts.storyboard) buildStoryboard(opts.storyboard);

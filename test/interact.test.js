@@ -24,7 +24,7 @@ function fakeEl(cls, id, parent) {
   return el;
 }
 
-function harness({ containers = ["box"], collapsed = ["box"] } = {}) {
+function harness({ containers = ["box"], collapsed = ["box"], toggle, emit } = {}) {
   const rootEl = fakeEl(null, null, null);
   const svg = fakeEl("smv", null, rootEl);
   const nodeG = fakeEl("smv-node", "box", svg);
@@ -40,7 +40,7 @@ function harness({ containers = ["box"], collapsed = ["box"] } = {}) {
     expand(id) { calls.push(["expand", id]); collapsedSet.delete(id); },
     collapse(id) { calls.push(["collapse", id]); collapsedSet.add(id); },
   };
-  const tap = attachTapToggle(g, { svg });
+  const tap = attachTapToggle(g, { svg, ...(toggle === undefined ? {} : { toggle }), emit });
   return { svg, rect, nodeG, calls, g, tap };
 }
 
@@ -95,4 +95,76 @@ test("pointercancel clears the gesture; destroy() removes every listener", () =>
 test("imports cleanly and no-ops without a real svg (Node safety)", () => {
   const tap = attachTapToggle({}, { svg: null });
   tap.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F27 — public nodeclick / edgeclick
+// ---------------------------------------------------------------------------
+
+/** Collects everything `emit` publishes, so the assertions read as a transcript. */
+function clicks() {
+  const seen = [];
+  return { seen, emit: (type, payload) => seen.push([type, payload.id]) };
+}
+
+test("F27: a clean tap on a node emits nodeclick, with the pointer event attached", () => {
+  const c = clicks();
+  const up = { target: null, clientX: 10, clientY: 10, pointerId: 1 };
+  let got = null;
+  const { svg, rect } = harness({ emit: (type, payload) => { c.emit(type, payload); got = payload; } });
+  svg.fire("pointerdown", { target: rect, clientX: 10, clientY: 10, pointerId: 1 });
+  svg.fire("pointerup", { ...up, target: svg });
+  assert.deepEqual(c.seen, [["nodeclick", "box"]]);
+  assert.equal(got.event.pointerId, 1, "the raw pointer event rides along");
+});
+
+test("F27: a tap on an edge emits edgeclick and never toggles anything", () => {
+  const c = clicks();
+  const { svg, calls } = harness({ emit: c.emit });
+  const edgeG = fakeEl("smv-edge", "e1", svg);
+  const line = fakeEl(null, null, edgeG);
+  line.attrs = {};
+  svg.fire("pointerdown", { target: line, clientX: 5, clientY: 5, pointerId: 1 });
+  svg.fire("pointerup", { target: svg, clientX: 6, clientY: 5, pointerId: 1 });
+  assert.deepEqual(c.seen, [["edgeclick", "e1"]]);
+  assert.deepEqual(calls, [], "an edge is not a container");
+});
+
+test("F27: a plain (non-container) node still emits nodeclick", () => {
+  const c = clicks();
+  const { svg, calls } = harness({ containers: [], emit: c.emit });
+  const plain = fakeEl("smv-node", "leaf", svg);
+  svg.fire("pointerdown", { target: plain, clientX: 5, clientY: 5, pointerId: 1 });
+  svg.fire("pointerup", { target: svg, clientX: 5, clientY: 5, pointerId: 1 });
+  assert.deepEqual(c.seen, [["nodeclick", "leaf"]]);
+  assert.deepEqual(calls, []);
+});
+
+test("F27: travel past the tap slop, a pinch, or empty canvas emit nothing", () => {
+  const c = clicks();
+  const { svg, rect } = harness({ emit: c.emit });
+  svg.fire("pointerdown", { target: rect, clientX: 10, clientY: 10, pointerId: 1 });
+  svg.fire("pointerup", { target: svg, clientX: 40, clientY: 10, pointerId: 1 }); // pan
+  svg.fire("pointerdown", { target: rect, clientX: 10, clientY: 10, pointerId: 2 });
+  svg.fire("pointerdown", { target: rect, clientX: 30, clientY: 30, pointerId: 3 }); // pinch
+  svg.fire("pointerup", { target: svg, clientX: 10, clientY: 10, pointerId: 2 });
+  svg.fire("pointerdown", { target: svg, clientX: 90, clientY: 90, pointerId: 4 }); // canvas
+  svg.fire("pointerup", { target: svg, clientX: 90, clientY: 90, pointerId: 4 });
+  assert.deepEqual(c.seen, []);
+});
+
+test("F27: toggle:false keeps the click events but stops the expand/collapse", () => {
+  const c = clicks();
+  const { svg, rect, calls } = harness({ toggle: false, emit: c.emit });
+  svg.fire("pointerdown", { target: rect, clientX: 10, clientY: 10, pointerId: 1 });
+  svg.fire("pointerup", { target: svg, clientX: 10, clientY: 10, pointerId: 1 });
+  assert.deepEqual(c.seen, [["nodeclick", "box"]]);
+  assert.deepEqual(calls, [], "the container was not toggled");
+});
+
+test("F27: with no emit hook the toggle behaves exactly as it always did", () => {
+  const { svg, rect, calls } = harness();
+  svg.fire("pointerdown", { target: rect, clientX: 10, clientY: 10, pointerId: 1 });
+  svg.fire("pointerup", { target: svg, clientX: 10, clientY: 10, pointerId: 1 });
+  assert.deepEqual(calls, [["expand", "box"]]);
 });
