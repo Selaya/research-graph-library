@@ -28,6 +28,12 @@ export interface NodeSpec {
   children?: unknown;
   /** Container/collapsed-group duration rollup (preset-pipeline). */
   durationAgg?: "sum" | "max";
+  /** Container status rollup from its descendants in Mode A (src/run.js), the status
+   *  mirror of `durationAgg`. `'earliest-fail'` (default) keeps the container `'failed'`
+   *  from the first descendant failure onward; `'latest'` follows the most recent
+   *  descendant outcome, so a later success clears it again; `'none'` never inherits a
+   *  failure at all. */
+  statusAgg?: "earliest-fail" | "latest" | "none";
   w?: number;
   h?: number;
   groups?: unknown;
@@ -47,6 +53,13 @@ export interface EdgeSpec {
   weight?: number;
   [key: string]: unknown;
 }
+
+/** The merged-node spec `g.condense()` takes. Same as `NodeSpec`, except `parent` may also
+ *  be `null` — "inherit the sources' common parent", exactly like leaving it out (a spec
+ *  built from a form or a diff has no other way to say "absent"). When the sources have
+ *  DIFFERENT parents there is no common one to inherit: the merged node lands at the top
+ *  level and warns, so name a `parent` explicitly for a cross-container merge. */
+export type CondenseNodeSpec = Omit<NodeSpec, "parent"> & { parent?: string | null };
 
 export interface GraphSpec {
   nodes?: NodeSpec[];
@@ -87,7 +100,10 @@ export type GraphErrorCode =
   | "storyboard-label"
   /** g.batch(fn) was called with an fn that returned a thenable (finding #2): batch
    *  requires a synchronous callback. */
-  | "batch-async";
+  | "batch-async"
+  /** `g.validate()` was handed a step whose `op` is not a known op name. Reported in the
+   *  returned `errors`, never thrown. */
+  | "validate-op";
 
 /** The real, importable error class every `g` mutation method throws (`src/store.js`).
  *  `code` is one of `GraphErrorCode`; `message` is human-readable and already carries the
@@ -529,10 +545,10 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "addEdge"; args: [EdgeSpec] }
   | { op: "removeNode"; args: [string] }
   | { op: "removeEdge"; args: [string] }
-  | { op: "update"; args: [string, Record<string, unknown>] }
+  | { op: "update"; args: [string, Record<string, unknown>, UpdateOpts?] }
   | { op: "expand"; args: [string] }
   | { op: "collapse"; args: [string] }
-  | { op: "condense"; args: [string[], NodeSpec] }
+  | { op: "condense"; args: [string[], CondenseNodeSpec] }
   | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }] }
   | { op: "batch"; steps: StoryboardStep[] }
   | { op: "run.play"; until?: string; args?: [{ until?: string }?] }
@@ -698,6 +714,42 @@ export interface ViewState {
   view(): unknown;
 }
 
+/** `g.update(id, patch, opts)`. */
+export interface UpdateOpts {
+  /** `patch.data` REPLACES the record's `data` instead of merging into it. Merging is the
+   *  default either way; `data: { key: undefined }` removes a single key without it. */
+  replace?: boolean;
+}
+
+/** The probe `g.validate(fn)` hands its callback: the structural mutation methods, run
+ *  against a throwaway clone, plus the read sugar. Nothing commits, nothing renders, and
+ *  a method that would have thrown records its `GraphError` instead. */
+export interface ValidateProbe {
+  node(id: string): NodeSpec | undefined;
+  edge(id: string): EdgeSpec | undefined;
+  children(id: string): NodeSpec[];
+  spec(): GraphSpec;
+  addNode(node: NodeSpec, opts?: { after?: string }): void;
+  addEdge(edge: EdgeSpec): void;
+  removeNode(id: string): void;
+  removeEdge(id: string): void;
+  update(id: string, patch: Record<string, unknown>, opts?: UpdateOpts): void;
+  condense(ids: Iterable<string>, node: CondenseNodeSpec): void;
+  split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): void;
+  /** View-only: accepted so a whole op list validates, but nothing structural to check. */
+  expand(id?: string): void;
+  collapse(id?: string): void;
+  expandAll(): void;
+  collapseAll(): void;
+  batch(fn: (probe: ValidateProbe) => void): void;
+}
+
+/** `g.validate()`'s verdict: `ok` is `errors.length === 0`. */
+export interface ValidateResult {
+  ok: boolean;
+  errors: GraphError[];
+}
+
 // ---------------------------------------------------------------------------
 // The mounted instance
 // ---------------------------------------------------------------------------
@@ -740,7 +792,19 @@ export interface Graph {
    *  `{canceled, applied}` — see `RemoveNodeResult`. */
   removeNode(id: string): Awaitable<RemoveNodeResult>;
   removeEdge(id: string): Awaitable<MutationResult>;
-  update(id: string, patch: Record<string, unknown>): Awaitable<MutationResult>;
+  /** `patch.data` merges into the record's `data`; `data: { key: undefined }` REMOVES that
+   *  key, and `{ replace: true }` swaps the whole payload. A `collapsed` patch is routed to
+   *  `expand()`/`collapse()` (it is view state, not a rendered spec field), so it resolves
+   *  like they do — `{applied: false}` when the container was already in that state. */
+  update(id: string, patch: Record<string, unknown>, opts?: UpdateOpts): Awaitable<MutationResult>;
+
+  /** Dry-run the structural guards without committing anything: every op runs against a
+   *  throwaway clone of the store, and every `GraphError` they would have thrown comes back
+   *  in `errors` (an op that fails just does not land in the clone; the ops after it are
+   *  still checked). Takes either a `batch()`-shaped function or an array of
+   *  storyboard-shaped `{op, args}` steps; director/transport steps and `label` markers are
+   *  skipped, an unrecognized `op` reports `"validate-op"`. */
+  validate(ops: StoryboardStep[] | ((probe: ValidateProbe) => void)): ValidateResult;
 
   /** D5 — children bloom out of the container's previous centre. */
   expand(id: string): Awaitable<MutationResult>;
@@ -749,7 +813,7 @@ export interface Graph {
   /** D6 — merge N nodes into one over the 3-phase choreography (highlight/converge/reveal).
    *  Resolves with the created/removed ids once the merge actually lands — see
    *  `CondenseSplitResult`. */
-  condense(ids: Iterable<string>, node: NodeSpec): Awaitable<CondenseSplitResult>;
+  condense(ids: Iterable<string>, node: CondenseNodeSpec): Awaitable<CondenseSplitResult>;
   /** D6 inverse — one node becomes N (highlight/diverge/reveal). Same resolution shape as
    *  `condense()`. */
   split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): Awaitable<CondenseSplitResult>;

@@ -207,3 +207,66 @@ test("run-render: a failed node is written to the same data-run channel and anno
 
   g.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// F31 — the container status rollup is a policy (`statusAgg`), and the picture follows it.
+// ---------------------------------------------------------------------------
+
+/** A lifeline-shaped graph: one call into `svc` fails, a second, longer one succeeds. */
+function lifelineSpec(statusAgg) {
+  return {
+    nodes: [
+      { id: "svc", label: "auth", ...(statusAgg ? { statusAgg } : {}) },
+      { id: "hit", label: "401", parent: "svc", data: { duration: "1s", fail: "401" } },
+      { id: "retry", label: "retry", parent: "svc", data: { duration: "5s" } },
+      { id: "r1", label: "R1" }, { id: "r2", label: "R2" },
+    ],
+    edges: [{ id: "e1", source: "r1", target: "hit" }, { id: "e2", source: "r2", target: "retry" }],
+  };
+}
+
+function mountLifeline(statusAgg) {
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  return mount(root, lifelineSpec(statusAgg), { animation: { duration: 40 } });
+}
+
+test("run-render: the default rollup leaves a container painted failed for the rest of the run", async () => {
+  const g = mountLifeline();
+  const run = g.run({});
+  run.play();
+  await pumpUntil(() => run.state().done, 1200);
+  await pump(2);
+  assert.equal(g.renderer.node("svc").getAttribute("data-run"), "failed");
+  g.destroy();
+});
+
+test("run-render: statusAgg 'latest' repaints the container once a later call succeeds", async () => {
+  const g = mountLifeline("latest");
+  const seen = [];
+  g.on("runstatus", (ev) => { if (ev.id === "svc") seen.push(ev.status); });
+  const run = g.run({});
+  run.play();
+
+  await pumpUntil(() => run.state().nodes.hit.status === "failed", 1200);
+  await pump(2);
+  assert.equal(g.renderer.node("svc").getAttribute("data-run"), "failed", "red while the failure is the latest news");
+
+  await pumpUntil(() => run.state().done, 1200);
+  await pump(2);
+  assert.equal(g.renderer.node("svc").getAttribute("data-run"), "done", "…and back to done once the retry lands");
+  assert.equal(g.renderer.node("hit").getAttribute("data-run"), "failed", "the child that failed stays failed");
+  assert.deepEqual(seen.slice(-2), ["failed", "done"], "the flip is announced on the same bus channel");
+  g.destroy();
+});
+
+test("run-render: statusAgg 'none' never paints the container from its children at all", async () => {
+  const g = mountLifeline("none");
+  const run = g.run({});
+  run.play();
+  await pumpUntil(() => run.state().done, 1200);
+  await pump(2);
+  assert.equal(g.renderer.node("svc").getAttribute("data-run"), "done");
+  assert.equal(g.renderer.node("hit").getAttribute("data-run"), "failed");
+  g.destroy();
+});

@@ -78,8 +78,37 @@ Every method below is on the object `g.run(opts)` returns.
 
 A `'failed'` node reports `progress: 1` and `occupancy: 0` — terminal like `'done'`, so its
 fill never reads as "still going." A container's status/progress rolls up from its
-descendants (union window; earliest failure wins): `play({until: containerId})` means "until
-everything inside it is finished or has failed."
+descendants (union window; see `statusAgg` below for the failure half):
+`play({until: containerId})` means "until everything inside it is finished or has failed."
+
+### `statusAgg` — how a descendant's failure rolls up
+
+A container is never an executable step, so its `'failed'` can only come from its
+descendants. `statusAgg` on the container spec picks the policy, the status mirror of
+`durationAgg`:
+
+| `statusAgg` | the container reads `'failed'`… |
+|---|---|
+| `'earliest-fail'` *(default)* | from the earliest descendant failure onward — the rest of the run stays red |
+| `'latest'` | while the most recent descendant outcome is a failure; a later success clears it again |
+| `'none'` | never — only its own window drives it |
+
+```js
+{ id: "auth", label: "auth service", statusAgg: "latest" }   // a lifeline, not a pipeline
+```
+
+In a pipeline `'earliest-fail'` is right: one red cell means the matrix is red. On a
+sequence-diagram lifeline it is not — a 401 on one call would paint the whole actor column
+red for the rest of the story even after a retried call on the same actor succeeds.
+Each container reads its own leaf descendants, so nested containers can hold different
+policies. An unknown value warns (`[smv:run] node "x" has an unknown statusAgg …`) and
+falls back to `'earliest-fail'`. The policy never touches the descendants themselves: the
+node that failed still reports `'failed'`.
+
+`play({ until: containerId })` still stops the first time that container reads `'failed'`
+(both terminal statuses end a wait) — under `'latest'` that is the first failing
+descendant, even though a later success would have cleared it. Wait on the descendant, or
+use `'none'`, if you want the container's whole span.
 
 ## Duration grammar
 
@@ -139,7 +168,8 @@ A string value is carried through as the emitted `'fail'` event's `reason` (anno
 only — nothing in the engine reads it back). `data.fail: true` fails with no reason. A
 container can't carry `data.fail` itself (it's never an executable step, D5); if one of its
 descendants fails, the container's own status rolls up to `'failed'` at that descendant's
-failure instant, same as its `'done'` window rolls up from its children's windows.
+failure instant, same as its `'done'` window rolls up from its children's windows — unless
+its `statusAgg` says otherwise (see **`statusAgg`** above).
 
 ```js
 const sim = compileRun(spec);           // or: g.run().sim()
