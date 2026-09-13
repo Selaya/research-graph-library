@@ -299,6 +299,33 @@ just stops. `play({until})` and `timeOf()` treat `'failed'` as terminal exactly 
 `data.fail` itself (it isn't an executable step); it inherits the earliest failure among
 its descendants.
 
+**Retry loops are an in-place tick after iteration 1, not a replay.** A `loop: true` edge's
+first pass is a real edge-crossing hop from the loop's source to its target. Every further
+iteration does **not** re-fly that arc — it's a compressed ~250ms tick in place on the
+target node with an updated `iter n/max` badge, emitting `loop` each time
+(`{edgeId, nodeId, iteration, max}` — iteration 1's event names the loop's *source* node,
+the one being left; later ticks name its target, so filter on `edgeId`, not `nodeId`).
+That means "iteration 2 looked different" or "the
+agent called a different tool this time" cannot be shown by the engine itself — there's
+nothing crossing the graph to re-stage. The recommended pattern is to narrate it
+reactively, off the event rather than the graph:
+
+```js
+run.on("loop", ({ edgeId, iteration, max }) => {
+  if (edgeId === "retry") g.caption(`attempt ${iteration}/${max}: retrying…`);
+});
+```
+
+`max` is the edge's declared `maxIterations`, not the count this play will actually reach —
+`g.run({ iterations: { retry: 3 } })` caps the ticks but still reports `max: 5`, so print
+your own cap if you pass one.
+
+These reactive captions are not storyboard steps, so they won't be snapshotted for
+backward scrub or show up in `g.cues()` — they're a live commentary track on top of the
+tick, not part of the declared timeline. See docs/RUN.md's "Bounded retry loops" section
+for the full mechanics, and docs/PLAN.md (D18) for a proposed `replay` mode that would
+re-simulate each iteration instead.
+
 | event | fires when |
 |---|---|
 | `play` / `pause` / `seek` / `speed` / `step` | a transport call |

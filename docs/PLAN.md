@@ -381,6 +381,111 @@ The callback comes off the ticker on `clearHighlight()`, on a restore into a sna
 without one, and on `destroy()`, so the rAF loop can go idle again. G9: reduced motion holds
 the peak statically — the emphasis shrinks to a still frame, it is never skipped.
 
+### D18 — Loop replay: re-simulate the subgraph per iteration (proposed, not implemented)
+
+**Friction: docs/API-FRICTIONS.md F2 (L part).** Today only iteration 1 of a `loop: true`
+edge is a real edge-crossing hop; every later iteration is a compressed ~250ms in-place
+tick on the target node (D4's token engine deliberately keeps a "loop" cheap — see F2's
+observed workarounds, all reactive `run.on('loop')` captions bolted onto a tick that has no
+schedule of its own). That's fine for "the badge reads 3/5" but wrong for "iteration 2
+took a different branch" or "the agent called a different tool this time," which needs
+something in the graph to actually happen each pass.
+
+Proposed shape: `loop: { replay: true }` on the edge spec, or `run({ loops: 'replay' })` as
+a per-compile override, either of which makes the compiler re-run the **subgraph between
+the loop edge's target and source** (the set walked for `condense`'s convexity check, D6/F28
+— already-computed machinery) once per iteration instead of collapsing it to a tick. The
+badge still ticks (`state().loops[edgeId]`, the `loop` event) but each iteration now owns
+real `enter`/`start`/`finish` events and its own slice of `sim().duration`, so `cues()`,
+the scrubber, and backward-seek all see it truthfully (this is what makes it a genuine fix
+for F19 rather than a bigger version of the same reactive-caption workaround).
+
+Open questions, which is why this is proposed and not scheduled:
+
+- **Per-iteration variation.** Re-simulating the *same* subgraph with the *same* spec
+  produces four identical replays — visually correct but narratively pointless unless a
+  page can vary `data.fail` / `data.duration` per pass. Does the storyboard get an
+  `iteration` variable it can substitute into node data before each replay compiles, or is
+  varying the story per iteration left to `update()` calls between iterations (which then
+  need to be sequenced against the replay's own schedule)?
+- **Cost.** A 5-iteration retry loop over a 6-node subgraph is 30 nodes' worth of declared
+  timeline instead of 1 tick's worth — fine for a demo, possibly not for `maxIterations: 50`
+  used as a rate-limit backoff counter rather than a story beat. Does `replay` need its own
+  iteration cap independent of `maxIterations`, or a `replay: { iterations: n }` form?
+- **Nested loops and containers.** The subgraph between target and source may itself
+  contain a collapsed container or another loop edge; F28's convexity walk already has to
+  reason about this for condense. Does loop replay reuse exactly that walk, and what
+  happens when the subgraph doesn't form a clean convex set (today the source's own
+  non-loop out-edges are excluded from the target's dwell — does that boundary still hold
+  under replay)?
+- **Live mode.** Mode B has no compiled schedule to re-simulate against — does `replay`
+  stay Mode A-only (matching D4/F1's existing Mode A/B split on retry semantics), or does a
+  live loop need its own, unrelated notion of "replay the same lifeline again"?
+
+### D19 — Reactive storyboard steps evaluated against the simulated schedule (proposed, not implemented)
+
+**Friction: docs/API-FRICTIONS.md F19.** Narration driven from `run.on(...)` handlers (loop
+captions per D18/F2, but also the tool-pick and eval-score captions in `tool-use-loop`,
+`ab-experiment`, `agent-swarm`, `llm-eval-harness`) never becomes a storyboard step, so it's
+invisible to the two things that make a storyboard a *declared* timeline (D8/D12): it isn't
+in the per-step snapshot array `seek()`/`stepBack()` restore, and it has no `dur`/offset for
+`cues()` to report, because both are computed from the op list at compile time and reactive
+code runs after that.
+
+Proposed shape: a new storyboard step kind, reactive rather than positional —
+
+```js
+{ on: "run.loop", match: { edgeId: "retry" }, steps: [
+  { op: "caption", args: ["retrying…"] },
+] }
+```
+
+`on` names a run event (`run.loop`, `run.fail`, `run.join`, …, mirroring the table in
+README/RUN.md); `match` filters it by payload fields (`edgeId`, `nodeId`, …); `steps` is an
+ordinary op list, exactly what a page would have called manually from the handler. The
+part that actually resolves F19 — rather than just moving the same reactive code into a
+different array — is that this step is **evaluated at compile time against the simulated
+schedule** (`sim().events`, the same event list the run transport and scrubber already
+consume; note `cues()` itself does *not* read it — it is built from the op array alone,
+via `stepSlices()`/`durOf()`): a compiling storyboard walks the compiled event list and,
+for each matching event, synthesizes the child steps at that event's real offset. Once
+expanded, the result is an ordinary step sequence with real `dur`/offsets, so `seek()`'s
+snapshot array and `cues()` pick it up through their existing paths.
+
+Open questions:
+
+- **Where a mid-run step goes (the crux).** A storyboard is a strictly sequential op array,
+  and a `run.play` step is awaited as one unit: `stepSlices()` hands it
+  `[base, timeOf(until) ?? runCtl.duration]` and `applyStep` awaits the whole `r.play(...)`.
+  There is no way to place a step *inside* a `run.play` window, so expansion has to **split
+  the enclosing `run.play` into two steps around each synthesized step** — and `run.play`'s
+  only positioning primitive today is `until`, a *node id* resolved through
+  `runCtl.timeOf()` (`untilOf()`, src/index.js), not a time offset. A per-iteration loop-tick
+  offset cannot even be expressed as an `until` target. So this design needs one of: a
+  time-addressed `run.play` (`{ op: 'run.play', untilTime: ms }`, with `stepSlices()` and
+  `applyStep` taught to read it), or an internal-only split representation that never
+  appears in the authored array but does appear in `cues()`/snapshots. Which of those, and
+  what the split does to step indices that pages already hold (`seek(index)`, `cues()[].index`),
+  is the first thing to settle.
+
+- **Compile-time only, or also live-reactive?** A live-mode run (Mode B, D4) has no
+  compiled schedule to evaluate this against — does a reactive step in Mode A get expanded
+  once at compile time (as above) while the same declaration in Mode B falls back to firing
+  live off `run.on(...)` with no snapshot/cues support (matching Mode B's existing gaps,
+  F19's live-mode cousins F10-F14)? Or is compile-time expansion required and Mode B simply
+  doesn't support this step kind yet?
+- **Multiple matches.** A loop edge fires `run.loop` once per iteration — does one reactive
+  step expand into N synthesized steps (one per matching event), and if the storyboard also
+  has a positional step scheduled inside that same window, which wins, or do they compose?
+- **Recompiles.** `g.run(opts)` recompiles the schedule (F6); does a reactive step's
+  synthesized children get re-synthesized against the new schedule automatically, or does
+  the storyboard need to be re-compiled too, and does that interact with F5's proposed
+  `run` op?
+- **Interaction with D18.** If loop replay (D18) ships, `run.loop` fires once per real
+  iteration with its own dwell rather than once per tick — does the reactive step's offset
+  follow that iteration's actual start (the natural reading) with no format change needed,
+  or does something else need to move?
+
 ---
 
 ## 5. Data model & API
