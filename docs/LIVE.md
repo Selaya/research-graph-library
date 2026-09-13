@@ -88,7 +88,7 @@ Everything else on the handle:
 | `state()` | `RunState` | `replayLive(spec, log, time())` — same shape as Mode A's `stateAt(t)`, see `docs/RUN.md`, plus the live-only `waiting`/`active`/`overBudget` on each node entry (below). |
 | `sim()` | `Sim`-shaped | `{ duration: frontier, events: log (copy), stateAt }` — for code written against both modes' `sim()` uniformly. |
 | `log()` | `LiveEvent[]` | A **copy** of the full event log, in insertion order. |
-| `options()` | `object` | `{ hopMs, mode: "live", log }` — carries the whole log, not just compile inputs, so a snapshot/restore round-trips history losslessly. |
+| `options()` | `object` | `{ hopMs, mode: "live", now, log }` (plus `minHopMs` / `spawnOnStart` when set) — carries the whole log and the frontier epoch, not just compile inputs, so a snapshot/restore round-trips history losslessly. |
 | `reset(opts, time?)` | `number` | Re-seeds the log (`{ log, now, replay }`) under the **same** transport identity/listeners — see **Reconnect and persistence**. |
 | `on(type, fn)` / `off(type, fn)` | | Subscribe to `start`/`finish`/`fail`/`spawn` plus the shared transport events (`play`/`pause`/`seek`/`speed`/`step`/`tick`/`end`/`cancel`/`destroy`/`remap`) documented in `docs/RUN.md`. Live mode never emits `enter`/`join`/`drop`/`loop`/`warn`/`done`/`recompile` — those are Mode A's compiled-schedule events. |
 | `destroy()` | `void` | |
@@ -162,6 +162,9 @@ run.start("J"); run.finish("J");         // ...and one token onto J's out-edges
 - The log outranks the policy: an explicit `start(id)` activates a held arrival anyway, and
   `finish`/`fail` consume whatever is on the node. `spawn()` is an explicit injection — it
   is never held by, and never counted into, a join.
+- A `finish()` on a join that has **not** fired yet — the normal live shape, one slow branch
+  still outstanding — consumes the arrivals it is holding as **one** piece of work and hands
+  a single token downstream, never one per arrival.
 
 ## Durations are expectations, not a schedule
 
@@ -256,6 +259,13 @@ The claimed start is pushed out to `hop start + minHopMs` — so the node goes `
 the crossing finishes, not when the log said. It is clamped to `hopMs` (a minimum can never
 outlast the hop it shortens), it only applies to a hop that is still in the air, and it
 defaults to `0`, which is the old collapse-on-claim behaviour exactly.
+
+Real spans are routinely *shorter* than a sensible minimum hop, so a `finish()` (or `fail()`)
+often lands inside the window the `start()` it follows opened. That terminal event waits for
+the landing: the node keeps reading `'pending'` with its token visibly on the wire, and goes
+straight to `'done'`/`'failed'` when the crossing completes. The dwell collapses — with
+`minHopMs` you are trading dwell time for wire time — but nothing is ever painted finished
+while its token is still crossing.
 
 ## Reconnect and persistence
 

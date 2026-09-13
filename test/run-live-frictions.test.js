@@ -411,3 +411,134 @@ test("F14: the transport passes minHopMs through and keeps it in options()", () 
   assert.equal(run.state().nodes.b.status, "active");
   run.destroy();
 });
+
+// ===========================================================================
+// Review follow-ups (second pass)
+// ===========================================================================
+
+/** A -> J <- B, C -> J: a three-way implicit AND-join, so two arrivals leave it unfired. */
+const join3 = () => ({
+  nodes: [{ id: "A" }, { id: "B" }, { id: "C" }, { id: "J" }, { id: "Z" }],
+  edges: [
+    { id: "aj", source: "A", target: "J" },
+    { id: "bj", source: "B", target: "J" },
+    { id: "cj", source: "C", target: "J" },
+    { id: "jz", source: "J", target: "Z" },
+  ],
+});
+
+test("F10: a bare finish() on a PARTIALLY arrived join still releases only one token", () => {
+  const events = [
+    { t: 0, type: "start", id: "A" }, { t: 1, type: "finish", id: "A" },
+    { t: 2, type: "start", id: "B" }, { t: 3, type: "finish", id: "B" },  // 2 of 3: unfired
+    { t: 400, type: "finish", id: "J" },                                   // drains them anyway
+  ];
+  const st = replayLive(join3(), events, 1200);
+  assert.deepEqual(st.joins.J, { arrived: 2, needed: 3, fired: false });
+  assert.equal(st.nodes.Z.occupancy, 1, "the held group is ONE piece of work, not two");
+  assert.equal(st.tokens.length, 1);
+});
+
+test("F10: released and held occupants each fan out once — one per group", () => {
+  // count:2 over three in-edges: A+B make a group (released), C is held on its own.
+  const spec = join3();
+  spec.nodes[3].join = { count: 2 };
+  const events = [
+    { t: 0, type: "start", id: "A" }, { t: 1, type: "finish", id: "A" },
+    { t: 2, type: "start", id: "B" }, { t: 3, type: "finish", id: "B" },
+    { t: 4, type: "start", id: "C" }, { t: 5, type: "finish", id: "C" },
+    { t: 400, type: "finish", id: "J" },
+  ];
+  const st = replayLive(spec, events, 1200);
+  assert.equal(st.nodes.Z.occupancy, 2, "one for the fired group, one for the held remainder");
+});
+
+test("F14: a finish() stamped inside the minimum crossing waits for the landing", () => {
+  const events = [
+    { t: 0, type: "start", id: "a" },
+    { t: 100, type: "finish", id: "a" },
+    { t: 100, type: "start", id: "b" },
+    { t: 150, type: "finish", id: "b" },   // a span shorter than the 120ms minimum hop
+  ];
+  const opts = { hopMs: 300, minHopMs: 120 };
+
+  // inside the window: b is still being crossed towards, NOT already finished
+  const mid = replayLive(chain(), events, 150, opts);
+  assert.equal(mid.nodes.b.status, "pending", "b must not read done while its token is on the wire");
+  assert.equal(mid.nodes.b.progress, 0);
+  assert.equal(mid.tokens.length, 1);
+  assert.equal(mid.tokens[0].at.kind, "edge", "the token is still visibly crossing");
+
+  // the landing instant: the finish lands with it, so nothing is drawn out of order
+  const after = replayLive(chain(), events, 260, opts);
+  assert.equal(after.nodes.b.status, "done");
+  assert.equal(after.nodes.b.progress, 1);
+  near(after.edges.ab.traversed, 1);
+  assert.equal(after.tokens.length, 1, "only the hop b's finish fanned out is left");
+  assert.equal(after.tokens[0].at.id, "bc", "nothing lingers on b with a negative-length segment");
+});
+
+test("F14: a fail() inside the minimum crossing waits for the landing too", () => {
+  const events = [
+    { t: 0, type: "start", id: "a" },
+    { t: 100, type: "finish", id: "a" },
+    { t: 100, type: "start", id: "b" },
+    { t: 140, type: "fail", id: "b" },
+  ];
+  const opts = { hopMs: 300, minHopMs: 120 };
+  assert.equal(replayLive(chain(), events, 150, opts).nodes.b.status, "pending");
+  assert.equal(replayLive(chain(), events, 300, opts).nodes.b.status, "failed");
+});
+
+test("F14: a short span through the transport neither mis-paints nor warns", () => {
+  const { ticker, run } = liveHost(chain(), { hopMs: 300, minHopMs: 120 });
+  ticker.tick(10);
+  const warns = captureWarnings(() => {
+    run.start("a", { at: 0 });
+    run.finish("a", { at: 0 });
+    run.start("b", { at: 0 });
+    run.finish("b", { at: 50 });   // not a no-op: the engine defers it to the landing
+  });
+  assert.deepEqual(warns, [], `unexpected warnings: ${warns.join(" | ")}`);
+  ticker.tick(60);
+  assert.equal(run.state().nodes.b.status, "pending");
+  ticker.tick(200);
+  assert.equal(run.state().nodes.b.status, "done");
+  run.destroy();
+});
+
+test("F13: a concurrent start() does not erase an over-budget verdict already earned", () => {
+  const spec = { nodes: [{ id: "N", data: { duration: "1s" } }], edges: [] };
+  const events = [
+    { t: 0, type: "spawn", id: "N", n: 2 },
+    { t: 0, type: "start", id: "N" },
+    { t: 4000, type: "finish", id: "N", n: 1 },   // that dwell ran 4s against a 1s budget
+    { t: 4100, type: "start", id: "N" },          // a second unit of work on the same node
+  ];
+  const st = replayLive(spec, events, 4200);
+  assert.equal(st.nodes.N.overBudget, true, "the finished dwell's verdict survives");
+  // and a start() on an EMPTY node is still a fresh activation, judged on its own
+  const fresh = replayLive(spec, events.concat([
+    { t: 4200, type: "finish", id: "N" }, { t: 4300, type: "start", id: "N" },
+  ]), 4400);
+  assert.equal(fresh.nodes.N.overBudget, false);
+});
+
+test("F11: the guard does not replay for a start() that follows its upstream finish", () => {
+  // Regression guard for the guard's own cost: the cheap arrival counter must answer the
+  // common streaming shape, so nothing here may reach the (much more expensive) replay.
+  const { ticker, store, run } = liveHost(chain(), { hopMs: 100 });
+  ticker.tick(10);
+  let replays = 0;
+  const spec = store.spec.bind(store);
+  store.spec = () => { replays++; return spec(); };
+  const warns = captureWarnings(() => {
+    run.start("a");
+    run.finish("a");
+    run.start("b");        // fed by a's finish: no warning, and no state replay
+  });
+  store.spec = spec;
+  assert.deepEqual(warns, []);
+  assert.equal(replays, 1, "only finish()'s own occupancy check replayed");
+  run.destroy();
+});

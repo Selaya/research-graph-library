@@ -285,7 +285,10 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
 
   function doStart(nodeId, at) {
     const q = nodeQueue.get(nodeId);
-    overBudget.delete(nodeId); // a fresh activation is judged against its own dwell
+    // A fresh activation is judged against its own dwell — but only a start() on an EMPTY
+    // node is a fresh activation: with concurrent occupants, one more unit of work must not
+    // erase the verdict an over-long dwell that already finished earned for this node.
+    if (!q.length) overBudget.delete(nodeId);
     // An explicit start() ALWAYS activates (D4 M2: the real log outranks the declared
     // policy), so it picks up an arrival still held by an unfired join as readily as a
     // released one — it just takes the released ones first.
@@ -334,35 +337,46 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     nodeStatus.set(nodeId, "active");
   }
 
+  /** One unit of work leaving `nodeId`: a token onto each of its non-loop out-edges. */
+  function fanOut(nodeId, at) {
+    for (const e of outNormal.get(nodeId)) {
+      // The log is history: an edge that did not exist yet when this finish was written
+      // never carried anything out of it (D4 — Mode B replays a real event log "as things
+      // actually happened", so a later addEdge must not fabricate a past traversal).
+      if (bornAt) { const b = bornAt.get(e.id); if (b != null && b > at) continue; }
+      const child = newToken();
+      const eseg = { kind: "edge", id: e.id, t0: at, t1: at + hopMs };
+      child.segments.push(eseg);
+      edgeSegs.get(e.id).push(eseg);
+      const landAt = at + hopMs;
+      const wseg = { kind: "node", id: e.target, t0: landAt, t1: Infinity, wait: true };
+      child.segments.push(wseg);
+      const hop = { landAt, tk: child, eseg, wseg, item: null };
+      heapPush(inFlight.get(e.target), hop, flightLess);
+      // Only materialize the landing into the target's queue if it has actually happened
+      // by T — a hop still in flight at T stays represented purely by `eseg` above (and
+      // by `inFlight`, so an early start(target) can still claim it).
+      if (landAt <= T) {
+        hop.item = { t: landAt, seq: seq++, pri: PRI_LAND, type: "__land", id: e.target, tk: child, seg: wseg };
+        heapPush(queue, hop.item, queueLess);
+      }
+    }
+  }
+
   function doFinish(nodeId, at, n) {
     const q = nodeQueue.get(nodeId);
     const k = Number.isFinite(n) ? Math.max(0, Math.min(Math.floor(n), q.length)) : q.length;
     const finished = q.splice(0, k);
+    let heldFanned = false;
     for (const occ of finished) {
       if (occ.state === "active" && occ.seg) noteDwell(nodeId, occ.seg.t0, at);
       closeSeg(occ.seg, at);
-      for (const e of outNormal.get(nodeId)) {
-        // The log is history: an edge that did not exist yet when this finish was written
-        // never carried anything out of it (D4 — Mode B replays a real event log "as things
-        // actually happened", so a later addEdge must not fabricate a past traversal).
-        if (bornAt) { const b = bornAt.get(e.id); if (b != null && b > at) continue; }
-        const child = newToken();
-        const eseg = { kind: "edge", id: e.id, t0: at, t1: at + hopMs };
-        child.segments.push(eseg);
-        edgeSegs.get(e.id).push(eseg);
-        const landAt = at + hopMs;
-        const wseg = { kind: "node", id: e.target, t0: landAt, t1: Infinity, wait: true };
-        child.segments.push(wseg);
-        const hop = { landAt, tk: child, eseg, wseg, item: null };
-        heapPush(inFlight.get(e.target), hop, flightLess);
-        // Only materialize the landing into the target's queue if it has actually happened
-        // by T — a hop still in flight at T stays represented purely by `eseg` above (and
-        // by `inFlight`, so an early start(target) can still claim it).
-        if (landAt <= T) {
-          hop.item = { t: landAt, seq: seq++, pri: PRI_LAND, type: "__land", id: e.target, tk: child, seg: wseg };
-          heapPush(queue, hop.item, queueLess);
-        }
-      }
+      // F10 — the arrivals an UNFIRED join is still holding are one piece of work, not N.
+      // A bare finish() consuming them releases a single token downstream, exactly as the
+      // satisfied join would, instead of minting one per arrival (the ×N badge that then
+      // propagates forever). Released/active occupants keep fanning out one each.
+      if (occ.state === "held") { if (heldFanned) continue; heldFanned = true; }
+      fanOut(nodeId, at);
     }
     // A finish() that found nothing occupying the node (never started, or already fully
     // drained by an earlier finish) fans nothing out above and must not flip the status —
@@ -396,11 +410,35 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     }
   }
 
+  /** F14 — the landing instant a minHop-delayed start() booked on `nodeId` but has not
+   *  reached yet at `at`. A terminal event stamped inside that window would close the
+   *  occupant's node segment BEFORE its own t0: the node would paint 'done' while its token
+   *  is still drawn crossing the wire, and the segment would vanish (negative length). Real
+   *  spans are routinely shorter than a 100-200ms minimum hop, so this is the normal case,
+   *  not a corner: the terminal event waits for the landing instead. */
+  function landingOf(nodeId, at, k) {
+    const q = nodeQueue.get(nodeId);
+    let m = at;
+    const n = Math.min(k, q.length);
+    for (let i = 0; i < n; i++) { const o = q[i]; if (o.seg && o.seg.t0 > m) m = o.seg.t0; }
+    return m;
+  }
+
   let steps = 0;
   while (queue.length && steps++ < MAX_STEPS) {
     const ev = heapPop(queue, queueLess);
     if (ev.cancelled) continue; // takeInFlight consumed this landing early — lazy delete
     if (ev.type === "__land") { dropHop(ev.id); land(ev.id, ev.t, ev.tk, ev.seg); continue; }
+    if (minHop > 0 && (ev.type === "finish" || ev.type === "fail")) {
+      const k = ev.type === "finish" && Number.isFinite(ev.n) ? Math.max(0, Math.floor(ev.n)) : Infinity;
+      const landAt = landingOf(ev.id, ev.t, k);
+      if (landAt > ev.t) {
+        // Re-queue at the landing (it is in the future, so the heap order still holds).
+        // Past T it simply has not happened yet in this sample — a later T replays it.
+        if (landAt <= T) heapPush(queue, { ...ev, t: landAt, seq: seq++, pri: PRI_LOG }, queueLess);
+        continue;
+      }
+    }
     if (ev.type === "start") doStart(ev.id, ev.t);
     else if (ev.type === "finish") doFinish(ev.id, ev.t, ev.n);
     else if (ev.type === "fail") doFail(ev.id, ev.t);

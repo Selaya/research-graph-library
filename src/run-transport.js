@@ -402,14 +402,57 @@ function createLiveTransport(internals, opts = {}) {
   // comparison per frame instead of a full replay.
   const revOf = () => (typeof store.rev === "number" ? store.rev : NaN); // NaN => never cache
   let cache = null;
-  function stateAt(tt) {
+  /** The memoized replay itself. Internal diagnostics read it directly; every public
+   *  caller goes through stateAt(), which hands out a private copy (consumers write into
+   *  what they get). */
+  function stateRaw(tt) {
     const rev = revOf();
-    if (cache && cache.t === tt && cache.rev === rev && cache.logRev === logRev) return cloneState(cache.state);
+    if (cache && cache.t === tt && cache.rev === rev && cache.logRev === logRev) return cache.state;
     const st = replayLive(store.spec(), log, tt, liveOpts());
     cache = { t: tt, rev, logRev, state: st };
-    return cloneState(st);
+    return st;
   }
+  function stateAt(tt) { return cloneState(stateRaw(tt)); }
   const touchLog = () => { logRev++; };
+
+  // ---- cheap arrival bookkeeping (F11's guard) ---------------------------------------
+  // The phantom-start guard needs one question answered — "could anything be waiting on
+  // this node?" — and answering it from a full replay per start() doubled the cost of the
+  // live engine's hot path (finish(A); start(B); … at stream rates). `feed` tracks, per
+  // node, how many units of work have plausibly been handed to it (an upstream finish, a
+  // spawn) and not yet consumed (a start/finish/fail on it). It is a conservative filter,
+  // never a verdict: a positive count only SKIPS the exact check, so the guard can never
+  // warn about a node something really did feed. Zero falls through to the real replay.
+  const feed = new Map();
+  const bump = (id, d) => { const v = (feed.get(id) || 0) + d; if (v > 0) feed.set(id, v); else feed.delete(id); };
+  /** Fold ONE log entry into the counter: a start consumes one, a finish/fail drains the
+   *  node (and a finish hands one to each non-loop successor), a spawn injects n. */
+  function noteLog(e) {
+    if (!e || e.id == null) return;
+    if (e.type === "start") bump(e.id, -1);
+    else if (e.type === "spawn") { if (Number.isFinite(e.n) && e.n > 0) bump(e.id, Math.floor(e.n)); }
+    else if (e.type === "finish" || e.type === "fail") {
+      feed.delete(e.id);
+      if (e.type === "finish") {
+        for (const x of store.edges.values()) if (!x.loop && x.source === e.id && x.target !== e.id) bump(x.target, 1);
+      }
+    }
+  }
+  const reseedFeed = () => { feed.clear(); for (const e of log) noteLog(e); };
+  reseedFeed();
+
+  /** Non-root membership, cached against the store revision: isRoot() is an O(E) scan and
+   *  start() is called once per streamed event. */
+  let fedSet = null, fedRev = NaN;
+  function isRoot(id) {
+    const rev = revOf();
+    if (!fedSet || !Object.is(rev, fedRev)) {
+      fedSet = new Set();
+      for (const e of store.edges.values()) if (!e.loop && e.source !== e.target) fedSet.add(e.target);
+      fedRev = rev;
+    }
+    return !fedSet.has(id);
+  }
 
   /** `until` is a node's status, not a timestamp — and in live mode `t` is glued to the
    *  frontier by default, so consulting the frontier FIRST made every `play({until})` from
@@ -517,13 +560,14 @@ function createLiveTransport(internals, opts = {}) {
     console.warn(`run-transport: ${fn}("${id}") — non-numeric n (${JSON.stringify(n)}); ignored.`);
   }
 
-  /** A node nothing (non-loop) points at: the only place a live run legitimately seeds a
-   *  token out of nothing, which is exactly what start() does there. */
-  function isRoot(id) {
-    for (const e of store.edges.values()) {
-      if (!e.loop && e.target === id && e.source !== id) return false;
+  /** Is any token in `st` on a wire pointing at `id`? */
+  function crossingTo(st, id) {
+    for (const tk of st.tokens) {
+      if (tk.at.kind !== "edge") continue;
+      const e = store.edge(tk.at.id);
+      if (e && e.target === id) return true;
     }
-    return true;
+    return false;
   }
 
   /** F11 — would this start() fabricate a token? True only when the node is a non-root with
@@ -531,17 +575,12 @@ function createLiveTransport(internals, opts = {}) {
    *  a root seeding itself, a queued arrival being picked up, a hop being claimed mid-air,
    *  and a restart of a done/failed node (the live loop iteration) are all legitimate. */
   function phantomStart(id, at) {
-    if (!store.hasNode(id) || isRoot(id)) return false;
-    const st = stateAt(at);
+    if (!store.hasNode(id) || (feed.get(id) || 0) > 0 || isRoot(id)) return false;
+    const st = stateRaw(at);
     const n = st.nodes[id];
     if (!n || n.waiting > 0) return false;
     if (n.status === "done" || n.status === "failed") return false;
-    for (const tk of st.tokens) {
-      if (tk.at.kind !== "edge") continue;
-      const e = store.edge(tk.at.id);
-      if (e && e.target === id) return false;
-    }
-    return true;
+    return !crossingTo(st, id);
   }
 
   function start(id, o) {
@@ -554,26 +593,36 @@ function createLiveTransport(internals, opts = {}) {
         (spawnOnStart ? "." : "; ignored."));
       if (!spawnOnStart) return at;
     }
-    log.push({ t: at, type: "start", id });
+    const sv = { t: at, type: "start", id };
+    log.push(sv); noteLog(sv);
     touchLog();
     bus.emit("start", { id, t: at });
     return at;
+  }
+
+  /** Is `id` unoccupied at `at` — i.e. would a finish()/fail() there be a no-op? With
+   *  `minHopMs` a start() that claimed a hop is booked on the node but has not landed yet,
+   *  so it is deliberately absent from `occupancy`; the terminal event that follows it is
+   *  real (the engine defers it to the landing), not a no-op, so a crossing towards `id`
+   *  counts as occupied here. */
+  function unoccupied(id, at) {
+    const st = stateRaw(at);
+    const n = st.nodes[id];
+    if (!n || n.occupancy > 0) return false;
+    return !(minHopMs != null && crossingTo(st, id));
   }
 
   function finishNode(id, o) {
     if (destroyed) return t;
     const at = stampAt(o);
     if (!store.hasNode(id)) warnUnknownNode("finish", id);
-    else {
-      const n = stateAt(at).nodes[id];
-      if (n && n.occupancy === 0) {
-        console.warn(`run-transport: finish("${id}") — "${id}" has zero current occupancy; this finish() is a no-op.`);
-      }
+    else if (unoccupied(id, at)) {
+      console.warn(`run-transport: finish("${id}") — "${id}" has zero current occupancy; this finish() is a no-op.`);
     }
     if (o && o.n !== undefined && !Number.isFinite(o.n)) warnBadN("finish", id, o.n);
     const ev = { t: at, type: "finish", id };
     if (o && Number.isFinite(o.n)) ev.n = o.n;
-    log.push(ev);
+    log.push(ev); noteLog(ev);
     touchLog();
     bus.emit("finish", { id, t: at, n: ev.n });
     return at;
@@ -588,15 +637,12 @@ function createLiveTransport(internals, opts = {}) {
     if (destroyed) return t;
     const at = stampAt(o);
     if (!store.hasNode(id)) warnUnknownNode("fail", id);
-    else {
-      const n = stateAt(at).nodes[id];
-      if (n && n.occupancy === 0) {
-        console.warn(`run-transport: fail("${id}") — "${id}" has zero current occupancy; this fail() is a no-op.`);
-      }
+    else if (unoccupied(id, at)) {
+      console.warn(`run-transport: fail("${id}") — "${id}" has zero current occupancy; this fail() is a no-op.`);
     }
     const ev = { t: at, type: "fail", id };
     if (o && typeof o.reason === "string" && o.reason) ev.reason = o.reason;
-    log.push(ev);
+    log.push(ev); noteLog(ev);
     touchLog();
     bus.emit("fail", { id, t: at, reason: ev.reason });
     return at;
@@ -607,7 +653,8 @@ function createLiveTransport(internals, opts = {}) {
     if (!store.hasNode(id)) warnUnknownNode("spawn", id);
     if (!Number.isFinite(n)) warnBadN("spawn", id, n);
     const at = stampAt(o);
-    log.push({ t: at, type: "spawn", id, n });
+    const sp = { t: at, type: "spawn", id, n };
+    log.push(sp); noteLog(sp);
     touchLog();
     bus.emit("spawn", { id, t: at, n });
     return at;
@@ -633,6 +680,7 @@ function createLiveTransport(internals, opts = {}) {
     if (p) p.resolve({ canceled: true });
     log = (o.log || []).map((e) => ({ ...e }));
     touchLog();
+    reseedFeed();
     edgeBornAt.clear();
     frontier = epochOf(o);
     lastNow = ticker.now();

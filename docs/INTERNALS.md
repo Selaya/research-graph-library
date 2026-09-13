@@ -417,18 +417,24 @@ liveBoundaries(events) → number[]                // sorted distinct event time
   Mode A the join re-arms — each further group releases another token, which a long-running
   fan-in needs. An explicit `start(id)` ALWAYS activates — the real log outranks the declared
   policy, so it picks up a held arrival too — and `spawn()` injects outright (never held,
-  never counted). `joins` map reported the same way. Loop edges (`loop: true`) never
+  never counted). A `finish`/`fail` on a join that has NOT fired consumes the arrivals it is
+  holding as one piece of work: one token downstream for the held group, plus one per
+  released/active occupant. `joins` map reported the same way. Loop edges (`loop: true`) never
   auto-fan-out; a repeated `start` of an already-done node re-activates it (that IS the live
   loop iteration) and increments `loops[edgeId].iteration` for its loop in-edge if one exists.
 - `opts.minHopMs` (F14, default 0, clamped to `hopMs`): the shortest crossing a hop may be
   squashed to when a `start()` claims it mid-flight — the claimed start is pushed out to
   `hopStart + minHopMs` so a log whose `start` shares the upstream `finish`'s timestamp (a
-  real trace) still draws the crossing instead of teleporting the token.
+  real trace) still draws the crossing instead of teleporting the token. A `finish`/`fail`
+  stamped INSIDE that window is re-queued to the landing instant (real spans are routinely
+  shorter than the minimum hop), so a node is never painted done while its token is still
+  drawn on the wire; the dwell collapses instead.
 - `nodes[id]` carries three live-only keys beyond Mode A's: `waiting`/`active` (the occupancy
   split, `waiting + active === occupancy`; a held join arrival counts as waiting) and
   `overBudget` — the live dwell outran the declared `data.duration`, which in Mode B is an
   expectation and never a schedule (F13). It survives the `finish` that closed the over-long
-  dwell and a fresh `start` clears it; run-render writes it as `data-over-budget`.
+  dwell and a fresh `start` on an EMPTY node clears it (a concurrent start cannot erase a
+  verdict another dwell earned); run-render writes it as `data-over-budget`.
 - Deterministic: same (spec, events, t) → same state. No wall clock inside; the caller
   owns time.
 
@@ -449,7 +455,12 @@ and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unch
   it and no `'done'`/`'failed'` attempt to retry, the call would mint a token out of nothing
   — it warns `[smv:live]` and names `{ spawn: true }`, which declares the mint deliberate.
   `opts.spawnOnStart: false` turns the warned-about start into a no-op (nothing is logged);
-  the default stays `true` (backward compatible).
+  the default stays `true` (backward compatible). The guard is gated behind a cheap
+  per-node arrival counter (upstream `finish`/`spawn` credit it, `start`/`finish`/`fail`
+  drain it), so the streaming shape `finish(A); start(B)` never pays for a replay; the
+  counter only ever SUPPRESSES the exact check, so no warning it would not have made can
+  appear. `finish()`/`fail()`'s zero-occupancy warning counts a crossing towards the node as
+  occupied when `minHopMs` is set, since the engine defers such a call rather than dropping it.
 - View time `t`: by default **follows** the frontier (`run.following === true`).
   `seek(ms)` clamps to `[0, frontier]` and detaches (time-travel replay); `play()`
   advances `t` at 1× (× global speed) and clamps at the frontier — you can NEVER scrub or
