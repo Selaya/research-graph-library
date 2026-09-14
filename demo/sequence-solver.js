@@ -25,8 +25,12 @@
 // drops one; `seq.placement(id)` reads it back. A node can also carry its own placement in
 // its spec data — `data: { seq: { actor, row } }` — which the shell passes through to the
 // solver, so nothing has to be registered out of band. Declare an actor that has no
-// activations yet with `container: true` and it still gets its own column. Ids the solver has no placement for land in
-// an extra column on the right, one per row, with a console.warn naming them. Opts read from
+// activations yet with `container: true` and it still gets its own column; a container that
+// already HAS children is a nested block (an activation group inside a lifeline), not an
+// actor, so it gets no column — its children sit in the column of the lifeline around them
+// and the shell derives the block's rect from them. Ids the solver has no placement for land
+// in an extra column to the right of every actor, one per row, with a console.warn naming
+// them. Opts read from
 // the layout opts: `nodesep` = horizontal gap between actor columns, `ranksep` = vertical gap
 // between rows, `marginx` / `marginy`, and `containerPad` (defaults mirror the shell's
 // {top:40, side:12, bottom:12}). Pass `minColWidth` / `minRowHeight` under `layout` to keep
@@ -70,31 +74,60 @@
 
       var byId = new Map();
       nodes.forEach(function (n) { byId.set(n.id, n); });
-      var isContainer = new Set();
+      var hasKids = new Set();
+      nodes.forEach(function (n) { if (n.parent !== undefined && byId.has(n.parent)) hasKids.add(n.parent); });
+      var isContainer = new Set(hasKids);
       nodes.forEach(function (n) {
-        if (n.parent !== undefined && byId.has(n.parent)) isContainer.add(n.parent);
-        // An actor declared `container: true` is a lifeline from the start, even with no
-        // activations yet — it is not a leaf to park in the spare column.
-        if (n.container) { isContainer.add(n.id); colOf(n.id); }
+        if (!n.container) return;
+        isContainer.add(n.id);
+        // The shell flags EVERY container `container: true` (INTERNALS §M3), not only an
+        // actor — a nested block (an activation group inside a lifeline) carries the same
+        // flag. Only a container with NO children of its own is an actor declared ahead of
+        // its first activation, so only that one gets a column minted for it: a column for
+        // a nested block would be a phantom lifeline beside the real ones (its children sit
+        // in their actor's column, so the block's rect would be a header in an empty column
+        // that the shell then unions with the children's bbox). A block with children is
+        // left for the shell to derive from those children.
+        if (!hasKids.has(n.id)) colOf(n.id);
       });
+
+      // The nearest enclosing lifeline of `id` — itself if it owns a column, else the first
+      // ancestor that does (a nested block's activations belong to the actor around it).
+      function lifelineOf(id) {
+        var seen = new Set();
+        while (id !== undefined && byId.has(id) && !seen.has(id)) {
+          if (actors.indexOf(id) >= 0) return id;
+          seen.add(id);
+          id = byId.get(id).parent;
+        }
+        return null;
+      }
 
       // 1. resolve every leaf to (col, row); unknown ids go to a spare column, stacked.
       var cells = new Map(); // id -> {col,row}
-      var spareCol = actors.length, spareRow = 0, unknown = [];
+      var unknown = [];
       nodes.forEach(function (n) {
         if (isContainer.has(n.id)) return;
         // A placement registered through place(), or one the node carries in its own
         // data (`data.seq = {actor, row}`), which the shell now hands the solver.
         var p = placements.get(n.id) || fromData(n.data);
         if (p) { cells.set(n.id, { col: colOf(p.actor), row: p.row }); return; }
-        if (n.parent !== undefined && actors.indexOf(n.parent) >= 0) {
-          // A child of an actor with no explicit row: after the last row of that actor.
-          cells.set(n.id, { col: colOf(n.parent), row: nextRow() }); return;
+        var host = n.parent !== undefined ? lifelineOf(n.parent) : null;
+        if (host !== null) {
+          // A child of a lifeline with no explicit row: after the last row of that actor.
+          cells.set(n.id, { col: colOf(host), row: nextRow() }); return;
         }
         unknown.push(n.id);
-        cells.set(n.id, { col: spareCol, row: spareRow++ });
       });
-      if (unknown.length) console.warn("[seq] no placement for: " + unknown.join(", ") + " — parked in a spare column");
+      // The spare column can only be read once every placement is resolved: a placement a
+      // node carries in its own `data.seq` may name an actor nobody registered, and colOf()
+      // mints that column DURING the loop above. Taking actors.length up front would park
+      // the unplaced ids on top of a real lifeline's activations instead.
+      if (unknown.length) {
+        var spareCol = actors.length;
+        unknown.forEach(function (id, i) { cells.set(id, { col: spareCol, row: i }); });
+        console.warn("[seq] no placement for: " + unknown.join(", ") + " — parked in a spare column");
+      }
 
       function nextRow() {
         var max = -1;

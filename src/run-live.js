@@ -104,6 +104,38 @@ function findCurrent(tk, t) {
   return degenerate;
 }
 
+/** The edges live mode refuses to treat as feeding their target: an untagged back edge
+ *  (which reads as a zero-iteration loop, D3/D4) or a plain self-edge. `loop: true` edges
+ *  are excluded by the callers instead — they are never back edges, they are loops. */
+function backEdgeIds(nodeList, edgeList) {
+  const back = new Set();
+  for (const id of breakCycles(nodeList, edgeList)) {
+    const e = edgeList.find((x) => x.id === id);
+    if (e && !e.loop) back.add(id);
+  }
+  for (const e of edgeList) if (!e.loop && e.source === e.target) back.add(e.id);
+  return back;
+}
+
+/**
+ * The node ids something actually feeds in live mode — i.e. the ids that are NOT roots.
+ * Exactly `inNonLoop` non-empty inside replayLive: loop edges, self-edges and the back
+ * edges `breakCycles` cuts are all excluded, so a node whose only in-edges are untagged
+ * back edges IS a root here. Exported so the transport's phantom-start guard tests
+ * rootness with the engine's own definition instead of a second, looser one (a graph with
+ * an untagged cycle otherwise has no root at all and can never be seeded).
+ * Pure: takes plain node/edge arrays (a spec, or a store's `.values()`), returns a Set.
+ */
+export function liveFedTargets(nodeList = [], edgeList = []) {
+  const ids = new Set();
+  for (const n of nodeList || []) if (n && n.id != null) ids.add(n.id);
+  const es = (edgeList || []).filter((e) => e && ids.has(e.source) && ids.has(e.target));
+  const back = backEdgeIds([...ids].map((id) => ({ id })), es);
+  const fed = new Set();
+  for (const e of es) if (!e.loop && !back.has(e.id)) fed.add(e.target);
+  return fed;
+}
+
 /**
  * replayLive(spec, events, t, opts) -> state   (same shape as compileRun(...).stateAt(t))
  *   spec   = a store.spec() snapshot (flat: no container remap, see header note)
@@ -133,12 +165,7 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
 
   // Untagged cycles read as zero-iteration loops here too (D3/D4), exactly as compileRun
   // treats them — a plain back edge must not inflate a node's implicit join arity.
-  const back = new Set();
-  for (const id of breakCycles([...nodes.values()], edges)) {
-    const e = edges.find((x) => x.id === id);
-    if (e && !e.loop) back.add(id);
-  }
-  for (const e of edges) if (!e.loop && e.source === e.target) back.add(e.id);
+  const back = backEdgeIds([...nodes.values()], edges);
 
   const outNormal = new Map();   // nodeId -> non-loop out-edges (loop edges never auto-fan-out)
   const inNonLoop = new Map();   // nodeId -> non-loop in-edges (join arity)
@@ -193,9 +220,10 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
   const nodeStatus = new Map();  // nodeId -> 'pending'|'active'|'done'|'failed'
   const edgeSegs = new Map();    // edgeId -> segments (persistent traversal fill)
   const joinArrivals = new Map();
+  const joinClaimed = new Map(); // nodeId -> arrivals of the group still forming that an explicit start() already took
   const loopIteration = new Map();
   const inFlight = new Map();    // nodeId -> [{landAt, tk, eseg, wseg, item}] hops still traveling
-  const overBudget = new Set();  // nodeId -> its live dwell ran past the declared data.duration
+  const overBudget = new Map();  // nodeId -> WHEN a live dwell of its ran past the declared data.duration
   for (const id of nodes.keys()) { nodeQueue.set(id, []); nodeStatus.set(id, "pending"); inFlight.set(id, []); }
   for (const e of edges) edgeSegs.set(e.id, []);
   for (const id of joinNeeded.keys()) joinArrivals.set(id, []);
@@ -216,27 +244,44 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     arr.push(arrivedAt);
   }
 
+  /** An arrival that was counted into the group a join is still forming, but that an
+   *  explicit start() has already pulled out of the held pool and put to work (D4 M2 — the
+   *  log outranks the policy). Without this the group could never complete: its partners
+   *  would wait forever for a member that is standing right there, `active`, and a later
+   *  finish() would fan each of them out on its own — the ×N propagation F10 removed. */
+  function claimArrival(nodeId) {
+    if ((joinNeeded.get(nodeId) || 0) < 2) return;
+    joinClaimed.set(nodeId, (joinClaimed.get(nodeId) || 0) + 1);
+  }
+
   /** Merges the arrivals waiting at a join into one releasable occupant, `needed` at a
    *  time — Mode A's rule (F10): the last of the group carries on, its partners end there
    *  (the renderer simply stops drawing them, as compileRun's merged tokens do). Surplus
    *  arrivals stay `held` and form the next group, which is what makes a live fan-in able
-   *  to fire again and again instead of once. */
+   *  to fire again and again instead of once. Arrivals already claimed by a start() count
+   *  towards the group they belonged to: the group completes on `needed - claimed` further
+   *  held arrivals, and since the work it stands for is already on the node (or has already
+   *  left it), those partners merge into it rather than releasing a second token. */
   function releaseJoin(nodeId, at) {
     const needed = joinNeeded.get(nodeId) || 0;
     if (needed < 2) return;
     const q = nodeQueue.get(nodeId);
+    let claimed = joinClaimed.get(nodeId) || 0;
     const held = q.filter((o) => o.state === "held");
-    while (held.length >= needed) {
-      const group = held.splice(0, needed);
-      const keep = group[group.length - 1];
+    while (held.length + claimed >= needed) {
+      const group = held.splice(0, Math.max(0, needed - claimed));
+      // A claimed group is already represented; an unclaimed one keeps its last arrival.
+      const keep = claimed > 0 ? null : group[group.length - 1];
+      claimed = 0;
       for (const o of group) {
         if (o === keep) continue;
         closeSeg(o.seg, at);
         const i = q.indexOf(o);
         if (i >= 0) q.splice(i, 1);
       }
-      keep.state = "waiting";
+      if (keep) keep.state = "waiting";
     }
+    joinClaimed.set(nodeId, claimed);
   }
 
   /** A token lands (waiting, not yet started) on `nodeId` — via a hop arrival or spawn().
@@ -259,7 +304,12 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
    *  an expectation in Mode B, never a schedule, so this is the only thing it can say. */
   function noteDwell(nodeId, t0, t1) {
     const sec = secOf.get(nodeId);
-    if (sec != null && sec > 0 && (t1 - t0) / 1000 > sec) overBudget.add(nodeId);
+    if (sec == null || !(sec > 0) || (t1 - t0) / 1000 <= sec) return;
+    // Remember WHEN the verdict was earned: a unit of work that was already on the node
+    // while the over-long dwell ran is concurrent with it and must not erase it, while one
+    // that turned up afterwards is the fresh attempt doStart() judges on its own.
+    const prev = overBudget.get(nodeId);
+    if (prev == null || t1 > prev) overBudget.set(nodeId, t1);
   }
 
   /** Removes the hop that is landing right now — always the node's earliest in-flight hop
@@ -283,19 +333,31 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     return hop;
   }
 
+  /** F13 — a fresh activation is judged against its own dwell, so it clears the node's
+   *  over-budget verdict. "Fresh" is about the unit of work, not about the node being
+   *  empty: a unit that only turned up at or after the moment the verdict was earned
+   *  cannot be the concurrent work that earned it (that is the case test F13 guards — one
+   *  of several occupants overran and the next one must not erase it), and in the ordinary
+   *  pipeline shape the next pass is ALWAYS an arrival sitting on the node before its
+   *  start() is stamped, which is why "empty node" latched the verdict forever there. */
+  function freshAttempt(nodeId, arrivedAt) {
+    const earned = overBudget.get(nodeId);
+    if (earned != null && arrivedAt >= earned) overBudget.delete(nodeId);
+  }
+
   function doStart(nodeId, at) {
     const q = nodeQueue.get(nodeId);
-    // A fresh activation is judged against its own dwell — but only a start() on an EMPTY
-    // node is a fresh activation: with concurrent occupants, one more unit of work must not
-    // erase the verdict an over-long dwell that already finished earned for this node.
-    if (!q.length) overBudget.delete(nodeId);
     // An explicit start() ALWAYS activates (D4 M2: the real log outranks the declared
     // policy), so it picks up an arrival still held by an unfired join as readily as a
     // released one — it just takes the released ones first.
     let idx = q.findIndex((o) => o.state === "waiting");
-    if (idx < 0) idx = q.findIndex((o) => o.state === "held");
+    if (idx < 0) {
+      idx = q.findIndex((o) => o.state === "held");
+      if (idx >= 0) claimArrival(nodeId); // it still counts towards its group (F10)
+    }
     if (idx >= 0) {
       const occ = q[idx];
+      freshAttempt(nodeId, occ.arrivedAt);
       closeSeg(occ.seg, at);
       occ.state = "active";
       const tk = tokens.get(occ.tokenId);
@@ -313,7 +375,9 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
       hop.eseg.t1 = Math.max(hop.eseg.t0, t0);
       hop.wseg.t0 = t0;
       hop.wseg.t1 = t0;
+      freshAttempt(nodeId, t0);
       noteArrival(nodeId, t0);
+      claimArrival(nodeId); // a claimed hop is an arrival too: it counts towards the group
       const seg = { kind: "node", id: nodeId, t0, t1: Infinity };
       hop.tk.segments.push(seg);
       q.push({ tokenId: hop.tk.id, arrivedAt: t0, state: "active", seg });
@@ -326,6 +390,7 @@ export function replayLive(spec = {}, events = [], t = 0, opts = {}) {
     // same way: retrying a failed step over a bounded loop edge is exactly what that edge
     // is for, so 'failed' is terminal for iteration-counting just like 'done'.
     const wasDone = nodeStatus.get(nodeId) === "done" || nodeStatus.get(nodeId) === "failed";
+    freshAttempt(nodeId, at); // a minted token is as fresh as an activation gets
     const tk = newToken();
     const seg = { kind: "node", id: nodeId, t0: at, t1: Infinity };
     tk.segments.push(seg);

@@ -195,7 +195,10 @@ export function mount(el, spec = {}, opts = {}) {
   function styleNow() {
     const v = vs.view();
     const sizes = { ...v.sizes };
-    if (last) for (const [id, r] of Object.entries(last.nodes)) sizes[id] = { w: r.w, h: r.h };
+    // F22 — the solver's box replaces the measured w/h, but NOT the label reserve that
+    // came with it: `reserve` is the chrome the measure hook parked in the corners, and
+    // dropping it here would hand the label the whole (widened) box again.
+    if (last) for (const [id, r] of Object.entries(last.nodes)) sizes[id] = { ...sizes[id], w: r.w, h: r.h };
     renderer.styleCommit({
       nodes: v.nodes, edges: v.edges, reversed: pinnedReversals,
       style: styleFn, sizes, props: director.propsLayer(),
@@ -315,8 +318,11 @@ export function mount(el, spec = {}, opts = {}) {
     lastSlots = res.slots || null;
 
     // Containers get their real (solver-computed) box here, so labels truncate to it.
+    // The spread keeps the measured `reserve` (F22) alive across that swap — the layout
+    // result only carries geometry, and a dropped reserve puts a long label back under
+    // the chip the widened box was measured for.
     const sizes = { ...v.sizes };
-    for (const [id, r] of Object.entries(res.nodes)) sizes[id] = { w: r.w, h: r.h };
+    for (const [id, r] of Object.entries(res.nodes)) sizes[id] = { ...sizes[id], w: r.w, h: r.h };
     renderer.styleCommit({
       nodes: v.nodes, edges: v.edges,
       reversed: pinnedReversals, style: styleFn, sizes,
@@ -467,8 +473,21 @@ export function mount(el, spec = {}, opts = {}) {
       return () => { runSubs.delete(sub); sub.undo(); };
     };
     runCtl.off = (type, fn) => {
-      for (const sub of runSubs) if (sub.type === type && sub.fn === fn) runSubs.delete(sub);
-      rawOff(type, fn);
+      // Drop it through the sub's OWN undo, never through this generation's `rawOff`: a
+      // handle held across a `g.run(opts)` recompile closes over the OLD transport's off,
+      // while the handler itself was re-seated onto the new one above. Deleting only the
+      // bookkeeping entry left it firing on the live bus with nothing tracking it — and
+      // RUN.md promises `off()` drops a listener "for good, from either handle".
+      let found = false;
+      for (const sub of runSubs) {
+        if (sub.type !== type || sub.fn !== fn) continue;
+        runSubs.delete(sub);
+        sub.undo();
+        found = true;
+      }
+      // Nothing of ours matched: a listener attached straight to the transport (or one
+      // already dropped) still goes to the raw off, which is a no-op if it is not there.
+      if (!found) rawOff(type, fn);
     };
     notify();
     return runCtl;
@@ -592,7 +611,15 @@ export function mount(el, spec = {}, opts = {}) {
         // would replay the older spec in the NEWER direction.
         layout: { ...layoutOpts },
         runTime: runCtl ? runCtl.time() : 0,
-        runOpts: runCtl ? runCtl.options() : null,
+        // The compile inputs are state a step moves too, now that `{op:"run", args:[opts]}`
+        // is part of the declared timeline (F5) — so they are snapshotted whether or not a
+        // transport exists yet. `runCompiled:false` means "no run had been compiled at this
+        // point", which is NOT the same as "a run compiled with no opts": conflating the two
+        // left a LATER run step's opts sitting in `runOpts` after a backward seek, and the
+        // next implicit compile (a replayed `run.play`, the transport bar's play button, a
+        // bare g.run()) rebuilt the schedule from those future inputs.
+        runCompiled: !!runCtl,
+        runOpts: runCtl ? runCtl.options() : { ...runOpts },
         // D14 — emphasis and the caption are state a step moves, so they are always here.
         ...director.snapshot(),
         // D13 — the camera is NOT, unless the script has taken it. Snapshotting it
@@ -639,10 +666,15 @@ export function mount(el, spec = {}, opts = {}) {
       }
       // Re-seat the SAME transport in place: g.run() identity (and every listener on it)
       // has to survive a backward seek.
-      if (snap.runOpts) {
+      if (snap.runCompiled) {
         if (runCtl) { runOpts = { ...snap.runOpts }; runCtl.reset(snap.runOpts, snap.runTime || 0); }
         else createRun(snap.runOpts).seek(snap.runTime || 0);
-      } else disposeRun();
+      } else {
+        // No transport at this point in the story: put the compile INPUTS back as well, or
+        // the next implicit compile is seeded from a future `run` step's opts.
+        runOpts = { ...(snap.runOpts || {}) };
+        disposeRun();
+      }
       notify();
       return tr;
     },
@@ -964,9 +996,20 @@ export function mount(el, spec = {}, opts = {}) {
         expandAll() {}, collapseAll() {},
         batch: (fn) => { fn(api); },
       };
-      for (const m of ["addNode", "addEdge", "removeNode", "removeEdge", "update", "split"]) {
+      for (const m of ["addEdge", "removeNode", "removeEdge", "update", "split"]) {
         api[m] = guard((...args) => probe[m](...args));
       }
+      // NOT part of the loop above: `{after}` is g.addNode's own sugar (the node PLUS an
+      // implicit `e:<after>-><id>` edge), and `Store.addNode` takes one argument, so
+      // forwarding straight to the clone dropped the option silently — a dangling `after`
+      // validated clean and then threw for real halfway through, and a later removeEdge of
+      // the implicit edge reported a phantom "missing". The probe mints the same edge, in
+      // the same order, so the verdict matches what the op would actually do.
+      api.addNode = guard((node, o) => {
+        const n = probe.addNode(node);
+        const after = o && o.after;
+        if (after != null) probe.addEdge({ id: `e:${after}->${n.id}`, source: after, target: n.id });
+      });
       const applyProbe = (step) => {
         const op = (step && step.op) || "";
         if (op === "batch") {

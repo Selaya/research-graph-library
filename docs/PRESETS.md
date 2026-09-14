@@ -106,9 +106,9 @@ unless you set one; a preset applied after mount cannot retro-fit measurement, s
 yourself if you need it:
 
 ```js
-import { presetPipeline, PIPELINE_MEASURE } from "sparkle-motion-visualizer/preset-pipeline";
+import { applyPipelinePreset, PIPELINE_MEASURE } from "sparkle-motion-visualizer/preset-pipeline";
 const g = mount(el, spec, { layout: { measure: PIPELINE_MEASURE } });
-const preset = presetPipeline(g);
+const preset = applyPipelinePreset(g);
 ```
 
 ## The slots a node already has

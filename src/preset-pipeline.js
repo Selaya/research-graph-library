@@ -12,6 +12,7 @@
 import { parseDuration } from "./run.js";
 import { prefersReducedMotion } from "./anim.js";
 import { textWidth } from "./measure.js";
+import { pointAt } from "./path.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 // Mirrors render.js's HEADER_H — the header strip an expanded container reserves up top.
@@ -288,15 +289,21 @@ function positionParts(parts, rect) {
   setXY(parts.mode, Math.max(12, w - CHIP_GAP - cw - (cw ? 6 : 0)), y);
 }
 
+const EDGE_CHIP_OFFSET = 9;
+
 /** Midpoint of an edge's committed bend chain, pushed off the line on the opposite side
- *  from the edge label so the two never sit on each other (F26). */
+ *  from the edge label so the two never sit on each other (F26).
+ *
+ *  The point AND the tangent come from pointAt(), i.e. the arc-length midpoint of the whole
+ *  chain — the same function render.js places the label with. Indexing the chain by hand
+ *  used to pick `points[(n-1)/2]` for an odd-length chain (every edge the solver bent), so
+ *  `a === b`, the tangent was (0,0) and the perpendicular push evaluated to nothing: the
+ *  chip landed exactly on the bend point, under the label it is supposed to dodge. */
 function positionEdgeChip(el, points) {
   if (!points || points.length < 2) return;
-  const i = (points.length - 1) / 2;
-  const a = points[Math.floor(i)], b = points[Math.ceil(i)];
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const len = Math.hypot(dx, dy) || 1;
-  setXY(el, (a.x + b.x) / 2 + (dy / len) * 9, (a.y + b.y) / 2 - (dx / len) * 9);
+  const mid = pointAt(points, 0.5);
+  const nx = -Math.sin(mid.angle), ny = Math.cos(mid.angle);
+  setXY(el, mid.x - nx * EDGE_CHIP_OFFSET, mid.y - ny * EDGE_CHIP_OFFSET);
 }
 
 const DELTA_BADGE_MS = 1600;

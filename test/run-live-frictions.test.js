@@ -542,3 +542,106 @@ test("F11: the guard does not replay for a start() that follows its upstream fin
   assert.equal(replays, 1, "only finish()'s own occupancy check replayed");
   run.destroy();
 });
+
+// ===========================================================================
+// Review follow-ups (third pass)
+// ===========================================================================
+
+test("F10: a start() that takes a held arrival does not strand its partner — still ONE token", () => {
+  // "The log outranks the policy": start(J) activates the arrival A's finish left held.
+  // B's arrival then completes the very group that arrival belonged to, so it merges into
+  // the work already standing on J instead of waiting forever for a partner that is right
+  // there — and the finish that drains J hands exactly one token to Z, not one each.
+  const events = [
+    { t: 0, type: "start", id: "A" }, { t: 0, type: "finish", id: "A" },   // lands on J at 300
+    { t: 350, type: "start", id: "J" },                                     // takes the held arrival
+    { t: 360, type: "start", id: "B" }, { t: 360, type: "finish", id: "B" },// lands on J at 660
+    { t: 900, type: "finish", id: "J" },
+  ];
+  const mid = replayLive(joinSpec(), events, 700);
+  assert.equal(mid.nodes.J.occupancy, 1, "the late partner merged into the active occupant");
+  assert.equal(mid.nodes.J.active, 1);
+  assert.equal(mid.nodes.J.waiting, 0);
+  assert.deepEqual(mid.joins.J, { arrived: 2, needed: 2, fired: true });
+
+  const st = replayLive(joinSpec(), events, 1500);
+  assert.equal(st.nodes.Z.occupancy, 1, "a needed:2 join that got two arrivals emits one token");
+  assert.equal(st.tokens.length, 1);
+});
+
+test("F10: a start() that claims an in-flight hop counts into the group it belonged to", () => {
+  // F14's shape: the trace stamps start(J) at A's dispatch instant, so J claims the hop
+  // mid-air. That claimed arrival is still one of the two the AND-join is waiting for.
+  const events = [
+    { t: 0, type: "start", id: "A" }, { t: 0, type: "finish", id: "A" },
+    { t: 0, type: "start", id: "B" }, { t: 100, type: "finish", id: "B" },
+    { t: 0, type: "start", id: "J" },                                       // claims A's hop
+    { t: 600, type: "finish", id: "J" },
+  ];
+  const st = replayLive(joinSpec(), events, 1200);
+  assert.equal(st.nodes.Z.occupancy, 1, "no ×N propagation just because start() was stamped early");
+  assert.deepEqual(st.joins.J, { arrived: 2, needed: 2, fired: true });
+
+  // …and the answer does not depend on WHEN start(J) is stamped relative to the wire.
+  const late = events.map((e) => (e.type === "start" && e.id === "J" ? { ...e, t: 500 } : e));
+  assert.equal(replayLive(joinSpec(), late, 1200).nodes.Z.occupancy, 1);
+});
+
+test("F10: through the transport — start(J) on the first branch, partner later, one token", () => {
+  const { ticker, run } = liveHost(joinSpec(), { hopMs: 100 });
+  ticker.tick(10);
+  run.start("A"); run.finish("A");
+  ticker.tick(150);                      // A's arrival is held on J
+  run.start("J");                        // the log outranks the policy
+  run.start("B"); run.finish("B");
+  ticker.tick(150);                      // B's arrival lands and completes A's group
+  assert.equal(run.state().nodes.J.occupancy, 1);
+  run.finish("J");
+  ticker.tick(150);
+  const st = run.state();
+  assert.equal(st.nodes.Z.occupancy, 1, "one unit of work left the join");
+  assert.equal(st.nodes.Z.waiting, 1);
+  run.destroy();
+});
+
+test("F13: an edge-fed second pass clears the over-budget verdict, exactly as a bare start does", () => {
+  const spec = {
+    nodes: [{ id: "q" }, { id: "w", data: { duration: "1s" } }],
+    edges: [{ id: "qw", source: "q", target: "w" }],
+  };
+  const events = [
+    { t: 0, type: "start", id: "q" }, { t: 0, type: "finish", id: "q" },        // lands on w at 300
+    { t: 300, type: "start", id: "w" }, { t: 4300, type: "finish", id: "w" },   // 4s against a 1s budget
+    { t: 5000, type: "start", id: "q" }, { t: 5000, type: "finish", id: "q" },  // lands on w at 5300
+    { t: 5300, type: "start", id: "w" }, { t: 5350, type: "finish", id: "w" },  // 50ms, well inside
+  ];
+  assert.equal(replayLive(spec, events, 4400).nodes.w.overBudget, true, "the overrun still reads");
+  assert.equal(replayLive(spec, events, 5310).nodes.w.overBudget, false,
+    "10ms into a 1s budget, the node is not over budget");
+  assert.equal(replayLive(spec, events, 5400).nodes.w.overBudget, false,
+    "…and the second pass's own finish does not resurrect the first pass's verdict");
+});
+
+test("F11: an untagged cycle has a root — the seeding start() neither warns nor is discarded", () => {
+  // replayLive breaks the cycle, so `client` IS the engine's root; the guard must agree,
+  // or spawnOnStart:false leaves the run with no way to start at all.
+  const feedback = () => ({
+    nodes: [{ id: "client" }, { id: "server" }],
+    edges: [
+      { id: "cs", source: "client", target: "server" },
+      { id: "sc", source: "server", target: "client" },
+    ],
+  });
+  const { ticker, run } = liveHost(feedback(), { spawnOnStart: false, hopMs: 100 });
+  ticker.tick(10);
+  const warns = captureWarnings(() => run.start("client"));
+  assert.deepEqual(warns, [], `unexpected warnings: ${warns.join(" | ")}`);
+  assert.equal(run.log().length, 1, "the seeding start() is logged, not discarded");
+  assert.equal(run.state().nodes.client.status, "active");
+
+  // the node the broken back edge points at is still a non-root: it is fed by `cs`
+  const back = captureWarnings(() => run.start("server"));
+  assert.equal(back.length, 1);
+  assert.match(back[0], /^\[smv:live\] start\("server"\)/);
+  run.destroy();
+});

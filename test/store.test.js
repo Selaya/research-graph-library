@@ -405,6 +405,26 @@ test("condense: a naming an explicit parent for a mixed-parent set does not warn
   assert.equal(s.node("ab").parent, "L");
 });
 
+test("condense: a container named together with one of its own children is not 'mixed'", () => {
+  const s = new Store({
+    nodes: [
+      { id: "outer" }, { id: "box", parent: "outer" },
+      { id: "c1", parent: "box" }, { id: "c2", parent: "box" },
+    ],
+    edges: [{ id: "e1", source: "c1", target: "c2" }],
+  });
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  let merged;
+  try { ({ merged } = s.condense(["box", "c1"], { id: "m" })); } finally { console.warn = orig; }
+  // `c1`'s parent is `box`, which this very condense removes, so it says nothing about
+  // where the merge goes: the only enclosing parent is `outer`.
+  assert.equal(merged.parent, "outer");
+  assert.deepEqual(warns, []);
+  assert.equal(s.node("m").parent, "outer");
+});
+
 test("isConvex: a loop edge leaving and re-entering the set does not break convexity", () => {
   const s = new Store({
     nodes: [{ id: "a" }, { id: "b" }, { id: "retry" }],

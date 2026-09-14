@@ -328,7 +328,11 @@ becomes the retry's arc instead:
   the **effective budget**: if `data.fail.retries` is also declared it wins over the arc's
   `maxIterations`, and the badge says so;
 - the token re-enters the edge's **target**, so an arc back to an upstream step replays that
-  step (a self-arc simply re-runs the failing node);
+  step (a self-arc simply re-runs the failing node). The replay then walks back down to the
+  failing node through its ordinary edges, and neither that walk nor the arc's own hop is
+  gated by the failing node's join: the join fired for the attempt that just failed and the
+  other branches are not replayed, so one retry token crosses it per attempt and the extra
+  arrival is not counted into `joins[id].arrived`. A fan-in step retries like any other;
 - it is inert on a successful finish — `exitNode` skips it. An ordinary `loop: true` edge
   with no `onFail` keeps today's meaning (it fires when its source *finishes*).
 
@@ -356,7 +360,10 @@ the ports to change it:
 - Unset is the historical behaviour exactly: one inferred entry, one inferred exit.
 
 The several engine edges one spec edge expands into keep that edge's `id`, so `'loop'`
-events, `opts.iterations` and `edges[id].traversed` still name the arc the reader drew.
+events, `opts.iterations` and `edges[id].traversed` still name the arc the reader drew. A
+`loop: true` edge into a multi-entry container is one arc too: its iteration budget is spent
+once across the whole expansion (the in-place ticks host on the first entry), not once per
+entry child.
 
 ## Join semantics
 

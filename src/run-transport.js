@@ -11,7 +11,7 @@
 // In Mode B there is nothing to compile — see createLiveTransport below.
 
 import { compileRun } from "./run.js";
-import { replayLive, liveBoundaries } from "./run-live.js";
+import { replayLive, liveBoundaries, liveFedTargets } from "./run-live.js";
 import { emitter } from "./events.js";
 
 function deferred() {
@@ -514,14 +514,18 @@ function createLiveTransport(internals, opts = {}) {
   const reseedFeed = () => { feed.clear(); for (const e of log) noteLog(e); };
   reseedFeed();
 
-  /** Non-root membership, cached against the store revision: isRoot() is an O(E) scan and
-   *  start() is called once per streamed event. */
+  /** Non-root membership, cached against the store revision: the scan is O(V+E) and
+   *  start() is called once per streamed event. It has to be the ENGINE's notion of "fed
+   *  by something" (liveFedTargets), not merely "has a non-loop in-edge": replayLive also
+   *  drops the back edges an untagged cycle is broken at, so a graph drawn as a plain
+   *  feedback pair does have a root there. Deciding it locally called every node a
+   *  non-root, which warned on the legitimate seeding start() — and under
+   *  `spawnOnStart: false` discarded it, leaving the run with no way to begin at all. */
   let fedSet = null, fedRev = NaN;
   function isRoot(id) {
     const rev = revOf();
     if (!fedSet || !Object.is(rev, fedRev)) {
-      fedSet = new Set();
-      for (const e of store.edges.values()) if (!e.loop && e.source !== e.target) fedSet.add(e.target);
+      fedSet = liveFedTargets([...store.nodes.values()], [...store.edges.values()]);
       fedRev = rev;
     }
     return !fedSet.has(id);

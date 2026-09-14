@@ -26,6 +26,7 @@ import {
   type Timeline,
   type CameraTarget,
   type HighlightSelection,
+  type PropsOverride,
   type Cue,
   type LayoutResult,
   type ValidateProbe,
@@ -206,6 +207,10 @@ void runA.sim().stateAt(0).done;
 // bare g.run() returns whatever transport already exists (typed as the union).
 const bare: Run = g.run();
 void bare.duration;
+// Documented on the handle in RUN.md, so it is on the shared surface: Mode A recompiles
+// against the live spec, Mode B hands back the frontier.
+const reloadedA: number = runA.reload();
+void reloadedA;
 
 // ---- run: Mode B (live) ------------------------------------------------------------------
 const runB: LiveRun = g.run({ mode: "live" });
@@ -226,6 +231,8 @@ if (runState && runState.status === "failed") void runState.progress;
 const failEntry: LiveEvent = { t: 10, type: "fail", id: "ingest", reason: "timeout" };
 void failEntry;
 void runB.sim().events.filter((e) => e.type === "fail");
+const reloadedB: number = runB.reload();
+void reloadedB;
 const following: boolean = runB.following;
 const nowMs: number = runB.now();
 const log = runB.log();
@@ -270,6 +277,10 @@ g.camera({ zoom: 1.6 });
 g.camera({ nodes: ["ingest", "build"], maxK: 2.5 });        // F17 — the fit lid (default 1.5)
 g.camera({ fit: true, inset: { bottom: 56, top: 12 } });    // F15 — explicit pane chrome
 g.props({ ingest: { "--smv-fill": "#7c5cff" } }, { merge: true });  // F18 — patch the layer
+// F18 — a `null` VALUE drops one key, a `null` ENTRY drops every override for one id.
+g.props({ ingest: { "--smv-fill": null }, build: null }, { merge: true });
+const dropOne: PropsOverride = { clean: null };
+g.props(dropOne, { merge: true });
 
 const spotlight: HighlightSelection = { nodes: ["build"], edges: ["e3"], variant: "focus", dim: true };
 g.highlight(spotlight).clearHighlight();
@@ -281,6 +292,7 @@ const directed: StoryboardStep[] = [
   { op: "highlight", args: [{ nodes: ["clean"], dim: true }] },
   { op: "caption", args: ["Cleaning the data", { place: "bottom" }] },
   { op: "props", args: [{ clean: { "--smv-fill": "#7c5cff" } }, { merge: true }] },
+  { op: "props", args: [{ clean: null }, { merge: true }] },
   { op: "wait", ms: 800 },
   { op: "clearHighlight" },
   { op: "expand", args: ["clean"], dur: 900 },
@@ -311,6 +323,21 @@ void autoOpts;
 g.finished.then((r) => r.reason);
 g.finish().finish("live-done");
 g.on("finish", (e) => e.reason);
+// The run-status channel carries the engine's own union, so an exhaustive listener has
+// FOUR cases: `'failed'` is emitted by both engines (data.fail / LiveRun.fail).
+g.on("runstatus", (e) => {
+  switch (e.status) {
+    case "pending":
+    case "active":
+    case "done":
+    case "failed":
+      return;
+    default: {
+      const exhaustive: never = e.status;
+      return exhaustive;
+    }
+  }
+});
 // F6 — run events mirrored onto the instance bus outlive a g.run(opts) recompile.
 g.on("run:finish", (payload) => void payload);
 

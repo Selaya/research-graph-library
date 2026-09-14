@@ -97,7 +97,10 @@ export interface EdgeSpec {
  *  be `null` — "inherit the sources' common parent", exactly like leaving it out (a spec
  *  built from a form or a diff has no other way to say "absent"). When the sources have
  *  DIFFERENT parents there is no common one to inherit: the merged node lands at the top
- *  level and warns, so name a `parent` explicitly for a cross-container merge. */
+ *  level and warns, so name a `parent` explicitly for a cross-container merge. A source
+ *  swallowed by another source (a container named together with one of its own children)
+ *  is not a second parent — its parent is being removed too, so the common parent is still
+ *  the container's. */
 export type CondenseNodeSpec = Omit<NodeSpec, "parent"> & { parent?: string | null };
 
 export interface GraphSpec {
@@ -602,6 +605,10 @@ export interface RunControllerBase {
   timeOf(nodeId: string): number;
   /** In-place re-seat (recompile/reseed + silent resync); used by storyboard restore (G2). */
   reset(o?: Record<string, unknown>, time?: number): number;
+  /** Force a recompile against the LIVE spec, returning the new `duration` — Mode A picks
+   *  the edited graph up on the next sample; Mode B has nothing to recompile and hands back
+   *  the current frontier. What a page calls after mutating the graph mid-run. */
+  reload(): number;
   readonly playing: boolean;
   /** Mode A: the compiled run's total ms. Mode B: the frontier (grows). */
   readonly duration: number;
@@ -714,8 +721,10 @@ export interface HighlightSelection {
 
 /** M4d/D16 — the per-step custom-property override layer: `{id: {"--smv-*": value}}`,
  *  merged OVER the mount's style function at commit time. `null`/`false` on a key removes
- *  it; only `--smv-*` keys are accepted (D7) and anything else throws. */
-export type PropsOverride = Record<string, Record<string, string | number | false | null>>;
+ *  it; only `--smv-*` keys are accepted (D7) and anything else throws. A whole ENTRY may be
+ *  `null` — under `{merge:true}` (F18) that drops every override for that one id, while the
+ *  rest of the layer stands; in a replacing `props()` call it simply carries no overrides. */
+export type PropsOverride = Record<string, Record<string, string | number | false | null> | null>;
 
 /** `{merge:true}` patches the override layer instead of replacing it (F18). */
 export interface PropsOpts {
@@ -828,8 +837,9 @@ export interface GraphEventMap {
   split: { source: string; targets: string[]; sourceData: NodeSpec };
   /** A node's RUN status changed (run-render.js). Emitted per transition, never per frame;
    *  a run is not a spec mutation, so no `commit` announces it. a11y.js uses it to keep the
-   *  accessible name in step with the live/simulated run. */
-  runstatus: { id: string; status: "pending" | "active" | "done" };
+   *  accessible name in step with the live/simulated run. The status is the engine's own,
+   *  `'failed'` included — a listener switching on it has four cases, not three. */
+  runstatus: { id: string; status: NodeRunState["status"] };
   /** F36 — the story ended: the storyboard ran out of steps (`"storyboard"`), a page called
    *  `g.finish(reason)`, or the instance was destroyed (`"destroy"`). Fires at most once,
    *  alongside `g.finished` resolving. */
@@ -837,7 +847,9 @@ export interface GraphEventMap {
   /** F27 - a clean tap/click on a node, suppressed when the pointer travelled past the tap
    *  slop (a pan) or a second pointer joined (a pinch). `event` is the raw `pointerup`. */
   nodeclick: { id: string; event: unknown };
-  /** The same, for an edge. Only the drawn stroke is hit-testable. */
+  /** The same, for an edge. The hit area is the whole edge group - the drawn stroke, its
+   *  label, and the `label: {pill: true}` plate behind it - because a 1.25px stroke is a
+   *  poor thing to aim at (F25/F27). */
   edgeclick: { id: string; event: unknown };
 }
 
@@ -957,6 +969,8 @@ export interface ValidateProbe {
   edge(id: string): EdgeSpec | undefined;
   children(id: string): NodeSpec[];
   spec(): GraphSpec;
+  /** `{after}` mints the same implicit `e:<after>-><id>` edge `g.addNode()` does, so a
+   *  dangling `after` reports `"dangling"` here and the edge is present for later ops. */
   addNode(node: NodeSpec, opts?: { after?: string }): void;
   addEdge(edge: EdgeSpec): void;
   removeNode(id: string): void;
@@ -1026,10 +1040,11 @@ export interface Graph {
   removeEdge(id: string): Awaitable<MutationResult>;
   /** `patch.data` merges into the record's `data`; `data: { key: undefined }` REMOVES that
    *  key, and `{ replace: true }` swaps the whole payload. A `collapsed` patch is routed to
-   *  `expand()`/`collapse()` (it is view state, not a rendered spec field), so it resolves
-   *  like they do — `{applied: false}` when the container was already in that state; the
-   *  rest of the patch is still committed and rendered either way. A `data` left with no
-   *  keys is dropped, so `node(id).data` reads `undefined` rather than `{}`. */
+   *  `expand()`/`collapse()` (it is view state, not a rendered spec field): a patch whose
+   *  ONLY key is `collapsed` resolves like they do — `{applied: false}` when the container
+   *  was already in that state — while a patch carrying anything else always resolves
+   *  `{applied: true}`, since the rest of it is committed and rendered either way. A `data`
+   *  left with no keys is dropped, so `node(id).data` reads `undefined` rather than `{}`. */
   update(id: string, patch: Record<string, unknown>, opts?: UpdateOpts): Awaitable<MutationResult>;
 
   /** Dry-run the structural guards without committing anything: every op runs against a

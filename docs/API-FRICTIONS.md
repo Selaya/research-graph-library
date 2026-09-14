@@ -1,6 +1,6 @@
 # API frictions found while building the demo gallery
 
-**Status: resolved, except F2 (L) and F19, which are proposed in `docs/PLAN.md` (D19, D20)
+**Status: resolved, except F2 (L) and F19, which are proposed in `docs/PLAN.md` (D18, D19)
 and not implemented.** The table under **Resolution** at the end says what each item became;
 the item text below is kept as written, as the record of what the gallery hit and why. The
 demo pages were rewritten in the same round to drop the workarounds this document describes.
@@ -345,7 +345,7 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 |---|---|---|
 | F1 | done | `data.fail: { reason, retries, recover }` and `onFail: true` on a loop edge; `fail` events carry `attempt`/`retries`/`terminal`, a `loop` fires per retry (RUN.md §Retries) |
 | F2 (S) | done | README loop section documents the in-place tick and the `run.on('loop')` narration pattern |
-| F2 (L) | proposed | `loop: { replay: true }` / `run({ loops: 'replay' })` — PLAN.md D19, open questions listed |
+| F2 (L) | proposed | `loop: { replay: true }` / `run({ loops: 'replay' })` — PLAN.md D18, open questions listed |
 | F3 | done | `run.inject(id, { at })`, `data.entry: true`, compile input `entries`, bus event `inject` |
 | F4 | done | `data.startAt`; a recompile re-emits the backlog for a node the old schedule had no events for |
 | F5 | done | storyboard ops `run`, `run.reset`, `expandAll`, `collapseAll`, `layout` (+ fluent `runCompile/runReset/...`); `layout` opts are snapshotted for backward seeks |
@@ -362,7 +362,7 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 | F16 | done | camera/highlight resolve a collapsed descendant to its drawn ancestor; the warning stays for unknown ids |
 | F17 | done | `camera({ nodes, maxK })`, default 1.5 for a multi-node fit |
 | F18 | done | `g.props(map, { merge: true })`; status colour on its own `--smv-status-fill` / `--smv-status-mix` channel |
-| F19 | proposed | reactive storyboard step — PLAN.md D20, with the step-splitting problem it has to solve |
+| F19 | proposed | reactive storyboard step — PLAN.md D19, with the step-splitting problem it has to solve |
 | F20 | done | shipped earlier; the pane-chrome lesson is recorded in INTERNALS.md |
 | F21 | done | occupancy badge and duration chip have fixed slots (PRESETS.md "The slots a node already has") |
 | F22 | done | `layout.measure: { extraWidth, extraHeight }` hook; the preset installs `PIPELINE_MEASURE` and labels truncate before the reserve |

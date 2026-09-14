@@ -87,6 +87,8 @@ function findAll(node, pred, out = []) {
 const byClass = (node, cls) => findAll(node, (n) => (n.attrs.class || "").split(/\s+/).includes(cls));
 
 const { mount } = await import("../src/index.js");
+const { PIPELINE_MEASURE } = await import("../src/preset-pipeline.js");
+const { truncate, NODE_PAD_X } = await import("../src/measure.js");
 
 const SPEC = {
   nodes: [
@@ -122,6 +124,42 @@ test("preset 'pipeline' reserves chip room in measurement; a plain mount is unto
   assert.ok(label.textContent.endsWith("…") || label.textContent === "Ingest raw events");
   plain.g.destroy();
   preset.g.destroy();
+});
+
+test("F22: the measured reserve survives the layout swap - a long label truncates clear of the chip", async () => {
+  // Regression: index.js rebuilt `sizes[id]` as a fresh {w,h} from the layout result after
+  // every commit, which dropped the `reserve` viewstate had measured. The box still got
+  // 96px wider and the label happily spent all of it, so a long label ran under the chip -
+  // exactly the F22 friction, only on a wider box.
+  const LONG = { nodes: [{ id: "a", label: "Reconcile ledger entries nightly", data: { duration: "45m", mode: "manual" } }], edges: [] };
+  const mountLong = (opts) => {
+    const root = makeEl("div");
+    root.ownerDocument = doc;
+    return mount(root, JSON.parse(JSON.stringify(LONG)), opts);
+  };
+  const plain = mountLong({});
+  const preset = mountLong({ preset: "pipeline" });
+  const labelOf = (g) => byClass(g.renderer.node("a"), "smv-node-label")[0].textContent;
+
+  const node = LONG.nodes[0];
+  const reserve = PIPELINE_MEASURE.extraWidth(node, { nodes: new Map([["a", node]]), cache: new Map() });
+  assert.ok(reserve > 0, "the preset does reserve chip room for this node");
+
+  const w = preset.layoutResult().nodes.a.w;
+  assert.equal(labelOf(preset), truncate(node.label, w - 2 * NODE_PAD_X - reserve),
+    "the label gets the box MINUS the reserve");
+  assert.notEqual(labelOf(preset), labelOf(plain),
+    "the reserve changed something: an undecorated mount of the same node keeps more label");
+  assert.ok(labelOf(preset).length < labelOf(plain).length);
+
+  // A style-only commit (g.style/g.props) goes through the other sizes path - same rule.
+  preset.style(() => ({ "--smv-fill": "#eee" }));
+  await pump(1);
+  assert.equal(labelOf(preset), truncate(node.label, w - 2 * NODE_PAD_X - reserve),
+    "a style-only commit does not hand the reserve back to the label");
+
+  plain.destroy();
+  preset.destroy();
 });
 
 test("preset 'pipeline' raises the edge-label cap; an explicit layout option still wins", () => {
@@ -183,6 +221,25 @@ test("F27: g.on('nodeclick'/'edgeclick') fires from a tap, with {id, event}", as
   seen.length = 0;
   tap(g.renderer.svg, byClass(g.renderer.node("b"), "smv-node-box")[0], { travel: 40 });
   assert.deepEqual(seen, []);
+  g.destroy();
+});
+
+test("F27: the edge LABEL and its pill are part of the edge's hit area, not just the stroke", async () => {
+  // styles.js deliberately leaves pointer-events on the label (a 1.25px stroke is a poor
+  // click target), and types/index.d.ts documents the hit area as the whole edge group.
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, {
+    nodes: [{ id: "a" }, { id: "b" }],
+    edges: [{ id: "ab", source: "a", target: "b", label: { text: "GET /orders", pill: true } }],
+  }, {});
+  await pump(2);
+  const seen = [];
+  g.on("edgeclick", (p) => seen.push(p.id));
+
+  tap(g.renderer.svg, byClass(g.renderer.edge("ab"), "smv-edge-label")[0]);
+  tap(g.renderer.svg, byClass(g.renderer.edge("ab"), "smv-edge-pill")[0]);
+  assert.deepEqual(seen, ["ab", "ab"], "the label and the pill behind it both hit the edge");
   g.destroy();
 });
 

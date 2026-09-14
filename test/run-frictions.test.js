@@ -517,3 +517,93 @@ test("F7: a bare speed() leaves the schedule alone; a {branch} speed recompiles 
   assert.ok(run.sim().declared > declared, "a per-branch rate IS a compile input: the work got slower");
   run.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// Review follow-ups: a retry budget belongs to the BRANCH, and a loop budget to
+// the arc the reader drew (not to the token identity / engine edge copy).
+// ---------------------------------------------------------------------------
+
+test("F1: a retry arc through a fan-out keeps its budget whichever out-edge is declared first", () => {
+  // `plan` fans out to two steps; `apply` fails and retries by replaying `plan`. fanOut
+  // keeps the token identity on the FIRST out-edge only, so if the retried branch is any
+  // later one it used to be minted as a fresh token with an empty attempt counter: the
+  // budget restarted on every pass and nothing was ever terminal.
+  const mk = (order) => ({
+    nodes: [{ id: "plan" }, { id: "log" }, { id: "apply", data: { fail: { reason: "429", retries: 1 } } }],
+    edges: [
+      ...(order === "log-first"
+        ? [{ id: "pl", source: "plan", target: "log" }, { id: "pa", source: "plan", target: "apply" }]
+        : [{ id: "pa", source: "plan", target: "apply" }, { id: "pl", source: "plan", target: "log" }]),
+      { id: "back", source: "apply", target: "plan", loop: true, onFail: true, maxIterations: 2 },
+    ],
+  });
+  const shape = (order) => {
+    const sim = compileRun(mk(order));
+    const fails = evs(sim, "fail");
+    const end = sim.stateAt(sim.duration);
+    return {
+      attempts: fails.map((e) => e.attempt), terminal: fails.map((e) => e.terminal),
+      duration: sim.duration, apply: end.nodes.apply.status, done: end.done,
+    };
+  };
+  const applyFirst = shape("apply-first");
+  assert.deepEqual(applyFirst, {
+    attempts: [1, 2], terminal: [false, true], duration: 3300, apply: "failed", done: true,
+  });
+  assert.deepEqual(shape("log-first"), applyFirst, "declaration order of plan's out-edges is not semantics");
+});
+
+test("F1: a retry arc into an upstream step is not swallowed by the failing node's join", () => {
+  // The arc's own hop already bypasses the join; the replay comes back down through an
+  // ORDINARY edge, where the (already fired, never re-arming) join used to drop it — one
+  // attempt, no terminal 'fail', and a node declaring `fail` reporting 'done'.
+  const spec = {
+    nodes: [{ id: "u1" }, { id: "u2" }, { id: "j", data: { fail: { reason: "boom", retries: 2 } } }],
+    edges: [
+      { id: "e1", source: "u1", target: "j" },
+      { id: "e2", source: "u2", target: "j" },
+      { id: "back", source: "j", target: "u1", loop: true, onFail: true, maxIterations: 2 },
+    ],
+  };
+  const sim = compileRun(spec);
+  const fails = evs(sim, "fail");
+  assert.deepEqual(fails.map((e) => e.attempt), [1, 2, 3], "every attempt in the budget really ran");
+  assert.deepEqual(fails.map((e) => e.terminal), [false, false, true]);
+  assert.equal(evs(sim, "drop").length, 0, "the retry is not a late arrival from another branch");
+  assert.deepEqual(evs(sim, "start").map((e) => e.nodeId), ["u1", "u2", "j", "u1", "j", "u1", "j"], "u1 is replayed each time");
+  const end = sim.stateAt(sim.duration);
+  assert.equal(end.nodes.j.status, "failed", "a declared failure always ends terminal");
+  assert.deepEqual(end.loops.back, { iteration: 2, max: 2 }, "…and the badge spent the whole budget");
+  assert.equal(end.done, true);
+
+  // Same path for a node that is not a real fan-in but declares a `join` (joinStates is
+  // populated for any declared policy, so this is the narrow version of the same bug).
+  const declared = compileRun({
+    nodes: [{ id: "plan" }, { id: "apply", join: "any", data: { fail: { retries: 1 } } }],
+    edges: [
+      { id: "pa", source: "plan", target: "apply" },
+      { id: "back", source: "apply", target: "plan", loop: true, onFail: true, maxIterations: 2 },
+    ],
+  });
+  assert.deepEqual(evs(declared, "fail").map((e) => e.terminal), [false, true]);
+  assert.equal(declared.stateAt(declared.duration).nodes.apply.status, "failed");
+});
+
+test("F9: a loop edge into a multi-entry container spends its budget once, not once per entry", () => {
+  const mk = (entry) => ({
+    nodes: [{ id: "a" }, { id: "box", entry, exit: ["x"] }, { id: "x", parent: "box" }, { id: "y", parent: "box" }],
+    edges: [
+      { id: "ax", source: "a", target: "box" },
+      { id: "loop", source: "x", target: "box", loop: true, maxIterations: 2 },
+    ],
+  });
+  const one = compileRun(mk(["x"]));
+  const two = compileRun(mk(["x", "y"]));
+  const loops = (sim) => evs(sim, "loop").map((e) => [e.edgeId, e.iteration]);
+  assert.deepEqual(loops(one), [["loop", 1], ["loop", 2]]);
+  assert.deepEqual(loops(two), loops(one), "the iteration budget belongs to the arc, not to each engine copy");
+  assert.equal(two.duration, one.duration, "…so the declared timeline does not multiply either");
+  assert.deepEqual(two.stateAt(two.duration).loops.loop, { iteration: 2, max: 2 });
+  // The extra entry is still fed by the ordinary edge into the container (F9 proper).
+  assert.equal(two.stateAt(two.duration).nodes.y.status, "done");
+});

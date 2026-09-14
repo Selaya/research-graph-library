@@ -214,9 +214,11 @@ A `data` left with no keys is dropped from the record, so `g.node(id).data` read
 `undefined` rather than `{}` (and `spec()` still round-trips through JSON).
 
 `collapsed` is view state rather than a rendered spec field, so a `collapsed` patch is
-routed to the real `expand()` / `collapse()` instead of quietly doing nothing. Anything
-else in the same patch still renders, even when the container was already in the requested
-state (the awaitable then resolves `applied: false`, exactly as `expand()`/`collapse()` do).
+routed to the real `expand()` / `collapse()` instead of quietly doing nothing. A patch whose
+only key is `collapsed` resolves exactly as they do — `applied: false` when the container was
+already in the requested state. Anything else in the same patch still renders either way, so
+a patch that carries more than `collapsed` always resolves `applied: true`, whether or not
+the fold actually moved.
 
 **Errors.** Every structural misuse throws a synchronous `GraphError` — a real exported
 class, so `instanceof` works, and every message already embeds its code (`[smv:<code>] …`):
@@ -263,7 +265,9 @@ The merged node inherits the sources' common parent, and `parent: null` says so 
 (handy when the spec comes from a form or a diff, where "absent" has to be expressible).
 When the sources have **different** parents there is no common one to inherit: the merged
 node lands at the top level and warns — name a `parent` yourself for a cross-container
-merge.
+merge. A source that another source swallows (naming a container *and* one of its own
+children) does not count as a second parent: its parent is disappearing with it, so the
+merge still inherits the container's own parent.
 
 **Split (1 → N).** The inverse of condense, same three-phase choreography:
 

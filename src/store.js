@@ -219,8 +219,18 @@ export class Store {
       throw new GraphError("non-convex", `condense set [${ids.join(", ")}] is not convex: a path leaves the set and re-enters`);
     }
     // The merged node inherits the common parent of the nodes as *named* (a swallowed
-    // child's parent is inside the set and would only ever read as "mixed").
-    const parents = new Set([...S].map((id) => this.nodes.get(id).parent));
+    // child's parent is inside the set and would only ever read as "mixed"). A named source
+    // can ALSO be swallowed — `condense(["box", "c1"])`, the natural shape of a UI selection
+    // that picked a container and one of its own children — so the test is the parent, not
+    // how the source got into the set: a parent that is itself disappearing says nothing
+    // about where the merged node goes, and counting it would read as mixed and evict the
+    // merge from the grandparent it belongs in.
+    const parents = new Set();
+    for (const id of S) {
+      const p = this.nodes.get(id).parent;
+      if (p !== undefined && closure.has(p)) continue;
+      parents.add(p);
+    }
     const parent = parents.size === 1 ? [...parents][0] : undefined;
 
     const doomedEdges = [];

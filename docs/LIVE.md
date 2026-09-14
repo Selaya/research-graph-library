@@ -120,7 +120,10 @@ const n = run.state().nodes["enrich"];   // { status, progress, occupancy, waiti
 `start(id)` normally *picks up* a waiting occupant — or claims a hop still crossing towards
 the node. Where there is nothing to pick up it mints a token instead, which is exactly right
 on a **root** (nothing points at it, so that is how a live run seeds itself) and a footgun
-anywhere else: a phantom unit of work nothing produced. So a `start()` on a non-root that
+anywhere else: a phantom unit of work nothing produced. "Root" means what the engine means
+by it: a `loop: true` edge, a self-edge and the back edge of an untagged cycle do not feed
+their target, so a graph drawn as a feedback pair still has a root to seed. So a `start()`
+on a non-root that
 
 - has no `waiting` occupant, and
 - has no token crossing towards it, and
@@ -159,9 +162,13 @@ run.start("J"); run.finish("J");         // ...and one token onto J's out-edges
   another token, which is what a long-running fan-in needs.
 - `state().joins[id]` still reports `{ arrived, needed, fired }` for the first group only —
   `arrived` saturates at `needed`, `fired` stays true once it has fired.
-- The log outranks the policy: an explicit `start(id)` activates a held arrival anyway, and
-  `finish`/`fail` consume whatever is on the node. `spawn()` is an explicit injection — it
-  is never held by, and never counted into, a join.
+- The log outranks the policy: an explicit `start(id)` activates a held arrival anyway (or
+  claims a hop still crossing towards the node), and `finish`/`fail` consume whatever is on
+  the node. That arrival still **counts into the group it belonged to**: the partners that
+  land afterwards complete that group and merge into the work already standing on the node,
+  so a 2-input AND-join that received two arrivals hands one token downstream however early
+  its `start()` was stamped. `spawn()` is an explicit injection — it is never held by, and
+  never counted into, a join.
 - A `finish()` on a join that has **not** fired yet — the normal live shape, one slow branch
   still outstanding — consumes the arrivals it is holding as **one** piece of work and hands
   a single token downstream, never one per arrival.
@@ -179,7 +186,11 @@ longer than it, `state().nodes[id].overBudget` is `true` and the renderer marks 
 `data-over-budget` (styled as a dashed warning boundary, composing with whatever `data-run`
 tint the node already has). It survives the `finish` that closed the over-long dwell — the
 step really did overrun — and a fresh `start()` on the node clears it, judging the new
-attempt on its own.
+attempt on its own. "Fresh" is about the unit of work, not about the node being idle: a
+`start()` that picks up an arrival (or mints a token) from at or after the moment the
+overrun ended is a new attempt and clears the flag, while one that picks up work which was
+already sitting on the node while the overrun ran is concurrent with it and leaves the
+verdict standing.
 
 ```css
 /* your own reading of it, if the default boundary is not the one you want */

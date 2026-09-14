@@ -188,6 +188,23 @@ test("a `collapsed` patch that matches the current state is still a no-op awaita
   g.destroy();
 });
 
+test("…but a `collapsed` patch carrying other keys resolves applied:true, even in-state", async () => {
+  // The contract README/`update()`'s .d.ts state: only a collapsed-ONLY patch can report
+  // `applied:false`, because a patch with other keys always commits something.
+  const g = mountG();
+  await settle(g.update("box", { collapsed: true }), g);
+  const r = await settle(g.update("box", { collapsed: true, label: "STILL FOLDED" }), g);
+  assert.deepEqual(r, { canceled: false, applied: true }, "the fold did not move, but the label did");
+  assert.equal(g.node("box").label, "STILL FOLDED");
+  assert.ok(allText(g.el).includes("STILL FOLDED"), "…and it is on screen");
+  assert.deepEqual(
+    await settle(g.update("box", { collapsed: true }), g),
+    { canceled: false, applied: false },
+    "collapsed-only, already folded: the no-op awaitable",
+  );
+  g.destroy();
+});
+
 // ---------------------------------------------------------------------------
 // F30 — g.validate(ops | fn).
 // ---------------------------------------------------------------------------
@@ -292,6 +309,43 @@ test("g.validate(): only ops storyboard() accepts are ops — a method name is n
   assert.deepEqual(res.errors.map((e) => e.code), ["validate-op", "validate-op"]);
   assert.equal(g.validate([{ op: "camera", args: [{ to: "box" }] }, { op: "wait", args: [10] }]).ok, true);
   g.destroy();
+});
+
+test("g.validate(): addNode's `{after}` sugar is checked too, implicit edge and all", async () => {
+  const g = mountG();
+
+  // The op mints `e:nope->n1` as well as the node, so the real call throws "dangling" —
+  // AFTER the node has already landed, which is exactly the half-applied patch validate()
+  // exists to catch. The probe used to drop the second argument and report ok.
+  const bad = g.validate([{ op: "addNode", args: [{ id: "n1" }, { after: "nope" }] }]);
+  assert.equal(bad.ok, false);
+  assert.deepEqual(bad.errors.map((e) => e.code), ["dangling"]);
+  assert.match(bad.errors[0].message, /e:nope->n1/);
+  assert.throws(
+    () => g.addNode({ id: "n1" }, { after: "nope" }),
+    (e) => e instanceof GraphError && e.code === "dangling",
+    "…which is what the real op does",
+  );
+  g.destroy();
+
+  // And the other direction: the implicit edge exists in the clone, so a later op that
+  // names it is legal rather than a phantom "missing".
+  const g2 = mountG();
+  assert.deepEqual(g2.validate([
+    { op: "addNode", args: [{ id: "n1" }, { after: "out" }] },
+    { op: "removeEdge", args: ["e:out->n1"] },
+  ]), { ok: true, errors: [] });
+  await settle(g2.addNode({ id: "n1" }, { after: "out" }), g2);
+  assert.ok(g2.edge("e:out->n1"), "the real op did mint the edge validate() counted on");
+  await settle(g2.removeEdge("e:out->n1"), g2);
+  assert.equal(g2.edge("e:out->n1"), undefined, "…and running the pair for real does succeed");
+
+  // The fn form goes through the same probe method.
+  assert.deepEqual(
+    g2.validate((probe) => probe.addNode({ id: "n2" }, { after: "ghost" })).errors.map((e) => e.code),
+    ["dangling"],
+  );
+  g2.destroy();
 });
 
 test("g.validate(): a valid list can be handed straight to batch() afterwards", async () => {

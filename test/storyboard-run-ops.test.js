@@ -182,6 +182,51 @@ test("F5: a backward seek past a `layout` op restores the direction it was taken
   g.destroy();
 });
 
+test("F5: a backward seek past a `run` op restores the compile inputs it was taken with", async () => {
+  const { g } = mountG({
+    storyboard: [
+      { op: "run.play", until: "a" },              // the FIRST compile is implicit here
+      { op: "run", args: [{ hopMs: 5000 }] },
+      { label: "end" },
+    ],
+  });
+  await settle(g.storyboard().next(), g);
+  const first = g.run().duration;
+  assert.equal(g.run().options().hopMs, undefined, "step 0 compiled with the defaults");
+
+  await settle(g.storyboard().play(), g);
+  assert.equal(g.run().options().hopMs, 5000, "the `run` step recompiled with its own opts");
+  assert.ok(g.run().duration > first, "…a visibly slower schedule");
+
+  // Back before both steps: the snapshot for step 0 was taken when no run existed at all,
+  // which is not the same as "a run with no opts" — the future compile's inputs must go.
+  await settle(g.storyboard().seek(0), g);
+  await settle(g.storyboard().next(), g);
+  assert.equal(g.run().options().hopMs, undefined, "the replayed step recompiled from scratch");
+  assert.equal(g.run().duration, first, "…so the replay plays the schedule the first pass did");
+  g.destroy();
+});
+
+test("F5: …and a snapshot taken WITH a run still restores that run's own opts", async () => {
+  const { g } = mountG({
+    storyboard: [
+      { op: "run", args: [{ hopMs: 100 }] },
+      { label: "mid" },
+      { op: "run", args: [{ hopMs: 5000 }] },
+    ],
+  });
+  await settle(g.storyboard().seek("mid"), g);
+  const mid = g.run().duration;
+
+  await settle(g.storyboard().play(), g);
+  assert.equal(g.run().options().hopMs, 5000);
+
+  await settle(g.storyboard().seek("mid"), g);
+  assert.equal(g.run().options().hopMs, 100, "the earlier compile's inputs came back");
+  assert.equal(g.run().duration, mid);
+  g.destroy();
+});
+
 test("F5: the new ops are priced on the same declared timeline cues() and the scrubber read", async () => {
   const { g } = mountG({
     animation: { duration: 400 },
@@ -292,6 +337,32 @@ test("F6: the unsubscriber still drops the handler when it is called AFTER a rec
   const again = g.run({});   // nothing resurrects on the NEXT recompile either
   await settle(again.play({ until: "a" }), g);
   assert.equal(viaUnsub + viaOff, 0);
+  g.destroy();
+});
+
+test("F6: off() on a STALE handle drops the carried-over listener, not just the bookkeeping", async () => {
+  // RUN.md: "run.off(type, fn) … still drops it for good, from either handle." The wrapper
+  // on the old handle closes over the OLD transport's raw off, so unsubscribing through it
+  // used to delete the tracking entry and leave the handler live on the NEW bus — the exact
+  // teardown a page does when a storyboard `{op:"run"}` step recompiles underneath it.
+  const { g } = mountG();
+  const runA = g.run({});
+  const seen = [];
+  const onStart = (p) => seen.push(p.nodeId);
+  runA.on("start", onStart);
+
+  const runB = g.run({});      // recompile: the sub is re-seated on the fresh transport
+  runA.off("start", onStart);  // …and dropped again through the handle the page is holding
+  await settle(runB.play(), g);
+  assert.deepEqual(seen, [], "the stale handle's off() really detached it");
+
+  // Nothing resurrects on the next recompile, and off() for something never registered
+  // (or already dropped) stays a silent no-op.
+  const runC = g.run({});
+  assert.doesNotThrow(() => runC.off("start", onStart));
+  assert.doesNotThrow(() => runC.off("start", () => {}));
+  await settle(runC.play(), g);
+  assert.deepEqual(seen, []);
   g.destroy();
 });
 

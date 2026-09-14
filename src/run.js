@@ -298,7 +298,9 @@ export function compileRun(spec = {}, opts = {}) {
     else if (policy && typeof policy === "object" && Number.isFinite(policy.count)) {
       needed = Math.max(1, Math.min(Math.floor(policy.count), Math.max(expected, 1)));
     } else needed = Math.max(1, expected);
-    joinStates.set(id, { policy, needed, expected, arrivals: [], waiting: [], fireT: null, dropped: 0 });
+    // `retryPending` — a retry attempt this node's already-fired join must let back in
+    // (see failAttempt/arrive); one slot per attempt, so only the replay crosses it.
+    joinStates.set(id, { policy, needed, expected, arrivals: [], waiting: [], fireT: null, dropped: 0, retryPending: 0 });
   }
 
   // ---- discrete-event machinery ----
@@ -325,8 +327,18 @@ export function compileRun(spec = {}, opts = {}) {
     queue.splice(lo, 0, item);
   }
 
-  function newToken(rate, applied, loopsUsed, parentId) {
-    const tk = { id: `t${tokenSeq++}`, rate, applied, loopsUsed, parentId, segments: [], endT: Infinity, attempts: new Map() };
+  /** A token carries the BRANCH's state, not just an identity: rate, the rate events it has
+   *  folded in, the loop arcs it has consumed, the per-node attempt counts, and the nodes it
+   *  is currently retrying. `fanOut` mints a child for every out-edge past the first, and a
+   *  child inherits all five (by copy — branches then count independently). `attempts` in
+   *  particular: an `onFail` arc that re-reaches the failing node through a later out-edge
+   *  would otherwise restart its budget on every pass, so `attempt > retries` would never
+   *  hold and the compile would only stop at MAX_STEPS. */
+  function newToken(rate, applied, loopsUsed, parentId, attempts, retrying) {
+    const tk = {
+      id: `t${tokenSeq++}`, rate, applied, loopsUsed, parentId, segments: [], endT: Infinity,
+      attempts: attempts || new Map(), retrying: retrying || new Set(),
+    };
     tokens.push(tk);
     return tk;
   }
@@ -368,6 +380,19 @@ export function compileRun(spec = {}, opts = {}) {
     const st = seed ? null : joinStates.get(nodeId);
     if (!st) return startDwell(tk, nodeId, t);
     if (st.fireT != null) {
+      // …unless this is a retry walking back in. A retry arc into an upstream step replays
+      // that step, and the replay reaches the failing node again through ORDINARY edges —
+      // through here — where the join has long since fired and can never re-arm (the other
+      // branches are not replayed, so waiting for them would deadlock). Dropping it would
+      // swallow the whole retry: no further attempt, no terminal 'fail', and a node that
+      // declared a failure ending up 'done'. So the same rule as the arc's own hop applies
+      // (see failAttempt) — a retry is not gated by, and not counted into, the target's
+      // join. One slot per attempt, so a sibling branch cannot re-enter alongside it.
+      if (st.retryPending > 0 && tk.retrying.has(nodeId)) {
+        st.retryPending--;
+        tk.retrying.delete(nodeId);
+        return startDwell(tk, nodeId, t);
+      }
       // The policy already fired: this branch's work is moot (ghost-fade in the renderer).
       st.dropped++;
       emit({ t, type: "drop", tokenId: tk.id, nodeId, edgeId: viaEdgeId });
@@ -433,6 +458,13 @@ export function compileRun(spec = {}, opts = {}) {
     const e = onFailEdge(nodeId);
     const hop = e ? scale(hopFor(e), tk.rate) : 0;
     const to = e ? e.target : nodeId;
+    if (e && to !== nodeId) {
+      // The replay lands upstream and walks back down here through ordinary edges: flag the
+      // pass so this node's already-fired join lets exactly this attempt through (arrive()).
+      tk.retrying.add(nodeId);
+      const st = joinStates.get(nodeId);
+      if (st) st.retryPending++;
+    }
     if (e) {
       // The budget — not the arc's raw maxIterations, which `data.fail.retries` overrides —
       // is what a `iter 2/3` badge must read, so the event and loops[id].max carry it.
@@ -460,8 +492,14 @@ export function compileRun(spec = {}, opts = {}) {
   function exitNode(tk, nodeId, t) {
     for (const e of outLoop.get(nodeId)) {
       if (e.onFail) continue; // a retry arc fires out of a failure, never out of a finish
-      if (tk.loopsUsed.has(e.key)) continue;
-      tk.loopsUsed.add(e.key);
+      // Consumed per SPEC id, not per engine `key`: one loop edge into a multi-entry
+      // container expands into one engine edge per entry (F9), and the iteration budget
+      // belongs to the arc the reader drew — as `opts.iterations`, `loopTimeline` and the
+      // badge's `max` already do, all keyed by `id`. Keying this by `key` instead ran the
+      // whole budget once per entry child (n x entries iterations, the counter restarting
+      // mid-run). The tick hosts on the first expansion; the rest are the same arc.
+      if (tk.loopsUsed.has(e.id)) continue;
+      tk.loopsUsed.add(e.id);
       const n = iterationsFor(e);
       if (n <= 0) continue; // capped to zero: behave as if the loop were not there
       emit({ t, type: "loop", tokenId: tk.id, edgeId: e.id, nodeId, iteration: 1, max: e.maxIterations });
@@ -494,7 +532,9 @@ export function compileRun(spec = {}, opts = {}) {
     if (!outs.length) { endToken(tk, t); return; }
     for (let k = 0; k < outs.length; k++) {
       const e = outs[k];
-      const child = k === 0 ? tk : newToken(tk.rate, new Set(tk.applied), new Set(tk.loopsUsed), tk.id);
+      const child = k === 0
+        ? tk
+        : newToken(tk.rate, new Set(tk.applied), new Set(tk.loopsUsed), tk.id, new Map(tk.attempts), new Set(tk.retrying));
       if (child !== tk) emit({ t, type: "spawn", tokenId: child.id, parentId: tk.id, nodeId, edgeId: e.id });
       const hop = scale(hopFor(e), child.rate);
       segment(child, { kind: "edge", id: e.id, t0: t, t1: t + hop });

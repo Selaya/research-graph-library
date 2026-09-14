@@ -269,9 +269,12 @@ compileRun(spec, opts) → sim
   `data.entry: true` / `data.startAt` declare the same thing in the spec (F3/F4). An edge's
   `data.duration` is its hop time, paced by the node formula, `hopMs` otherwise (F8); a
   container's `entry: [ids]`/`exit: [ids]` expand one spec edge into several engine edges
-  that keep its `id` and carry a unique `key` for cycle/loop bookkeeping (F9); `data.fail`
-  may be `{reason, retries, recover}` and a `loop` edge may be `onFail: true`, which makes
-  'failed' terminal only once the retry budget is spent (F1).
+  that keep its `id` and carry a unique `key` for cycle bookkeeping (F9) — a loop's
+  consumed-iterations bookkeeping stays keyed by `id`, so one arc into a multi-entry
+  container spends its budget once, not once per entry child. `data.fail` may be
+  `{reason, retries, recover}` and a `loop` edge may be `onFail: true`, which makes 'failed'
+  terminal only once the retry budget is spent (F1); the per-node attempt counter lives on
+  the token and is inherited by the children `fanOut` mints, so the budget is the branch's.
 - Default pacing: `dwellMs = 300 + 1200 * (sec / maxSecInGraph)`, 600 when the node has
   no `data.duration`. Rates: a token entering node X multiplies its inherited rate by
   every applicable rate event; rate divides dwell AND hop times for that token's branch
@@ -280,7 +283,9 @@ compileRun(spec, opts) → sim
 - Semantics: source nodes (no in-edges, loop edges excluded) start with one token at t=0.
   A node completes → spawns one child token per non-loop out-edge (implicit fan-out).
   `join: "all"|"any"|{count:k}` on a node: dwell starts when the policy fires
-  (expected = # non-loop in-edges); later arrivals emit `drop` (ghost-fade). Loop edge
+  (expected = # non-loop in-edges); later arrivals emit `drop` (ghost-fade) — except a retry
+  replaying through it (F1): a fired join never re-arms, so it lets exactly one retry token
+  per attempt back through, uncounted. Loop edge
   `loop:true` A→B: token finishing A with iterations remaining traverses the arc ONCE
   visually (iteration 1), then per further iteration a compressed in-place tick
   (250ms/iter, no re-fly — D4) emitting `loop` {edgeId, iteration, max}; after the final
@@ -329,8 +334,11 @@ compileRun(spec, opts) → sim
 - index.js: `opts.storyboard` array + `opts.autoplay` (`true`, or `'auto'` = play only when
   the page URL carries `?auto=1`, F36); host implementation lives in index.js
   (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed], runTime, runOpts,
-  layout: {...layoutOpts}} — the `layout` op mutates the instance-wide options in place, so
-  they are state a step moves and a backward seek has to put back).
+  runCompiled, layout: {...layoutOpts}} — the `layout` op mutates the instance-wide options
+  in place, so they are state a step moves and a backward seek has to put back; the `run` op
+  does the same to the compile inputs, and `runCompiled` keeps "no run yet" distinct from "a
+  run with no opts" so a restore does not leave a LATER compile's inputs behind for the next
+  implicit `ensureRun()`).
   `g.finished` is one deferred per instance, resolved by the storyboard's `done` event,
   `g.finish(reason)` or `destroy()` — the "story finished" signal check-demos waits on.
   The two snippets the checker evaluates in the page (which hook is on offer, and the latch
@@ -508,8 +516,12 @@ and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unch
   per-node arrival counter (upstream `finish`/`spawn` credit it, `start`/`finish`/`fail`
   drain it), so the streaming shape `finish(A); start(B)` never pays for a replay; the
   counter only ever SUPPRESSES the exact check, so no warning it would not have made can
-  appear. `finish()`/`fail()`'s zero-occupancy warning counts a crossing towards the node as
-  occupied when `minHopMs` is set, since the engine defers such a call rather than dropping it.
+  appear. "Root" is the engine's own notion (`liveFedTargets`, exported by `src/run-live.js`
+  so the two cannot drift): loop edges, self-edges **and the back edges `breakCycles` cuts**
+  do not feed their target, so a graph drawn as an untagged cycle still has a root the run
+  can be seeded on. `finish()`/`fail()`'s zero-occupancy warning counts a crossing towards the
+  node as occupied when `minHopMs` is set, since the engine defers such a call rather than
+  dropping it.
 - View time `t`: by default **follows** the frontier (`run.following === true`).
   `seek(ms)` clamps to `[0, frontier]` and detaches (time-travel replay); `play()`
   advances `t` at 1× (× global speed) and clamps at the frontier — you can NEVER scrub or

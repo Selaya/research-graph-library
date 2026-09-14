@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { emitter } from "../src/events.js";
+import { pointAt } from "../src/path.js";
+import { readFile } from "node:fs/promises";
 import { createTicker } from "../src/anim.js";
 import {
   formatDuration, aggregateDuration, effectiveDurationSec, deltaBadgeText,
@@ -787,6 +789,70 @@ test("F26: edge.data.duration renders a chip on the edge, offset off the line", 
   g.emit("commit", { nodes: rectsFrom(spec), edges: {} });
   assert.equal(g.renderer.edge("hop").children.length, 0, "chip removed when the edge loses its duration");
   handle.destroy();
+});
+
+test("F26: a BENT edge (odd-length bend chain) still pushes its chip off the stroke", () => {
+  // Any edge the solver bends spans >2 points, and an odd-length chain has its middle
+  // index land exactly ON a bend point. Indexing the chain by hand made `a === b` there,
+  // so the perpendicular push was (0,0) and the chip sat on the wire under the label.
+  const spec = {
+    nodes: [{ id: "a" }, { id: "b" }, { id: "c" }],
+    edges: [
+      { id: "ab", source: "a", target: "b" },
+      { id: "bc", source: "b", target: "c" },
+      { id: "ac", source: "a", target: "c", label: "skip", data: { duration: "400ms" } },
+    ],
+  };
+  const g = fakeInstance(spec);
+  const handle = applyPipelinePreset(g);
+  // A three-point chain that bends: the middle point is the bend the solver routed around.
+  const points = [{ x: 20, y: 27.25 }, { x: 76, y: 34.5 }, { x: 132, y: 31.6 }];
+  g.emit("commit", { nodes: rectsFrom(spec), edges: { ac: { points } } });
+
+  const chip = clsOf(g.renderer.edge("ac"), "smv-edge-chip");
+  assert.equal(chip.textContent, "400ms");
+  const bend = points[1];
+  const off = Math.hypot(xy(chip).x - bend.x, xy(chip).y - bend.y);
+  assert.ok(off > 5, `the chip must clear the stroke, not sit on the bend (off by ${off})`);
+  // render.js rides the label on pointAt(path, 0.5) + 8px along the SAME normal, so the
+  // chip has to be on the other side of the line from it, not a couple of px away.
+  const mid = pointAt(points, 0.5);
+  const nx = -Math.sin(mid.angle), ny = Math.cos(mid.angle);
+  const label = { x: mid.x + nx * 8, y: mid.y + ny * 8 };
+  assert.ok(Math.hypot(xy(chip).x - label.x, xy(chip).y - label.y) > 12,
+    "chip and edge label end up on opposite sides of the wire");
+  handle.destroy();
+});
+
+test("F26: a straight two-point edge is placed exactly as before (arc-length midpoint)", () => {
+  const spec = { nodes: [{ id: "a" }, { id: "b" }], edges: [{ id: "hop", source: "a", target: "b", data: { duration: "1s" } }] };
+  const g = fakeInstance(spec);
+  const handle = applyPipelinePreset(g);
+  g.emit("commit", { nodes: rectsFrom(spec), edges: { hop: { points: [{ x: 0, y: 0 }, { x: 100, y: 0 }] } } });
+  assert.deepEqual(xy(clsOf(g.renderer.edge("hop"), "smv-edge-chip")), { x: 50, y: -9 });
+  handle.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// docs/PRESETS.md's copy-paste snippets have to actually link
+// ---------------------------------------------------------------------------
+
+test("every subpath import in docs/PRESETS.md names an export the module really has", async () => {
+  const md = await readFile(new URL("../docs/PRESETS.md", import.meta.url), "utf8");
+  const re = /import\s*\{([^}]*)\}\s*from\s*"sparkle-motion-visualizer\/([\w-]+)"/g;
+  const seen = [];
+  for (const m of md.matchAll(re)) {
+    const mod = await import(`sparkle-motion-visualizer/${m[2]}`);
+    for (const raw of m[1].split(",")) {
+      const name = raw.trim().split(/\s+as\s+/)[0].trim();
+      if (!name) continue;
+      seen.push(`${m[2]}:${name}`);
+      // A named import of a missing export is a LINK-time SyntaxError, not `undefined` —
+      // the page never runs at all, so a wrong name in a doc snippet is not a soft failure.
+      assert.ok(name in mod, `docs/PRESETS.md imports "${name}" from "${m[2]}", which does not export it`);
+    }
+  }
+  assert.ok(seen.length > 0, "the doc still has at least one subpath import to check");
 });
 
 test("PRESET_CSS carries the new slots: edge chip + the total bar's key/alt spans", () => {
