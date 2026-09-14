@@ -100,10 +100,14 @@
   <p class="lede">
     A candidate <em>prompt set</em> fans out to 6 held-out test cases; each case's model
     output is scored by its own LLM judge; the six verdicts <code>join:"all"</code> into a
-    <em>score aggregation</em> step feeding a <em>threshold gate</em>. The first run's gate
-    fails — two cases score badly, and <code>pass@1</code> lands under the 0.80 bar — so it
-    loops back to <em>Revise prompt</em> (a bounded retry, <code>maxIterations:3</code>). A
-    revised prompt v2 re-runs the same harness and clears the bar; the gate turns green.
+    <em>score aggregation</em> step that hands its scorecard to <em>Revise prompt</em> and
+    then to a <em>threshold gate</em>. The gate's check fails — two cases score badly, and
+    <code>pass@1</code> lands under the 0.80 bar — so it takes its declared retry budget
+    (<code>data.fail: { retries }</code> on an <code>onFail</code> loop edge): every attempt
+    flies the dashed arc back to <em>Revise prompt</em>, re-runs it, and re-checks the gate,
+    with the iteration badge ticking for real. The budget runs out red; a human then rewrites
+    the two weak cases, the story recompiles the run (<code>{ op: "run" }</code>), and prompt
+    v2 clears the bar.
   </p>
 </header>
 
@@ -121,25 +125,30 @@
   <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
   <div class="tile"><i>pass@1 / target</i><span id="m-score">— / 0.80</span></div>
   <div class="tile"><i>gate verdict</i><span id="m-verdict">—</span></div>
-  <div class="tile"><i>retry loop</i><span id="m-loop">iter 0/3</span></div>
+  <div class="tile"><i>retry loop</i><span id="m-loop">iter 0/2</span></div>
 </div>
 
 <ul class="watch">
   <li>6 test cases fan out from <b>Prompt set</b> into the <code>cases</code> container, each
     at its own generation latency; each case feeds its own child judge inside the
     <code>judges</code> container.</li>
-  <li><b>Score aggregation</b> is an implicit <b>AND-join</b> of all 6 judges;
-    <b>Threshold gate</b> reads the aggregate and declares <code>data.fail</code> with the
-    exact reason (<code>"pass@1 = 0.62 &lt; 0.80"</code>) — watch for the warn highlight.</li>
+  <li><b>Score aggregation</b> is an implicit <b>AND-join</b> of all 6 judges; its scorecard
+    goes to <b>Revise prompt</b> and on to <b>Threshold gate</b>, which declares
+    <code>data.fail: { reason, retries: 2 }</code> with the exact reason
+    (<code>"pass@1 = 0.62 &lt; 0.80"</code>).</li>
+  <li>The dashed arc is that failure's retry arc — <code>loop: true, onFail: true</code>. Each
+    non-terminal <code>fail</code> flies it back to <b>Revise prompt</b>, re-runs that step and
+    re-checks the gate; <code>state().loops.retry</code> drives the iteration badge, and
+    <code>'failed'</code> only sticks on the attempt that finds the budget spent.</li>
   <li>The two weak cases get a <b>warn highlight + a red <code>--smv-fill</code> props
-    tint</b> so you can spot exactly what dragged the average down.</li>
-  <li>The dashed arc on <b>Revise prompt</b> is a bounded <code>loop:true,
-    maxIterations:3</code> retry edge — watch its iteration badge tick as the gate loops
-    back to it.</li>
-  <li>After the prompt is revised, a fresh run clears the bar: <b>Threshold gate</b> gets an
-    <code>ok</code>-variant highlight and a camera close-up as it turns green.</li>
-  <li>The results table below updates live from <code>run.on("finish"/"fail")</code> as each
-    case and judge completes.</li>
+    tint</b> so you can spot exactly what dragged the average down. Status tint composes with
+    the role colour, so a red-scored node still reads as failed.</li>
+  <li>Prompt v2 rewrites those two cases, drops the gate's <code>fail</code> with
+    <code>update(..., { replace: true })</code>, and the story recompiles the run from a
+    <code>{ op: "run" }</code> step — a real second pass over the whole harness, ending with
+    an <code>ok</code>-variant highlight on the gate.</li>
+  <li>The results table below updates live from <code>run.on("start"/"finish")</code> as each
+    case and judge runs; those listeners are registered once and survive the recompile.</li>
 </ul>
 
 <table class="results" id="results">
@@ -172,9 +181,9 @@
 
   // ---------------------------------------------------------------------------
   // The spec. Six held-out cases, each with its own judge, one AND-join aggregate, a
-  // threshold gate, and a bounded retry loop back to "revise prompt". The whole graph is
-  // mounted at once (no assembly waves) — the story lives entirely in the run/retry/pass
-  // cycle, not in the topology appearing.
+  // "revise prompt" step and a threshold gate whose failure carries its own retry budget.
+  // The whole graph is mounted at once (no assembly waves) — the story lives entirely in
+  // the run/retry/pass cycle, not in the topology appearing.
   // ---------------------------------------------------------------------------
 
   var CASE_META = [
@@ -193,6 +202,7 @@
   var WEAK_NS = [3, 5];
   var TARGET = 0.80;
   var CASE_BAR = 0.50; // per-case pass/fail line for the results table
+  var RETRIES = 2;     // attempts after the first — the gate's declared retry budget
 
   function avg(arr) { return arr.reduce(function (a, b) { return a + b; }, 0) / arr.length; }
   var LOW_AVG = avg(LOW_SCORES), HIGH_AVG = avg(HIGH_SCORES);
@@ -215,6 +225,11 @@
     return { id: "judges.j" + c.n, parent: "judges", label: "Judge · " + c.label, data: { duration: c.judgeDur, score: LOW_SCORES[i] } };
   });
 
+  // The gate's failure declares its own budget: `retries: 2` = three attempts, each one a
+  // real dwell with its own `fail` event, and 'failed' only sticks on the last one.
+  var GATE_DATA_V1 = { duration: "0.4s", fail: { reason: LOW_REASON, retries: RETRIES } };
+  var GATE_DATA_V2 = { duration: "0.4s" };
+
   var NODES = [
     { id: "prompt_set", label: "Prompt set v1", data: { duration: "0.6s" } },
     { id: "cases", label: "Test cases (6)", durationAgg: "max" },
@@ -222,8 +237,8 @@
     { id: "judges", label: "LLM judges (6)", durationAgg: "max" },
   ]).concat(JUDGES).concat([
     { id: "score_agg", label: "Score aggregation", join: "all", data: { duration: "0.5s" } },
-    { id: "gate", label: "Threshold gate", data: { duration: "0.4s", fail: LOW_REASON } },
     { id: "revise", label: "Revise prompt", data: { duration: "1.3s" } },
+    { id: "gate", label: "Threshold gate", data: GATE_DATA_V1 },
   ]);
 
   var EDGES = [];
@@ -232,38 +247,57 @@
     EDGES.push({ id: "toj" + c.n, source: "cases.c" + c.n, target: "judges.j" + c.n });
     EDGES.push({ id: "j" + c.n + "s", source: "judges.j" + c.n, target: "score_agg" });
   });
-  EDGES.push({ id: "sg", source: "score_agg", target: "gate" });
-  EDGES.push({ id: "retry", source: "gate", target: "revise", loop: true, maxIterations: 3 });
+  EDGES.push({ id: "sr", source: "score_agg", target: "revise" });
+  EDGES.push({ id: "rg", source: "revise", target: "gate" });
+  // The gate's retry arc: it fires out of a FAILED check (never out of a finish), so every
+  // retry really crosses it, re-runs "Revise prompt" and re-checks the gate.
+  EDGES.push({
+    id: "retry", source: "gate", target: "revise",
+    loop: true, onFail: true, maxIterations: 3,
+    // A real edge label: upright, on a pill, placed off the arc's midpoint so it clears the
+    // run layer's `iter n/m` badge, and long enough to need the preset's raised label cap.
+    label: { text: "on fail · revise and re-check", place: "start", pill: true },
+  });
 
   var SEED = { nodes: NODES, edges: EDGES };
 
   // Pacing: default dwell (300-1500ms, linear over declared duration) is already tame
   // across this spec's 0.4s-1.6s range, so no custom dwell fn is needed — just a modest
-  // hop time. `iterations` caps how far the "retry" loop edge iterates for a given
-  // compile: RETRY_OPTS plays iteration 1 (the real arc-cross) plus one in-place tick
-  // (iteration 2 of the edge's maxIterations 3); RUN2_OPTS caps it to 0 so the passing
-  // run doesn't loop.
+  // hop time. `playbackSpeed` is a pure playback multiplier: it makes the auto run quick
+  // without moving the declared total the clock tile reports. `iterations` caps the retry
+  // arc for this compile, which IS the gate's retry budget when data.fail declares none —
+  // here data.fail.retries names it outright and the badge reports that number.
   var HOP = 170;
-  var RUN1_OPTS  = { hopMs: HOP };
-  var RETRY_OPTS = { hopMs: HOP, iterations: { retry: 2 } };
-  var RUN2_OPTS  = { hopMs: HOP, iterations: { retry: 0 } };
   var SPEED = AUTO ? 2.2 : 1;
+  var RUN1_OPTS = { hopMs: HOP, playbackSpeed: SPEED, iterations: { retry: RETRIES } };
+  var RUN2_OPTS = { hopMs: HOP, playbackSpeed: SPEED };
   var WAIT_GATE_FAIL = AUTO ? 700 : 1500;
   var WAIT_WEAK      = AUTO ? 800 : 1800;
-  var WAIT_LOOP      = AUTO ? 400 : 900;
+  var WAIT_LOOP      = AUTO ? 600 : 1400;
+  var WAIT_REVISE    = AUTO ? 600 : 1400;
   var WAIT_GATE_PASS = AUTO ? 800 : 1800;
 
   // ---------------------------------------------------------------------------
 
   var STEPS = [
     { label: "run 1" },
+    { op: "run", args: [RUN1_OPTS] },
     { op: "run.play", until: "gate" },
 
     { label: "gate failed" },
     { op: "camera", args: [{ node: "gate", pad: 90, dur: 600 }] },
     { op: "highlight", args: [{ nodes: ["gate"], variant: "warn", pulse: true }] },
-    { op: "caption", args: [LOW_REASON + " — threshold gate failed.", { place: "bottom" }] },
+    { op: "caption", args: [LOW_REASON + " — threshold gate failed, retries spent.", { place: "bottom" }] },
     { op: "wait", ms: WAIT_GATE_FAIL },
+    { op: "caption", args: [null] },
+    { op: "clearHighlight" },
+
+    { label: "retry" },
+    { op: "camera", args: [{ nodes: ["gate", "revise"], pad: 60, dur: 550 }] },
+    { op: "highlight", args: [{ nodes: ["revise"], edges: ["retry"], variant: "focus", pulse: true }] },
+    { op: "caption", args: ["Every failed check flew the retry arc back to Revise prompt — " +
+        (RETRIES + 1) + " attempts, all of them under the bar.", { place: "bottom" }] },
+    { op: "wait", ms: WAIT_LOOP },
     { op: "caption", args: [null] },
     { op: "clearHighlight" },
 
@@ -275,21 +309,22 @@
     { op: "wait", ms: WAIT_WEAK },
     { op: "caption", args: [null] },
     { op: "clearHighlight" },
-    { op: "update", args: ["gate", { data: { fail: null } }] },
-
-    { label: "retry" },
-    { op: "camera", args: [{ nodes: ["gate", "revise"], pad: 60, dur: 550 }] },
-    { op: "highlight", args: [{ nodes: ["revise"], edges: ["retry"], variant: "focus", pulse: true }] },
-    { op: "caption", args: ["Gate loops back to Revise prompt — iteration 2 of 3.", { place: "bottom" }] },
-    { op: "run.play" },
-    { op: "wait", ms: WAIT_LOOP },
-    { op: "caption", args: [null] },
-    { op: "clearHighlight" },
     { op: "props", args: [null] },
+
+    { label: "prompt v2" },
     { op: "batch", steps: CASE_META.map(function (c, i) {
         return { op: "update", args: ["judges.j" + c.n, { data: { score: HIGH_SCORES[i] } }] };
-      }).concat([{ op: "update", args: ["prompt_set", { label: "Prompt set v2" }] }]) },
-    { op: "camera", args: [{ fit: true, pad: 40, dur: 550 }] },
+      }).concat([
+        { op: "update", args: ["prompt_set", { label: "Prompt set v2" }] },
+        // `replace: true` swaps the gate's whole data payload, so the declared failure —
+        // reason, budget and all — is gone rather than merged over.
+        { op: "update", args: ["gate", { data: GATE_DATA_V2 }, { replace: true }] },
+      ]) },
+    { op: "caption", args: ["Prompt v2 rewrites the two weak cases — recompiling the run.", { place: "bottom" }] },
+    { op: "wait", ms: WAIT_REVISE },
+    { op: "caption", args: [null] },
+    { op: "run", args: [RUN2_OPTS] },
+    { op: "camera", args: [{ fit: true, dur: 550 }] },
 
     { label: "run 2" },
     { op: "run.play", until: "gate" },
@@ -301,7 +336,7 @@
     { op: "wait", ms: WAIT_GATE_PASS },
     { op: "caption", args: [null] },
     { op: "clearHighlight" },
-    { op: "camera", args: [{ fit: true, pad: 32, dur: 600 }] },
+    { op: "camera", args: [{ fit: true, dur: 600 }] },
     { label: "done" },
   ];
 
@@ -323,6 +358,7 @@
     resultsBody.appendChild(tr);
   });
 
+  var checks = {};
   var g;
   try {
     g = SparkleMotion.mount("#pipe", SEED, {
@@ -332,8 +368,9 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto", // plays itself under ?auto=1; the Play button drives it otherwise
     });
+    window.smv = g; // the library's own "story finished" convention hangs off the instance
     g.run(RUN1_OPTS); // compile up front so the transport bar has a timeline from step 0
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
@@ -353,59 +390,65 @@
     return n ? sum / n : 0;
   }
 
-  function attachRunListeners() {
-    var run = g.run();
-    if (!run) return;
-    run.speed(SPEED);
-    run.on("tick", function () {
-      mTime.textContent = fmt(run.time()) + " / " + fmt(run.duration);
-    });
-    run.on("finish", function (ev) {
-      var m = /^cases\.c(\d+)$/.exec(ev.nodeId);
-      if (m) {
-        var row = document.getElementById("row" + m[1]);
-        if (row) row.querySelector(".c-dur").textContent = "done ✓";
-      }
-      var jm = /^judges\.j(\d+)$/.exec(ev.nodeId);
-      if (jm) {
-        var node = g.node(ev.nodeId);
-        var score = node && node.data && typeof node.data.score === "number" ? node.data.score : null;
-        var row2 = document.getElementById("row" + jm[1]);
-        if (row2 && score != null) {
-          row2.querySelector(".c-score").textContent = score.toFixed(2);
-          var pass = score >= CASE_BAR;
-          var vcell = row2.querySelector(".c-verdict");
-          vcell.textContent = pass ? "pass" : "fail";
-          vcell.className = "c-verdict " + (pass ? "good" : "bad");
-        }
-      }
-      if (ev.nodeId === "gate") {
-        mVerdict.textContent = "PASS";
-        mVerdict.className = "good";
-        var s = currentPassAt1();
-        mScore.textContent = s.toFixed(2) + " / " + TARGET.toFixed(2);
-        mScore.className = s >= TARGET ? "good" : "bad";
-      }
-    });
-    run.on("fail", function (ev) {
-      if (ev.nodeId === "gate") {
-        mVerdict.textContent = "FAIL";
-        mVerdict.className = "bad";
-        var s = currentPassAt1();
-        mScore.textContent = s.toFixed(2) + " / " + TARGET.toFixed(2);
-        mScore.className = "bad";
-        checks.gateFailReason = ev.reason || null;
-      }
-    });
-    run.on("loop", function (ev) {
-      if (ev.edgeId === "retry") {
-        mLoop.textContent = "iter " + ev.iteration + "/" + ev.max;
-        checks.loopIteration = ev.iteration;
-        checks.loopMax = ev.max;
-      }
-    });
+  function row(nodeId, re) {
+    var m = re.exec(nodeId);
+    return m ? document.getElementById("row" + m[1]) : null;
   }
-  attachRunListeners();
+  var CASE_RE = /^cases\.c(\d+)$/, JUDGE_RE = /^judges\.j(\d+)$/;
+
+  // Registered ONCE: run subscriptions are carried across the `{ op: "run" }` recompile in
+  // the middle of the story, so nothing here is re-attached per compile.
+  var run = g.run();
+  run.on("tick", function (ev) {
+    mTime.textContent = fmt(ev.time) + " / " + fmt(ev.duration);
+  });
+  run.on("start", function (ev) {
+    var r = row(ev.nodeId, CASE_RE);
+    if (r) r.querySelector(".c-dur").textContent = "running…";
+    var jr = row(ev.nodeId, JUDGE_RE);
+    if (jr) { jr.querySelector(".c-score").textContent = "…"; jr.querySelector(".c-verdict").textContent = "—"; jr.querySelector(".c-verdict").className = "c-verdict"; }
+  });
+  run.on("finish", function (ev) {
+    var r = row(ev.nodeId, CASE_RE);
+    if (r) r.querySelector(".c-dur").textContent = "done ✓";
+    var jr = row(ev.nodeId, JUDGE_RE);
+    if (jr) {
+      var node = g.node(ev.nodeId);
+      var score = node && node.data && typeof node.data.score === "number" ? node.data.score : null;
+      if (score != null) {
+        jr.querySelector(".c-score").textContent = score.toFixed(2);
+        var pass = score >= CASE_BAR;
+        var vcell = jr.querySelector(".c-verdict");
+        vcell.textContent = pass ? "pass" : "fail";
+        vcell.className = "c-verdict " + (pass ? "good" : "bad");
+      }
+    }
+    if (ev.nodeId === "gate") {
+      mVerdict.textContent = "PASS";
+      mVerdict.className = "good";
+      var s = currentPassAt1();
+      mScore.textContent = s.toFixed(2) + " / " + TARGET.toFixed(2);
+      mScore.className = s >= TARGET ? "good" : "bad";
+    }
+  });
+  run.on("fail", function (ev) {
+    if (ev.nodeId !== "gate") return;
+    // Every attempt emits its own `fail`; only the last one is terminal.
+    mVerdict.textContent = "FAIL · attempt " + ev.attempt + "/" + (ev.retries + 1);
+    mVerdict.className = "bad";
+    var s = currentPassAt1();
+    mScore.textContent = s.toFixed(2) + " / " + TARGET.toFixed(2);
+    mScore.className = "bad";
+    checks.gateFailReason = ev.reason || null;
+    checks.gateAttempts = ev.attempt;
+    if (ev.terminal) checks.gateFailTerminal = true;
+  });
+  run.on("loop", function (ev) {
+    if (ev.edgeId !== "retry") return;
+    mLoop.textContent = "iter " + ev.iteration + "/" + ev.max;
+    checks.loopIteration = ev.iteration;
+    checks.loopMax = ev.max;
+  });
 
   var sb = g.storyboard();
   var LABELS = sb.labels();
@@ -419,8 +462,6 @@
     for (var i = 0; i < LABELS.length; i++) if (LABELS[i].label === text) return LABELS[i].index;
     return -1;
   }
-  var RETRY_AT = indexOfLabel("retry");
-  var RUN2_AT = indexOfLabel("run 2");
   var GATE_FAILED_AT = indexOfLabel("gate failed");
   var GATE_PASSED_AT = indexOfLabel("gate passed");
 
@@ -436,56 +477,37 @@
     }
   }
 
-  var checks = {};
-  var storyDone = false;
+  function gateStatus() {
+    var st = g.run().state().nodes.gate;
+    return st ? st.status : null;
+  }
 
   sb.on("step", function (ev) {
     paintRail();
-    g.fitView({ animate: true, pad: 40 });
-    // Neither storyboard nor `update` steps can create a fresh run — that has to happen
-    // as a side effect right when we reach the label just before the next run.play step
-    // (same pattern demo/terraform-plan.html uses for its "replay" phase).
-    if (ev.index === RETRY_AT) { g.run(RETRY_OPTS); attachRunListeners(); }
-    if (ev.index === RUN2_AT) { g.run(RUN2_OPTS); attachRunListeners(); }
-    if (ev.index === GATE_FAILED_AT) checks.gate1Failed = g.run().state().nodes.gate && g.run().state().nodes.gate.status === "failed";
-    if (ev.index === GATE_PASSED_AT) checks.gate2Passed = g.run().state().nodes.gate && g.run().state().nodes.gate.status === "done";
+    if (ev.index === GATE_FAILED_AT) checks.gate1Failed = gateStatus() === "failed";
+    if (ev.index === GATE_PASSED_AT) checks.gate2Passed = gateStatus() === "done";
+    playBtn.disabled = true;
     phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
-
-  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
+  sb.on("done", function () { paintRail(); phaseEl.textContent = "story complete"; });
 
   function transportPlay() {
     var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
     if (btn) btn.click(); else sb.play();
   }
 
-  var started = false;
-  function start() {
-    if (started) return;
-    started = true;
+  playBtn.addEventListener("click", function () {
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
     transportPlay();
-  }
-
-  playBtn.addEventListener("click", start);
+  });
   resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
 
   function writeReport() {
     reportEl.textContent =
       "run 1 gate fail reason   " + checks.gateFailReason + "\n" +
+      "run 1 gate attempts      " + checks.gateAttempts + " (terminal: " + !!checks.gateFailTerminal + ")\n" +
       "run 1 gate failed        " + checks.gate1Failed + "\n" +
       "retry loop iteration     " + checks.loopIteration + " of " + checks.loopMax + "\n" +
       "run 2 gate passed        " + checks.gate2Passed + "\n" +
@@ -493,24 +515,25 @@
       "errors                   " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
 
-  async function auto() {
-    await sleep(200);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
-    await sleep(300);
-    writeReport();
-    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
-    window.__smvExit = { done: true, errors: errors, checks: checks };
-  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
-  paintRail();
-  if (AUTO) {
-    auto().catch(function (err) {
-      errors.push("auto: " + String((err && err.message) || err));
+  // `g.finished` is the library's story-finished promise (it resolves when the storyboard
+  // runs out of steps); `__smvExit` stays as the checker's error channel.
+  g.finished.then(function () {
+    if (!AUTO) { writeReport(); return; }
+    return sleep(300).then(function () {
       writeReport();
+      phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
       window.__smvExit = { done: true, errors: errors, checks: checks };
     });
-  }
+  }).catch(function (err) {
+    errors.push("finish: " + String((err && err.message) || err));
+    writeReport();
+    window.__smvExit = { done: true, errors: errors, checks: checks };
+  });
+
+  paintRail();
+  if (AUTO) phaseEl.textContent = "playing…";
 })();
 </script>
 

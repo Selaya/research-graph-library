@@ -9,13 +9,17 @@ import { emitter } from "./events.js";
 const OPS = new Set([
   "addNode", "addEdge", "removeNode", "removeEdge", "update",
   "expand", "collapse", "condense", "split", "batch",
-  "run.play", "run.step", "run.seek", "wait",
+  "expandAll", "collapseAll", "layout",
+  // F5 — the run's own method-shaped ops: "run" (re)compiles with opts exactly like
+  // g.run(opts), "run.reset" re-seats the same transport back at t=0.
+  "run", "run.reset", "run.play", "run.step", "run.seek", "wait",
   // M4 director ops — method-shaped like the mutations, so applyStep's default branch
   // dispatches them straight to g.camera/g.highlight/g.clearHighlight/g.caption.
   "camera", "highlight", "clearHighlight", "caption",
   // M4d — the per-step --smv-* override layer (D16); method-shaped like the rest.
   "props",
 ]);
+export { OPS as STORYBOARD_OPS };
 
 /** The same --smv-* key-shape check director.setPropsMap() runs at commit time (D16), run
  *  again here so a malformed props step fails at build time like every other op does,
@@ -36,6 +40,12 @@ function validateProps(step, where) {
   }
 }
 
+/** The ops whose only argument is an options object (`run`, `run.reset`, `layout`). Checked
+ *  at build time like props keys are, so `{op:"run", args:["deploy"]}` — a run.play step
+ *  written against the wrong op — fails at its own index instead of throwing a TypeError
+ *  deep inside a compile once playback reaches it. */
+const OPTS_OPS = new Set(["run", "run.reset", "layout"]);
+
 /** `where` prefixes a nested step's index with its parent's (batch children read "1.2"), so
  *  a typo anywhere in the tree still throws the library's own GraphError, step-indexed,
  *  instead of surfacing as a raw TypeError once playback reaches it. */
@@ -48,6 +58,12 @@ function validate(steps, where = "") {
     }
     if (!OPS.has(step.op)) throw new GraphError("storyboard-op", `unknown storyboard op "${step.op}" at step ${at}`);
     if (step.op === "props") validateProps(step, at);
+    if (OPTS_OPS.has(step.op)) {
+      const a = step.args && step.args[0];
+      if (a != null && (typeof a !== "object" || Array.isArray(a))) {
+        throw new GraphError("storyboard-step", `"${step.op}" takes an options object, not ${JSON.stringify(a)} (step ${at})`);
+      }
+    }
     if (step.op === "batch") {
       // Same extraction applyOp's batch case uses: raw JSON gives `steps`, the fluent
       // builder gives `args[0]`.
@@ -209,8 +225,10 @@ export function createStoryboard(host, steps) {
 const NAMED = {
   addNode: "addNode", addEdge: "addEdge", removeNode: "removeNode", removeEdge: "removeEdge",
   update: "update", expand: "expand", collapse: "collapse", condense: "condense", split: "split",
-  batch: "batch",
-  run: "run.play", runStep: "run.step", runSeek: "run.seek",
+  batch: "batch", expandAll: "expandAll", collapseAll: "collapseAll", layout: "layout",
+  // `run` stays run.play (what it has always meant here); the compile op is spelled out.
+  run: "run.play", runCompile: "run", runReset: "run.reset",
+  runStep: "run.step", runSeek: "run.seek",
   camera: "camera", highlight: "highlight", clearHighlight: "clearHighlight", caption: "caption",
   props: "props",
 };

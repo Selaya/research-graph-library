@@ -89,6 +89,10 @@ then `import { dagreSolver } from "sparkle-motion-visualizer/adapters/dagre"`.
   the node.
 - **Compound nodes** — `parent` links make containers; per-node animated
   expand ⇄ collapse with meta-edge aggregation (deduped, weighted) while collapsed.
+  `container: true` declares one up front, so a container that has no children *yet*
+  draws as a header-only box instead of a plain node. It is a drawing/layout flag only:
+  until real children arrive there is nothing to fold, so collapse/expand, the tap toggle,
+  `aria-expanded` and the run engine all keep keying off "has children".
 - **Condense / split** — `g.condense([ids], newNode)` merges N nodes into one with a
   staged highlight → converge → reveal choreography (and a convexity guard against
   silent graph corruption); `g.split(id, {nodes, edges})` is the mirror image, 1 → N,
@@ -110,10 +114,13 @@ then `import { dagreSolver } from "sparkle-motion-visualizer/adapters/dagre"`.
   overrides, and per-step pacing via `dur` — the declared timeline the scrubber and cue
   sheet both read. See `docs/RECORDING.md` for the full recipe, including recording a
   story as video and fitting its holds to a recorded voice-over.
-- **Pipeline preset** — duration chips, sum/max rollups, manual/auto badges, the
-  `2h → 8s` odometer + delta badge when automation lands, a total-duration bar.
-  `presetPipeline(g)` called after mount back-fills whatever's already on screen instead of
-  waiting for the next mutation. Writing your own preset: docs/PRESETS.md.
+- **Pipeline preset** — duration chips (nodes *and* edges), sum/max rollups, manual/auto
+  badges, the `2h → 8s` odometer + delta badge when automation lands, and a total-duration
+  bar that names both totals it could mean: the summed work and the critical path.
+  Applied at mount it also tells layout to reserve room for what it draws, so a long label
+  never runs under a chip. `presetPipeline(g)` called after mount back-fills whatever's
+  already on screen instead of waiting for the next mutation. Writing your own preset:
+  docs/PRESETS.md.
 - **Sane viewport** — anchored (the focal node holds still; the graph reflows around
   it), zoom only on ctrl/cmd+scroll, `fitView()` when *you* ask. Past 150 elements,
   groups fully outside the visible rect stop being drawn at all.
@@ -126,10 +133,16 @@ then `import { dagreSolver } from "sparkle-motion-visualizer/adapters/dagre"`.
 `mount(el, spec, opts) → g`. `el` is an element or a selector; `opts` takes
 `theme` (`auto`/`light`/`dark`), `layout` (`{dir:"LR"|"RL"|"TB"|"BT", nodesep, ranksep,
 marginx, marginy, solver}` — see **Layout** below),
-`animation` (`{duration, easing}`), `controls`, `preset`, `storyboard`, `autoplay`,
+`animation` (`{duration, easing}`), `controls`, `preset`, `storyboard`, `autoplay`
+(`true`, or `'auto'` to play only when the page URL carries `?auto=1`),
 `a11y: false` to opt out of the ARIA layer, and `interaction: { tapToggle: false }` to
 turn off tap/click-to-toggle on container nodes (on by default; a tap that travels past
 a small slop radius counts as a pan and never toggles — touch-friendly by construction).
+`interaction: { click: false }` turns off the `nodeclick`/`edgeclick` events below, which
+are otherwise on whether or not `tapToggle` is.
+
+`preset` is `"pipeline"`, or an object when the preset takes options:
+`{ name: "pipeline", total: "sum" | "critical" | "both" }`.
 
 Every mutation returns an awaitable, cancelable handle that resolves `{canceled, applied}` —
 `applied` says whether the structural change actually landed in the store (`cancel()` only
@@ -149,12 +162,13 @@ g.condense(["a", "b"], { id: "merged" }).cancel();
 
 ```js
 g.addNode(node, { after })  g.addEdge(edge)  g.removeNode(id)  g.removeEdge(id)
-g.update(id, patch)         g.batch(fn)      g.style(fn)       g.theme(t)
+g.update(id, patch, opts)   g.batch(fn)      g.style(fn)       g.theme(t)
+g.validate(ops | fn)        // dry-run the structural guards; { ok, errors: [GraphError] }
 g.expand(id)   g.collapse(id)   g.expandAll()   g.collapseAll()
 g.condense([ids], newNode)   g.split(id, { nodes, edges })
-g.run(opts)    g.storyboard(steps)   g.timeline()
+g.run(opts)    g.storyboard(steps)   g.timeline()   g.finished   g.finish()
 g.camera(target)   g.highlight(sel)   g.clearHighlight()   g.caption(text, o)   g.cues()
-g.props({ id: { "--smv-fill": "#7c5cff" } })   // per-step overrides; null clears
+g.props({ id: { "--smv-fill": "#7c5cff" } }, { merge })   // overrides; null clears
 g.layout(opts) g.fitView()   g.bounds()  g.layoutResult()  g.spec()  g.destroy()
 g.on(type, fn) / g.off(type, fn)
 ```
@@ -165,6 +179,46 @@ caused into one shared commit. An op that throws partway through leaves every ea
 committed (no rollback). `fn` must be synchronous: a `Promise`-returning `fn` throws
 `GraphError('batch-async')` immediately, rather than let its post-`await` code run after
 `batch()` has already returned and drained.
+
+**Validate before you commit.** `g.validate(ops)` runs exactly those guards against a
+throwaway clone of the store and commits nothing, so a diff-and-apply UI can refuse a whole
+patch up front instead of discovering the bad op halfway through:
+
+```js
+const { ok, errors } = g.validate([
+  { op: "addNode", args: [{ id: "verify" }] },
+  { op: "addEdge", args: [{ id: "e9", source: "build", target: "verify" }] },
+]);
+if (!ok) return show(errors.map((e) => `${e.code}: ${e.message}`));
+g.batch((b) => { b.addNode({ id: "verify" }); b.addEdge({ id: "e9", source: "build", target: "verify" }); });
+```
+
+It takes either an array of storyboard-shaped `{op, args}` steps (nested `batch` steps
+included) or a `batch()`-shaped function called with a probe carrying the same mutation
+methods plus `node`/`edge`/`children`/`spec`. Every `GraphError` the ops would have thrown
+comes back in `errors` rather than being thrown — a failing op simply does not land in the
+clone, and the ops after it are still checked. Director and transport steps (`camera`,
+`run.play`, `wait`, `label` markers…) are skipped; an `op` that `storyboard()` itself would
+not accept reports `validate-op`. `expand` / `collapse` steps are checked for a live id.
+
+**`update()`.** `patch.data` merges into the existing `data`. An explicit `undefined`
+removes a key, and `{ replace: true }` swaps the whole payload:
+
+```js
+g.update("deploy", { data: { fail: undefined } });            // the key is gone
+g.update("deploy", { data: { duration: "8s" } }, { replace: true });   // data is now exactly this
+g.update("deploy", { data: {} }, { replace: true });          // data is gone entirely
+```
+
+A `data` left with no keys is dropped from the record, so `g.node(id).data` reads
+`undefined` rather than `{}` (and `spec()` still round-trips through JSON).
+
+`collapsed` is view state rather than a rendered spec field, so a `collapsed` patch is
+routed to the real `expand()` / `collapse()` instead of quietly doing nothing. A patch whose
+only key is `collapsed` resolves exactly as they do — `applied: false` when the container was
+already in the requested state. Anything else in the same patch still renders either way, so
+a patch that carries more than `collapsed` always resolves `applied: true`, whether or not
+the fold actually moved.
 
 **Errors.** Every structural misuse throws a synchronous `GraphError` — a real exported
 class, so `instanceof` works, and every message already embeds its code (`[smv:<code>] …`):
@@ -196,6 +250,24 @@ catch (e) { if (e instanceof GraphError) console.log(e.code); }   // "dup-id"
 | `storyboard-op` | an unknown storyboard op name (checked inside `batch` children too) |
 | `storyboard-label` | `sb.seek(label)` given an unknown storyboard label |
 | `batch-async` | `g.batch(fn)` was handed a `Promise`-returning `fn` |
+| `validate-op` | `g.validate()` got a step whose `op` is not a known op name (reported in `errors`, never thrown) |
+
+**Condense (N → 1).** The set must be **convex** — no path may leave it and re-enter
+(`non-convex`) — but a `loop: true` back edge never counts against that: a retry loop
+around the set re-enters it rather than passing through it, and is redirected onto the
+merged node like any other boundary edge.
+
+```js
+await g.condense(["call", "verify"], { id: "attempt", parent: null });
+```
+
+The merged node inherits the sources' common parent, and `parent: null` says so explicitly
+(handy when the spec comes from a form or a diff, where "absent" has to be expressible).
+When the sources have **different** parents there is no common one to inherit: the merged
+node lands at the top level and warns — name a `parent` yourself for a cross-container
+merge. A source that another source swallows (naming a container *and* one of its own
+children) does not count as a second parent: its parent is disappearing with it, so the
+merge still inherits the container's own parent.
 
 **Split (1 → N).** The inverse of condense, same three-phase choreography:
 
@@ -227,22 +299,57 @@ g.children(id)   g.descendants(id)   g.roots()
 `g.node(id)` / `g.edge(id)` singular return the same kind of plain copy — mutating what
 they hand back never touches the store.
 
+**Click / select.** A clean tap or click publishes on the instance bus, with the raw
+pointer event attached. The same slop that keeps a pan from toggling a container keeps it
+from reading as a click, so these never fire mid-drag; a pinch kills the gesture outright.
+
+```js
+g.on("nodeclick", ({ id, event }) => inspector.show(id));
+g.on("edgeclick", ({ id }) => console.log("edge", id));   // stroke AND label are the hit area
+```
+
+Enter/Space on a focused node publishes the same `nodeclick`, so an inspector wired to it
+is reachable without a pointer.
+
+**Edge labels.** `edge.label` is a string, or an object when the message *is* the content
+(a sequence diagram, say) rather than a hint on a line:
+
+```js
+{ id: "e1", source: "api", target: "db", label: {
+    text: "SELECT … FOR UPDATE",
+    place: "start",   // 'mid' (default) | 'start' | 'end' — where along the path it rides
+    rotate: true,     // lay it along the line; default upright, and never upside down
+    pill: true,       // opaque backing plate instead of the background-colored halo
+    maxW: 220,        // truncation cap in px for this one label
+} }
+```
+
+Labels truncate at 90px by default. `mount(el, spec, { layout: { edgeLabelMaxW: 200 } })`
+moves that for the whole drawing (`preset: "pipeline"` raises it to 180 when you set none),
+and a per-edge `maxW` beats both. With the pipeline preset, `edge.data.duration` is drawn
+as a chip on the wire next to the label.
+
 **Director ops / storytelling.** Storyboards (and the same methods called directly)
 drive the presentation, not just the graph:
 
 ```js
 await g.camera({ node: "clean", k: 1.8, pad: 60, dur: 700 });   // also {nodes:[…]},
 g.camera({ fit: true });     g.camera({ zoom: 1.6 });           // {x,y,k}, {by:{dx,dy}}
+g.camera({ nodes: ["a", "b"], maxK: 2 });   // fit lid, 1.5 by default for a union
+g.camera({ fit: true, inset: { bottom: 80 } });   // pane chrome to stay clear of
 g.highlight({ nodes: ["a"], edges: ["e1"], variant: "focus", dim: true });  // spotlight
 g.highlight({ nodes: ["a"], variant: "warn", pulse: true });     // + an attention beat
 g.clearHighlight();
 g.props({ clean: { "--smv-fill": "#7c5cff" } });   g.props(null);  // override layer
+g.props({ clean: { "--smv-fill": "#f50" } }, { merge: true });   // …or patch it
 g.caption("Three manual steps become one.", { place: "bottom" });  g.caption(null);
 g.cues();   // every label + caption with its absolute ms offset — the voice-over sheet
 ```
 
-Every storyboard step — a mutation op name (the set mirrors `g`'s own methods, `condense`
-and `split` both included) or a director op — is validated when the storyboard is *built*,
+Every storyboard step — a mutation op name (the set mirrors `g`'s own methods:
+`condense`, `split`, `expandAll`, `collapseAll` and `layout` included), a run op
+(`run` to recompile like `g.run(opts)`, `run.reset`, `run.play`, `run.step`, `run.seek`) or
+a director op — is validated when the storyboard is *built*,
 not when it plays: an unknown op throws `GraphError('storyboard-op')` at the step's own
 index, recursing into `batch` children too (a typo three levels into a nested `batch`
 throws as step `"1.2.0"`, not a bare `TypeError` mid-playback), and a malformed `props`
@@ -253,10 +360,25 @@ every issue found (`[smv:camera] …` / `[smv:highlight] …`), and the call sti
 best with whatever it could resolve.
 
 Camera moves ride the shared clock and cancel-and-retarget like everything else; the
+`run` and `run.reset` cost nothing on the cumulative timeline (they put the run's clock
+back to 0). `run.play` is priced off the compiled transport, and only one compile is live
+at a time — a script that recompiles *between* two `run.play` steps gets a cue sheet that
+changes as it plays, so keep one compile per script when the numbers have to be exact
+(`docs/RUN.md`, "Driving a run from a storyboard").
+
+Camera moves ride the shared clock and cancel-and-retarget like everything else; the
 first one in a script takes the viewport (auto-refit stops, the camera joins the scrub
-snapshots). A highlight *is* the emphasis state (replace, not accumulate) and survives
+snapshots). Every fit — `g.fitView()`, `camera({fit})`, `camera({node|nodes})` — frames
+inside the pane *minus the chrome the library mounted over it* (transport bar, the preset's
+total-duration bar, the caption strip), so the last rank never lands underneath them; pass
+`inset: {top,right,bottom,left}` for chrome of your own (only the library's own top/bottom
+bars are measured), or `inset: 0` to opt out. The caption strip counts while it is up, so
+fit before you caption if a beat should hold one framing. Targeting
+a node inside a collapsed container aims at the ancestor drawn in its place instead of
+warning. A highlight *is* the emphasis state (replace, not accumulate) and survives
 relayouts and backward scrubs — and so does the `props` override layer, which sits over
-your `style()` function on the same `--smv-*` channel. `pulse: true` breathes the
+your `style()` function on the same `--smv-*` channel (`g.props(patch, { merge: true })`
+patches that layer instead of replacing it). `pulse: true` breathes the
 emphasis off the shared ticker (never a CSS animation, so it records frame-perfectly;
 reduced motion holds it still). Every storyboard step takes an optional `dur` (ms) —
 per-step pacing for any op, and the number the scrubber, `g.cues()` and the coming
@@ -264,10 +386,26 @@ frame renderer all agree on. Mount opts: `captions: false` hides the caption ove
 (cues stay truthful); `motion: "full"` and `ticker: "manual"` are recording mode.
 The full script-writing and video-recording guide is `docs/RECORDING.md`.
 
+**Knowing when the story ended.** `g.finished` is one promise per instance, resolving
+`{reason}` when the storyboard runs out of steps (`"storyboard"`), when the page calls
+`g.finish()` — the explicit end for a live-mode or hand-driven story, which has no last
+step to reach — or when the instance is destroyed (`"destroy"`, so awaiting it can never
+hang). `g.on("finish", …)` is the same beat as an event. With `autoplay: 'auto'` (plays
+only when the page URL has `?auto=1`) it is the whole unattended-playback convention:
+
+```js
+const g = mount("#pipe", spec, { storyboard: steps, autoplay: "auto" });
+window.smv = g;              // what npm run check-demos looks for
+await g.finished;            // { reason: "storyboard" }
+```
+
 `g.run()` (no args) returns the current run — compiling a default Mode A one on first call
 if none exists. `g.run(opts)`, with **any** opts object, even `{}`, destroys the current
 run and replaces it with a fresh one built from `opts`; call it bare unless you actually
-mean to restart the run.
+mean to restart the run. Your subscriptions survive that recompile — everything registered
+with `run.on(...)` is carried onto the new transport (`run.off()` still drops it), and
+every run event is mirrored onto the instance bus as `g.on("run:finish", …)` /
+`g.on("run:end", …)`, which outlives any number of recompiles.
 
 **Simulated runs (Mode A).** The default: `g.run()` compiles the whole schedule from
 declared `data.duration`s once, up front, so everything after that — seek, scrub, `step()`,
@@ -277,11 +415,26 @@ per-branch `speed()` — is just sampling the compiled artifact:
 const run = g.run();                          // Mode A (simulate) is the default
 run.play({ until: "deploy" });                 // -> Promise<{canceled}>, also run.promise
 run.pause();   run.seek(4000);   run.step();   run.step({ token: "t3" });
-run.speed(2, { branch: "clean" });             // per-branch rate, Mode A only
+run.speed(2);                                  // PLAYBACK only — the declared timeline is unmoved
+run.speed(0.5, { branch: "clean" });           // per-branch rate: a compile input, Mode A only
+run.inject("compensate", { at: 8000 });        // mint a token mid-graph on the compiled clock
 run.state();                                    // {tokens, nodes, edges, joins, loops, done}
-run.sim();                                      // the compiled schedule: {duration, events, stateAt}
+run.sim();                                      // the compiled schedule: {duration, declared, playback, events, stateAt}
 run.timeOf("deploy");                           // first finish/fail instant — a storyboard step's worth
 ```
+
+A bare `speed(f)` is a **playback** multiplier, as in live mode: it changes how fast the
+clock walks the schedule, never the schedule, so `run.duration` (and the total a page
+prints as "3h 20m") stays put. `sim().declared` is that compiled length; `sim().playback`
+is what it costs on the wall clock at the current multiplier. Only `speed(f, { branch })`
+re-times the work, because only that is a statement about the pipeline.
+
+Tokens do not have to start at a root at t = 0. `data: { startAt: 8000 }` (ms on the
+compiled clock, or a duration string) parks a root's token until its instant;
+`data: { entry: true }` mints an extra seed at a node that already has in-edges; and
+`run.inject(id, { at })` does the same imperatively, recompiling around the new token.
+A node whose compiled start is already behind the clock — one added mid-run — still emits
+its `enter`/`start` once, so it lights up instead of appearing pre-finished.
 
 Duration grammar (`data: { duration: "2h" }`): a bare number is seconds; a string is
 `<number><unit>` with `unit ∈ ms|s|m|h|d` (case-insensitive, decimals fine — `"1.5h"`,
@@ -290,14 +443,61 @@ Duration grammar (`data: { duration: "2h" }`): a bare number is seconds; a strin
 node with no `duration` at all stays silent, that's not a mistake. An unannotated fan-in is
 an implicit AND-join; `join: "all" | "any" | { count }` overrides it. A `loop: true` edge
 needs `maxIterations > 0` or the edge throws (`unbounded-loop`) at `addEdge`/mount time.
+An **edge** may declare `data: { duration: "400ms" }` of its own — the same grammar, paced
+the same way — and that is its hop time; `hopMs` is the default for edges that declare none.
 
-**Failed steps.** `data: { duration: "3s", fail: true }` — or `fail: "exit code 137"` to
-carry a reason through onto the emitted event — runs the node's dwell in full and then
-fails: status `'failed'`, no `finish` event, no loop, no fan-out to successors; the branch
-just stops. `play({until})` and `timeOf()` treat `'failed'` as terminal exactly like
-`'done'`, so a step waiting on a branch that failed doesn't hang. A container can't declare
-`data.fail` itself (it isn't an executable step); it inherits the earliest failure among
-its descendants.
+**Failed steps, and their retries.** `data: { duration: "3s", fail: true }` — or
+`fail: "exit code 137"` to carry a reason through onto the emitted event — runs the node's
+dwell in full and then fails: status `'failed'`, no `finish` event, no fan-out to
+successors; the branch just stops. `play({until})` and `timeOf()` treat `'failed'` as
+terminal exactly like `'done'`, so a step waiting on a branch that failed doesn't hang. A
+container can't declare `data.fail` itself (it isn't an executable step); it inherits the
+earliest failure among its descendants.
+
+A failure can take its own retry loop. `fail: { reason, retries: 3 }` re-runs the dwell up
+to three more times, emitting a `fail` (`terminal: false`) and a `loop` per attempt;
+`'failed'` only sticks when the budget is spent. Add `recover: true` and the attempt that
+spends the last retry succeeds instead — "fail, retry, pass". A `loop: true` edge out of
+the failing node marked `onFail: true` is the retry's arc: its `maxIterations` is the
+budget, each retry crosses it (so `state().loops[edgeId]` badges the attempt), and it stays
+inert on a successful finish.
+
+```js
+{ id: "call", data: { duration: "2s", fail: { reason: "timeout", retries: 3 } } },
+{ id: "retry", source: "call", target: "call", loop: true, onFail: true, maxIterations: 3 }
+```
+
+**Containers with several ports.** An edge into a container attaches to its one inferred
+entry child. `entry: ["search", "calc", "sql"]` on the container spec attaches it to all of
+them instead — a fan-out like any other — and `exit: [...]` gives the downstream node one
+in-edge per exit, so its implicit AND-join waits for the whole container.
+
+**Retry loops are an in-place tick after iteration 1, not a replay.** A `loop: true` edge's
+first pass is a real edge-crossing hop from the loop's source to its target. Every further
+iteration does **not** re-fly that arc — it's a compressed ~250ms tick in place on the
+target node with an updated `iter n/max` badge, emitting `loop` each time
+(`{edgeId, nodeId, iteration, max}` — iteration 1's event names the loop's *source* node,
+the one being left; later ticks name its target, so filter on `edgeId`, not `nodeId`).
+That means "iteration 2 looked different" or "the
+agent called a different tool this time" cannot be shown by the engine itself — there's
+nothing crossing the graph to re-stage. The recommended pattern is to narrate it
+reactively, off the event rather than the graph:
+
+```js
+run.on("loop", ({ edgeId, iteration, max }) => {
+  if (edgeId === "retry") g.caption(`attempt ${iteration}/${max}: retrying…`);
+});
+```
+
+`max` is the edge's declared `maxIterations`, not the count this play will actually reach —
+`g.run({ iterations: { retry: 3 } })` caps the ticks but still reports `max: 5`, so print
+your own cap if you pass one.
+
+These reactive captions are not storyboard steps, so they won't be snapshotted for
+backward scrub or show up in `g.cues()` — they're a live commentary track on top of the
+tick, not part of the declared timeline. See docs/RUN.md's "Bounded retry loops" section
+for the full mechanics, and docs/PLAN.md (D18) for a proposed `replay` mode that would
+re-simulate each iteration instead.
 
 | event | fires when |
 |---|---|
@@ -309,7 +509,8 @@ its descendants.
 | `enter` / `start` / `finish` / `fail` | a token entering, dwelling on, finishing, or failing a node |
 | `spawn` | implicit fan-out mints a new token |
 | `join` / `drop` | a fan-in fired, or a late arrival at an already-fired join |
-| `loop` | a retry edge ticks (carries `iteration`/`max`) |
+| `loop` | a retry edge ticks, or a failure takes a retry (carries `iteration`/`max`) |
+| `inject` | `run.inject()` seeded a token mid-graph |
 | `warn` | a compile-time diagnostic (e.g. an unparseable duration) |
 | `done` | the compiled schedule has fully played out |
 
@@ -332,6 +533,19 @@ run.seek(pastMs);              // time travel; can never scrub past now()
 run.follow();                  // jump back to live
 run.log();                     // the event log (a copy)
 ```
+
+A fan-in honours `join` here as it does in Mode A: arrivals are counted and **one** token is
+released per group, so a bare `finish()` on a join node hands one token downstream instead of
+one per arrival (and the join re-arms for the next group). `state().nodes[id]` splits its
+occupancy into `waiting`/`active` and flags `overBudget` once a live dwell outruns the node's
+declared `data.duration` — in live mode a duration only paces the progress fill, it never
+schedules anything. A `start()` on a non-root with nothing waiting, nothing crossing towards
+it and nothing to retry mints a token out of nothing: it warns (`[smv:live]`) unless you say
+`start(id, { spawn: true })`, and `g.run({ mode: "live", spawnOnStart: false })` makes it a
+no-op instead. Two more live-mode options: `minHopMs` keeps a visible crossing when a
+`start()` is stamped at the upstream `finish()`'s own instant (real trace timestamps), and
+`reset({ log, now, replay: true })` re-seeds a saved log against an explicit frontier epoch,
+optionally re-emitting the seeded events through the handle.
 
 `fail()` is `finish()`'s terminal sibling — no `n` option (it consumes every current
 occupant; a partially-failed node isn't a coherent status) — and like `start`/`finish`/
@@ -392,6 +606,25 @@ mount(el, spec, { layout: { dir: "LR", nodesep: 28, ranksep: 56, marginx: 20, ma
 g.layout({ dir: "TB" });    // relayout + animate into the new direction
 ```
 
+A node's box is measured from its label. `layout.measure` lets whatever decorates a node
+contribute to that measurement, so a corner chip and a long label stop fighting for the
+same pixels:
+
+```js
+mount(el, spec, { layout: { measure: {
+  extraWidth: (node, ctx) => (node.data && node.data.owner ? 44 : 0), // number, or a fn
+  extraHeight: 8,
+} } });
+```
+
+`extraWidth` is reserved **chrome**, not label room: it widens the box *and* comes out of
+what the label may fill, so the label truncates before it reaches your decoration. It grows
+the box only up to the usual 220px maximum — past that the label gives way instead. A node
+that declares both `w` and `h` opts out; one that declares only `w` keeps its width and
+still gets the reserve. `ctx` is `{nodes, cache}` — the whole node set, for chrome whose
+size depends on more than the node itself. `preset: "pipeline"` installs its own unless you
+set one, which is why a preset mount sizes nodes slightly larger than a bare one.
+
 All four directions (`LR`/`RL`/`TB`/`BT`) are solved top-to-bottom internally and
 transposed on the way out, so they are exactly as good as each other. Order stability
 across re-layouts is automatic: `mount()` persists each layout's per-rank order (`order`,
@@ -447,6 +680,25 @@ bundle — so the adapter costs non-users nothing. A solver is just
 `(input, opts) → {nodes, edges, order, layers?}` (`layers` is the bend-stability channel;
 omit it and the shell simply returns `[]`); the shell keeps cycle breaking, back-edge and
 self-loop arcs, container padding and bounds either way.
+
+**What a solver sees.** Each input node is
+`{ id, w, h, parent?, container?, data? }`. `data` is the node's own spec `data`, so a
+placement-driven solver (an actor column, a time row) can read per-node hints straight off
+the graph instead of keeping its own registry — pass `layout: { hint: (n) => … }` to send
+something else (or `undefined`) in its place. `container: true` marks a container,
+*including* one declared with `container: true` on the spec before it has any children.
+Every key you put on the layout opts reaches the solver untouched, by spread, so a solver's
+own options travel with it:
+
+```js
+mount("#seq", spec, { layout: { dir: "TB", solver: seq.solver, minColWidth: 140 } });
+```
+
+A solver that returns no rect for a container *with children* is not guessing wrong: the
+shell then derives that container's box purely from its children's bounding box plus
+`containerPad`. An empty declared container has no bbox to derive from, so an omitted rect
+leaves it at the origin and the shell warns (`[smv:layout] solver returned no rect for
+empty container(s): …`).
 
 **Exports.** ESM-only entries (not in the IIFE, D11):
 
@@ -509,15 +761,18 @@ Enforced by a hard-fail CI budget (`npm run size`):
 
 | bundle | min+gzip | budget |
 |---|---:|---:|
-| core (layout engine external) | 42.62KB | <45KB |
-| full IIFE incl. in-house layout | 47.50KB | <50KB |
+| core (layout engine external) | 47.85KB | <50KB |
+| full IIFE incl. in-house layout | 53.31KB | <55KB |
 
 The M3 engine swap took the shipped IIFE from **51.66KB → 40.04KB** gzip (dagre 17.1KB
 out, `engine.js` ~3.6KB in), which is what bought the tightened 50KB budget. The usability
 round after it — misuse warnings and build-time validation across director/run/live-mode,
 the aria-live region, `--smv-radius`, richer mutation handles, the `fail` primitive — grew
 the core bundle past its old 40KB budget, so core's budget moved to 45KB while the shipped
-IIFE's 50KB budget held.
+IIFE's 50KB budget held. The API-frictions round after that (`docs/API-FRICTIONS.md`: retry
+loops, injected tokens, live joins, edge durations and labels, chrome-aware fit, the measure
+hook, `g.validate`, storyboard run ops, container ports) cost ~4.8KB gzip per bundle even
+with the embedded stylesheets minified at build time, so the budgets moved to 50KB / 55KB.
 
 ## Demos
 
@@ -533,9 +788,12 @@ IIFE's 50KB budget held.
   approval, Kafka streaming, A/B experiments, onboarding, a kitchen ticket, an assembly
   line, a recipe, sequential-vs-parallel, a WebSocket bridge, and a live spec editor. Each
   is one self-contained page over `dist/smv.iife.min.js`, and each supports `?auto=1`, which
-  runs the whole story unattended and sets `window.__smvExit.done` at the end so
-  `npm run check-demos` can drive every page in headless chromium and fail on any console
-  error, `[smv:` misuse warning, or empty render.
+  runs the whole story unattended and signals the end so `npm run check-demos` can drive
+  every page in headless chromium and fail on any console error, `[smv:` misuse warning, or
+  empty render. The signal is `g.finished` — mount with `autoplay: 'auto'` (which honours
+  that `?auto=1`), park the instance on `window.smv`, and the checker awaits
+  `window.smv.finished`; a live page marks its own end with `g.finish()`. The older
+  page-rolled `window.__smvExit = {done, errors}` hook these demos ship is still honoured.
 - `demo/seq-*.html` — nine **animated sequence diagrams** (login, checkout with a 3-D Secure
   detour, OAuth PKCE, retries and a circuit breaker, a saga with compensations, group chat
   fan-out, cache-aside, a live distributed trace, GraphQL federation). They share

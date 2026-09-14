@@ -42,6 +42,7 @@
   aside li.done::marker { color: #2f9e6a; }
   aside li.failed { color: var(--bad); font-weight: 600; }
   aside li.failed::marker { color: var(--bad); }
+  aside li.pick { background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 5px; }
   /* Which half of the saga a message belongs to — the same two channels the diagram tints. */
   aside li.fwd { border-left: 3px solid var(--accent); padding-left: 7px; margin-left: -10px; }
   aside li.comp { border-left: 3px solid var(--warm); padding-left: 7px; margin-left: -10px; }
@@ -56,11 +57,13 @@
 <h1>Order saga with compensating transactions <small>— one order, two balls: the forward path and its undo</small></h1>
 <p class="lede">
   A distributed saga as a sequence diagram: five lifeline columns, one activation per step, every
-  message an edge the run token rides. It charges, reserves, then <em>fails</em> at the shipping
-  step — <code>data.fail</code> reddens that activation and the branch stops dead. The undo cannot
-  continue the same token, so the storyboard adds a fresh <em>root</em> activation (no in-edge) and
-  Mode A seeds a <strong>second ball</strong> on it, which walks the committed steps back in
-  reverse. Blue is the forward path, amber the compensations.
+  message an edge the run token rides with its own wire time. It charges, reserves, then
+  <em>fails</em> at the shipping step — <code>data.fail</code> reddens that activation and the
+  branch stops dead, so the arrow leaving it never carries anything. The undo cannot continue a
+  dead token, so the page mints a new one on the orchestrator with
+  <code>run.inject()</code> at the instant the forward ball died, and that
+  <strong>second ball</strong> walks the committed steps back in reverse. Blue is the forward
+  path, amber the compensations.
 </p>
 
 <div class="bar">
@@ -78,22 +81,29 @@
     <h3 style="margin-top:14px">What to look for</h3>
     <ul class="watch">
       <li>The forward ball dies on <em>book(carrier)</em>: a <code>data.fail</code> activation
-        runs its dwell in full, goes red, and fans out to nothing.</li>
-      <li>A second ball appears on <em>saga failed → compensate</em>. It is a new
-        <em>source</em> activation — no in-edge — which is how Mode A seeds a token.</li>
+        runs its dwell in full and goes red. The <em>booking failed</em> arrow out of it is
+        drawn, but no token ever crosses it.</li>
+      <li>A second ball appears on <em>saga failed → compensate</em>:
+        <code>run.inject(id)</code> seeds a token there, on the compiled clock, at the moment
+        the run is parked on.</li>
       <li>Compensations run in reverse order: inventory was reserved last, so it is released
         first; the charge was taken first, so it is refunded last.</li>
       <li>Shipping never gets a compensation. You cannot undo a step that never committed.</li>
-      <li>The chips are the pipeline preset reading <code>data.duration</code>; the bar at the
-        bottom of the canvas is the saga's total declared time.</li>
+      <li>Wires are not all the same length: the carrier call declares
+        <code>edge.data.duration: "150ms"</code> and visibly takes longer to cross than the
+        6 ms hops inside the cluster.</li>
+      <li>The chips on the boxes are the pipeline preset reading <code>data.duration</code>,
+        the chips on the wires are the edge durations, and the bar at the bottom reports both
+        the declared sum and the critical path.</li>
+      <li>Click any activation to pin its message in the list on the right.</li>
       <li>Scrub the transport bar backwards: structural steps are snapshotted, so the
         compensation half folds back up and the diagram is the forward story again.</li>
     </ul>
   </aside>
 </div>
 <footer>Part of the <a href="index.html">sparkle-motion-visualizer demos</a>. Layout by
-  <code>demo/sequence-solver.js</code> — actors are containers, activations are their children
-  on an (actor, time) grid.</footer>
+  <code>demo/sequence-solver.js</code> — actors are <code>container: true</code> lifelines,
+  activations are their children and carry their own <code>data.seq</code> placement.</footer>
 </main>
 
 <script src="../dist/smv.iife.min.js"></script>
@@ -106,7 +116,7 @@
   window.addEventListener("error", function (e) { errors.push(String((e && e.message) || e)); });
   window.addEventListener("unhandledrejection", function (e) { errors.push("unhandledrejection: " + String(e && e.reason)); });
   var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
-  var P = AUTO ? 0.45 : 1; // pace multiplier
+  var P = AUTO ? 0.45 : 1; // pace multiplier for the storyboard's own beats
 
   // ---- actors and the message script -----------------------------------------------
   var ACTORS = [
@@ -116,114 +126,115 @@
     { id: "inv", label: "Inventory service" },
     { id: "ship", label: "Shipping service" },
   ];
-  // One entry per activation: who runs it, the incoming message, what the actor does while
-  // the ball dwells there, and how long that takes in the real world. `fail` is the
-  // declarative Mode A failure; `root` marks the activation that starts the second token.
+  // One entry per activation: who runs it, the incoming message and how long that message
+  // spends on the wire, what the actor does while the ball dwells there, and how long that
+  // takes in the real world. `fail` is the declarative Mode A failure.
   var FWD = "fwd", COMP = "comp";
   var MSGS = [
     { id: "store.1", actor: "store", node: "place order", msg: null, dur: "0.4s", phase: FWD },
-    { id: "saga.1", actor: "saga", node: "start saga #8812", msg: "POST /orders", dur: "6ms", phase: FWD },
-    { id: "pay.1", actor: "pay", node: "charge card", msg: "charge($42)", dur: "210ms", phase: FWD },
-    { id: "saga.2", actor: "saga", node: "step 1 committed", msg: "charged", dur: "4ms", phase: FWD },
-    { id: "inv.1", actor: "inv", node: "reserve 2× sku", msg: "reserve(2× sku)", dur: "35ms", phase: FWD },
-    { id: "saga.3", actor: "saga", node: "step 2 committed", msg: "reserved", dur: "4ms", phase: FWD },
-    { id: "ship.1", actor: "ship", node: "no carrier capacity", msg: "book(carrier)", dur: "90ms",
+    { id: "saga.1", actor: "saga", node: "start saga #8812", msg: "POST /orders", wire: "40ms", dur: "6ms", phase: FWD },
+    { id: "pay.1", actor: "pay", node: "charge card", msg: "charge($42)", wire: "18ms", dur: "210ms", phase: FWD },
+    { id: "saga.2", actor: "saga", node: "step 1 committed", msg: "charged", wire: "18ms", dur: "4ms", phase: FWD },
+    { id: "inv.1", actor: "inv", node: "reserve 2× sku", msg: "reserve(2× sku)", wire: "6ms", dur: "35ms", phase: FWD },
+    { id: "saga.3", actor: "saga", node: "step 2 committed", msg: "reserved", wire: "6ms", dur: "4ms", phase: FWD },
+    { id: "ship.1", actor: "ship", node: "no carrier capacity", msg: "book(carrier)", wire: "150ms", dur: "90ms",
       fail: "no carrier capacity", phase: FWD },
-    // ---- the undo. A failed activation is terminal, so the compensation cannot hang off
-    // ship.1: this one has NO incoming message, which makes it a source node, which is
-    // exactly what Mode A seeds a token on (docs/RUN.md).
-    { id: "saga.c0", actor: "saga", node: "saga failed → compensate", msg: null, dur: "3ms",
-      root: true, gap: 1, phase: COMP },
-    { id: "inv.2", actor: "inv", node: "release 2× sku", msg: "release(2× sku)", dur: "28ms", phase: COMP },
-    { id: "saga.c1", actor: "saga", node: "step 2 undone", msg: "released", dur: "4ms", phase: COMP },
-    { id: "pay.2", actor: "pay", node: "refund $42", msg: "refund($42)", dur: "260ms", phase: COMP },
-    { id: "saga.c2", actor: "saga", node: "saga rolled back", msg: "refunded", dur: "5ms", phase: COMP },
-    { id: "store.2", actor: "store", node: "show “order failed”", msg: "409 could not fulfil", dur: "0.3s", phase: COMP },
+    // ---- the undo. The failed activation is terminal: the error message is drawn, but no
+    // token crosses it. The compensation token is minted here instead (run.inject).
+    { id: "saga.c0", actor: "saga", node: "saga failed → compensate", msg: "booking failed", wire: "150ms",
+      dur: "3ms", gap: 1, phase: COMP },
+    { id: "inv.2", actor: "inv", node: "release 2× sku", msg: "release(2× sku)", wire: "6ms", dur: "28ms", phase: COMP },
+    { id: "saga.c1", actor: "saga", node: "step 2 undone", msg: "released", wire: "6ms", dur: "4ms", phase: COMP },
+    { id: "pay.2", actor: "pay", node: "refund $42", msg: "refund($42)", wire: "18ms", dur: "260ms", phase: COMP },
+    { id: "saga.c2", actor: "saga", node: "saga rolled back", msg: "refunded", wire: "18ms", dur: "5ms", phase: COMP },
+    { id: "store.2", actor: "store", node: "show “order failed”", msg: "409 could not fulfil", wire: "40ms", dur: "0.3s", phase: COMP },
   ];
   var FAIL_ID = "ship.1", COMP_ROOT = "saga.c0";
 
   var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
-  // An actor with no activations yet is not a container, so the solver would have no
-  // placement for it and would park it in a spare column (with a console warning) until its
-  // first child lands. Placing each actor in its own column at row 0 keeps the empty
-  // lifelines where they belong; the moment an actor has children the solver treats it as a
-  // container and ignores the placement.
-  ACTORS.forEach(function (a) { seq.place(a.id, a.id, 0); });
   var row = 0;
-  MSGS.forEach(function (m) { row += (m.gap || 0); m.row = row++; seq.place(m.id, m.actor, m.row); });
+  MSGS.forEach(function (m) { row += (m.gap || 0); m.row = row++; });
 
-  // `h` is honoured by the library's own sizeNode(), and a taller box is what keeps the
-  // pipeline preset's duration chip (drawn 10px down from the node's top edge) off the
-  // vertically-centred label. The extra height is paid back with a tighter ranksep.
+  // Every node carries its own placement in `data.seq`, which the layout shell hands to the
+  // solver, and each actor declares itself a `container` so an empty lifeline is a header
+  // box in its own column from the first frame.
+  function actorOf(a) { return { id: a.id, label: a.label, container: true }; }
   function nodeOf(m) {
-    var data = { duration: m.dur };
+    var data = { duration: m.dur, seq: { actor: m.actor, row: m.row } };
     if (m.fail) data.fail = m.fail;
-    return { id: m.id, parent: m.actor, label: m.node, h: 44, data: data };
+    return { id: m.id, parent: m.actor, label: m.node, data: data };
   }
-  function edgeTo(prev, m) { return { id: "m:" + prev.id + ">" + m.id, source: prev.id, target: m.id, label: m.msg }; }
+  // The message IS the content of a sequence diagram, so the label rides upright on a pill,
+  // and the wire time is the edge's own declared duration (the preset chips it).
+  function edgeTo(prev, m) {
+    return {
+      id: edgeId(prev, m), source: prev.id, target: m.id,
+      label: { text: m.msg, pill: true },
+      data: { duration: m.wire },
+    };
+  }
+  function edgeId(prev, m) { return "m:" + prev.id + ">" + m.id; }
+  var COMP_EDGE = edgeId({ id: FAIL_ID }, { id: COMP_ROOT });
 
-  var SEED = {
-    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
-    edges: [],
-  };
+  var SEED = { nodes: ACTORS.map(actorOf).concat([nodeOf(MSGS[0])]), edges: [] };
 
   // ---- the two colour channels -------------------------------------------------------
-  // props() sits over the theme's own status colors (inline, so it wins), which is why the
-  // failing activation is deliberately LEFT OUT of the map — its red 'failed' styling has to
-  // show through. The map is replace-not-accumulate, so it is always sent whole.
+  // Status colour rides its own --smv-status-fill channel, so the failing activation keeps
+  // its forward tint AND shows the built-in 'failed' red mixed over it. The forward map is
+  // sent whole up front; the compensation map is merged in when that half opens.
   var DARK = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  var FWD_PROPS = DARK ? { "--smv-fill": "#1b2440", "--smv-stroke": "#6f83e8" }
-                       : { "--smv-fill": "#e9eefc", "--smv-stroke": "#3c63c8" };
-  var COMP_PROPS = DARK ? { "--smv-fill": "#2e2413", "--smv-stroke": "#d09a35" }
-                        : { "--smv-fill": "#fdf1dd", "--smv-stroke": "#a9700f" };
-  var PROPS = {};
-  MSGS.forEach(function (m) {
-    if (m.id === FAIL_ID) return;               // let the built-in 'failed' styling own it
-    PROPS[m.id] = m.phase === COMP ? COMP_PROPS : FWD_PROPS;
-  });
+  function tintsFor(dark) {
+    return {
+      fwd: dark ? { "--smv-fill": "#1b2440", "--smv-stroke": "#6f83e8" }
+                : { "--smv-fill": "#e9eefc", "--smv-stroke": "#3c63c8" },
+      comp: dark ? { "--smv-fill": "#2e2413", "--smv-stroke": "#d09a35" }
+                 : { "--smv-fill": "#fdf1dd", "--smv-stroke": "#a9700f" },
+    };
+  }
+  function propsFor(phase, dark) {
+    var t = tintsFor(dark), out = {};
+    MSGS.forEach(function (m) {
+      if (phase && m.phase !== phase) return;
+      out[m.id] = m.phase === COMP ? t.comp : t.fwd;
+    });
+    return out;
+  }
 
   // ---- pacing ------------------------------------------------------------------------
-  // The compensation root is a SOURCE node, so its token is seeded at t = 0 — the same
-  // instant the forward ball leaves the storefront. Left alone it would run its whole dwell
-  // in the past and be 'done' before it was ever drawn. Padding just that node's dwell by
-  // the failure instant parks the second ball on it until the story gets there. `compPad` is
-  // read at every recompile (the dwell fn is a live compile input), and is fixed the moment
-  // the fail event lands, so the schedule stays deterministic afterwards.
-  var compPad = 0;
-  function baseDwell(sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; }
+  // Node dwells are compressed against the declared durations; the wires pace themselves
+  // off `edge.data.duration`. A bare playback multiplier keeps the declared clock honest
+  // and only walks it faster for the unattended (?auto=1) pass.
   var RUN_OPTS = {
-    hopMs: 520 * P,                       // the message in flight — the part worth watching
-    dwell: function (sec, ctx) {
-      var ms = baseDwell(sec);
-      return ctx && ctx.id === COMP_ROOT ? ms + compPad : ms;
-    },
+    dwell: function (sec) { return sec == null ? 300 : 260 + 340 * Math.min(1, sec / 0.3); },
+    playbackSpeed: 1 / P,
   };
 
   // ---- the storyboard: add the next activation, then let the ball travel to it -------
   function cap(text) { return { op: "caption", args: [text, { place: "top" }] }; }
   function beat(m, prev) {
-    var adds = [{ op: "addNode", args: [nodeOf(m)] }];
-    if (!m.root) adds.push({ op: "addEdge", args: [edgeTo(prev, m)] });
     return [
-      { op: "batch", steps: adds, dur: 260 * P },
-      { op: "camera", args: [{ nodes: [prev.id, m.id], k: 1, pad: 130, dur: 320 * P }] },
+      { op: "batch", steps: [{ op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeTo(prev, m)] }], dur: 260 * P },
+      // A union fit with the zoom lid pinned at 1: the shot pans between the two
+      // activations, and only pulls back when they no longer fit side by side.
+      { op: "camera", args: [{ nodes: [prev.id, m.id], maxK: 1, pad: 130, dur: 320 * P }] },
       { op: "run.play", until: m.id },
     ];
   }
 
-  var STEPS = [{ label: "forward" }, { op: "props", args: [PROPS] },
+  var STEPS = [{ label: "forward" }, { op: "props", args: [propsFor(FWD, DARK)] },
                cap("Forward path: charge, then reserve. Each step commits before the next one starts.")];
   for (var i = 1; i < MSGS.length; i++) {
     var m = MSGS[i], prev = MSGS[i - 1];
     if (m.id === FAIL_ID) {
       STEPS.push({ label: "failure" });
-      STEPS.push(cap("Third step: book the carrier."));
+      STEPS.push(cap("Third step: book the carrier — 150 ms of wire before the activation even starts."));
     }
     if (m.id === COMP_ROOT) {
       STEPS.push({ op: "highlight", args: [{ nodes: [FAIL_ID], variant: "warn", pulse: true }] });
       STEPS.push(cap("data.fail — the activation goes red and the branch stops there. A failed step fans out to nothing."));
       STEPS.push({ op: "wait", ms: 900 * P });
       STEPS.push({ label: "compensate" });
+      STEPS.push({ op: "props", args: [propsFor(COMP, DARK), { merge: true }] });
       STEPS.push(cap("The saga cannot roll back a failed step; it undoes the earlier ones."));
     }
     if (m.id === "inv.2") STEPS.push(cap("Compensations run in reverse order — the last thing that committed is the first thing undone."));
@@ -233,7 +244,6 @@
   STEPS.push({ label: "rolled back" });
   STEPS.push({ op: "highlight", args: [{ nodes: ["saga.c2", "store.2"], variant: "ok", pulse: true }] });
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 520 * P }] });
-  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -22 }, dur: 200 * P }] });  // clear the total + transport bars
   STEPS.push(cap("One order, two balls: $42 refunded, 2× sku back on the shelf."));
   STEPS.push({ op: "wait", ms: 1100 * P });
   // Drop the caption for the held final frame: its panel would otherwise sit over the
@@ -253,7 +263,7 @@
       animation: { duration: 360 * P, easing: "cubic-out" },
       controls: true,
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",
     });
     g.run(RUN_OPTS);
     sb = g.storyboard();
@@ -263,7 +273,7 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
-  window.__g = g;
+  window.smv = g;   // what the demo checker looks for, alongside g.finished
 
   // ---- side panel: the message list lights up as the ball arrives ----------------------
   var labelOf = {};
@@ -290,49 +300,52 @@
   run.on("start", function (ev) { markNow(ev && ev.nodeId); });
   run.on("fail", function (ev) {
     if (!ev || ev.nodeId !== FAIL_ID) return;
-    // Pin the second ball's dwell pad to the instant the forward branch died (see above).
-    compPad = ev.t;
     var li = itemOf(ev.nodeId);
     if (li) { li.classList.add("failed"); li.textContent += " ✕ " + (ev.reason || "failed"); }
     phaseEl.textContent = "shipping failed: " + (ev.reason || "no reason given");
   });
-  // The compensation root's 'start' fires at t = 0, before the page ever draws it, so the
-  // panel follows the node's arrival on screen instead — which IS the moment its ball shows.
-  g.on("add", function (ev) { if (ev && ev.kind === "node" && ev.id === COMP_ROOT) markNow(COMP_ROOT); });
+  // The compensation token: the forward one is dead, so mint a fresh one on the orchestrator
+  // the moment its activation (and the error message pointing at it) join the diagram. `at`
+  // defaults to the run's own clock, which is parked on the failure, and the recompile
+  // re-emits the seeded node's enter/start so the panel row lights up with it.
+  g.on("add", function (ev) {
+    if (ev && ev.kind === "edge" && ev.id === COMP_EDGE) g.run().inject(COMP_ROOT);
+  });
+
+  // Clicking an activation pins its message in the list.
+  g.on("nodeclick", function (ev) {
+    var id = ev && ev.id;
+    msgsEl.querySelectorAll("li.pick").forEach(function (x) { x.classList.remove("pick"); });
+    var li = itemOf(id);
+    if (li) { li.classList.add("pick"); phaseEl.textContent = li.textContent; }
+    else if (labelOf[id]) phaseEl.textContent = labelOf[id] + " — lifeline";
+  });
 
   // Keep the two tint channels correct if the OS theme flips mid-story.
   if (window.matchMedia) {
     var mq = window.matchMedia("(prefers-color-scheme: dark)");
-    var onScheme = function (e) {
-      var dark = e.matches;
-      var f = dark ? { "--smv-fill": "#1b2440", "--smv-stroke": "#6f83e8" } : { "--smv-fill": "#e9eefc", "--smv-stroke": "#3c63c8" };
-      var c = dark ? { "--smv-fill": "#2e2413", "--smv-stroke": "#d09a35" } : { "--smv-fill": "#fdf1dd", "--smv-stroke": "#a9700f" };
-      var next = {};
-      MSGS.forEach(function (m) { if (m.id !== FAIL_ID) next[m.id] = m.phase === COMP ? c : f; });
-      g.props(next);
-    };
+    var onScheme = function (e) { g.props(propsFor(null, e.matches)); };
     if (typeof mq.addEventListener === "function") mq.addEventListener("change", onScheme);
   }
 
   // ---- controls -------------------------------------------------------------------
-  var playing = false;
-  function finish() {
+  var playing = AUTO;                       // autoplay: 'auto' already started it under ?auto=1
+  if (AUTO) phaseEl.textContent = "playing…";
+  g.finished.then(function () {
     playing = false;
     phaseEl.textContent = "saga rolled back — scrub the bar or Restart";
     window.__smvExit = { done: true, errors: errors };
-  }
+  });
   $("#play").addEventListener("click", function () {
     if (playing) return;
     playing = true;
     phaseEl.textContent = "playing…";
-    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+    Promise.resolve(sb.play()).catch(function (e) { errors.push("play: " + String(e && e.message || e)); });
   });
   $("#step").addEventListener("click", function () {
     Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
   });
   $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
-
-  if (AUTO) $("#play").click();
 })();
 </script>
 </body>

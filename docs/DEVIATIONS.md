@@ -483,3 +483,49 @@ honouring one in the fit would put the script on a different clock than the scru
 cue sheet and the frame renderer — the exact failure the refusal exists to prevent. The
 guard runs inside the exported `fit()` as well as in the CLI, so a library caller cannot
 price a `run.play` at `base` by calling past it.
+
+## 20. The solver seam is additive-only: `data`, `container`, and an omitted rect (F32/F33/F35)
+
+**Contract (D2):** `layout(view, opts)` is a frozen shell; the solver sees
+`{nodes:[{id,w,h,parent?}], edges:[{id,source,target}]}`.
+
+**Problem.** A placement-driven solver (`demo/sequence-solver.js`, every `seq-*` page) needs
+per-node hints the seam did not carry, so it kept an out-of-band placement map the page had
+to fill before every `addNode` (F32) — and the same map is what a `condense()` across two
+lifelines had to be told about by hand (F34). An actor with no activations yet was not a
+container to anyone (no `parent` pointed at it), so it arrived as a leaf, was parked in the
+solver's spare column and drawn as one big filled box (F33). And a solver that deliberately
+declines to place a container got a placeholder rect at the origin unioned into the box the
+shell padded, dragging the container towards (0, 0) (F35).
+
+**Implementation.** The input node gains two OPTIONAL keys and loses none: `data` (the
+node's own spec data, or `opts.hint(node)`'s pick of it) and `container: true` (any
+container, including one declared `container: true` on the spec before it has children).
+A solver that ignores them draws exactly what it drew before — asserted for the dagre
+adapter in `test/adapter-dagre.test.js`. `padContainers` now tracks which ids the solver
+returned no rect for and derives those containers from the children's bbox + `containerPad`
+alone, instead of unioning with the origin fallback. Solver-side consequence of F32/F34: a
+condensed node's `data` reaches the solver like any other node's, so a placement-driven
+solver can read the merged node's placement out of the spec it was condensed with.
+
+**Cost:** one more field on the rendered view (`empty`) and two CSS rules
+(`[data-container][data-empty]`), so an empty container reads as "nothing here yet" rather
+than as an empty frame — dashed box, no disclosure chevron, no pointer cursor.
+`container: true` on a node that does have children is ignored.
+
+**Scope of the flag — deliberately narrow.** `container: true` changes the VIEW, the LAYOUT
+input and the DRAWING, and nothing else. Every other subsystem keeps keying off "has
+children", because that is what they actually operate on:
+
+- `viewstate.isContainer/collapse/expand` — `g.collapse(id)` on an empty declared container
+  reports `applied: false`; there is no subtree to fold.
+- `interact.js` `tapToggle` and the keyboard toggle — inert for the same reason, which is
+  why the empty box drops the chevron and the pointer cursor.
+- `a11y.js` — no `aria-expanded`, matching the fact that nothing can be expanded.
+- `run.js` — `childrenOf` comes from `parent` links, so a childless declared container is
+  still an EXECUTABLE step (it seeds/receives tokens, takes a status and a duration chip)
+  and stops being one the moment its first child lands. Declare a container that the run
+  engine must never execute only when you are about to give it children.
+
+Widening any of these would mean inventing a second, empty kind of collapsible thing; the
+flag exists to fix how an empty container is drawn and solved, not to fake a subtree.

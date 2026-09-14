@@ -9,9 +9,9 @@ import { layout } from "../src/layout.js";
 import { runCondense, CONDENSE_PHASES } from "../src/condense-anim.js";
 
 /** Manual clock + no DOM: the same relayout shape index.js uses, minus the renderer. */
-function host({ reduced = false } = {}) {
+function host({ reduced = false, spec } = {}) {
   const ticker = createTicker({ manual: true });
-  const store = new Store({
+  const store = new Store(spec || {
     nodes: [{ id: "A" }, { id: "m1" }, { id: "m2" }, { id: "m3" }, { id: "Z" }],
     edges: [
       { id: "eA1", source: "A", target: "m1" },
@@ -269,4 +269,36 @@ test("cancel() before converge stops the run and clears the highlight", async ()
   assert.deepEqual(h.marks.map((m) => m.value), ["src", null]);
   assert.equal(h.store.hasNode("auto3"), false, "canceling during highlight never touches the store");
   assert.equal(h.commits.length, 0);
+});
+
+// ---- F28: a retry loop around the set, and `parent: null` on the merged spec ----
+
+test("condense: a loop edge around the set merges, keeping the common parent via `parent: null`", async () => {
+  const h = host({
+    spec: {
+      nodes: [
+        { id: "svc" },
+        { id: "call", parent: "svc" }, { id: "verify", parent: "svc" },
+        { id: "check", parent: "svc" }, { id: "done" },
+      ],
+      edges: [
+        { id: "e1", source: "call", target: "verify" },
+        { id: "e2", source: "verify", target: "check" },
+        // The retry back edge leaves the set and re-enters it: not a path *through* it.
+        { id: "e3", source: "check", target: "call", loop: true, maxIterations: 3 },
+        { id: "e4", source: "check", target: "done" },
+      ],
+    },
+  });
+
+  const run = runCondense(h.g, h.internals, ["call", "verify"], { id: "attempt", parent: null });
+  await advance(h.ticker, CONDENSE_PHASES.highlight + 1);
+  assert.equal(h.store.hasNode("attempt"), true, "the loop edge no longer blocks the merge");
+  assert.equal(h.store.node("attempt").parent, "svc", "`parent: null` inherited the common parent");
+  const loop = [...h.store.edges.values()].find((e) => e.loop);
+  assert.equal(`${loop.source}->${loop.target}`, "check->attempt");
+
+  await advance(h.ticker, CONDENSE_PHASES.converge + 1);
+  await advance(h.ticker, CONDENSE_PHASES.reveal + 1);
+  assert.equal((await run.promise).applied, true);
 });

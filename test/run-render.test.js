@@ -102,6 +102,13 @@ async function settle(promise, maxFrames = 400) {
   assert.ok(ok, "awaited work settled within the frame budget");
 }
 
+/** Every element under `root` matching `fn` (the DOM shim has no querySelectorAll). */
+function findAllEls(root, fn, out = []) {
+  if (fn(root)) out.push(root);
+  for (const c of root.children) findAllEls(c, fn, out);
+  return out;
+}
+
 const { mount } = await import("../src/index.js");
 
 // ---------------------------------------------------------------------------
@@ -204,6 +211,151 @@ test("run-render: a failed node is written to the same data-run channel and anno
   assert.equal(g.renderer.node("z").getAttribute("data-run"), null,
     "the successor is never decorated: nothing was handed on to it");
   assert.ok(seen.includes("b:failed"), "a11y.js and the a11y table hear it on the existing bus channel");
+
+  g.destroy();
+});
+
+test("run-render: a live dwell past its declared duration is written to data-over-budget (F13)", async () => {
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, {
+    nodes: [{ id: "a", label: "A", data: { duration: "100ms" } }, { id: "b", label: "B" }],
+    edges: [{ id: "e1", source: "a", target: "b" }],
+  }, { animation: { duration: 40 } });
+
+  const run = g.run({ mode: "live" });
+  await pump(2);
+  run.start("a");
+  await pump(2);
+  assert.equal(g.renderer.node("a").getAttribute("data-over-budget"), null,
+    "inside its declared budget the node carries nothing extra");
+
+  await pumpUntil(() => run.state().nodes.a.overBudget === true, 60);
+  await pump(1);
+  assert.equal(g.renderer.node("a").getAttribute("data-over-budget"), "",
+    "the live dwell outran data.duration — its own channel, alongside data-run");
+  assert.equal(g.renderer.node("a").getAttribute("data-run"), "active");
+
+  run.finish("a");
+  await pump(1);
+  assert.equal(g.renderer.node("a").getAttribute("data-over-budget"), "",
+    "…and the finish that closed the over-long dwell does not erase it");
+
+  run.start("a"); // the retry of a done node: judged against its own dwell from scratch
+  await pump(1);
+  assert.equal(g.renderer.node("a").getAttribute("data-over-budget"), null);
+
+  g.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F31 — the container status rollup is a policy (`statusAgg`), and the picture follows it.
+// ---------------------------------------------------------------------------
+
+/** A lifeline-shaped graph: one call into `svc` fails, a second, longer one succeeds. */
+function lifelineSpec(statusAgg) {
+  return {
+    nodes: [
+      { id: "svc", label: "auth", ...(statusAgg ? { statusAgg } : {}) },
+      { id: "hit", label: "401", parent: "svc", data: { duration: "1s", fail: "401" } },
+      { id: "retry", label: "retry", parent: "svc", data: { duration: "5s" } },
+      { id: "r1", label: "R1" }, { id: "r2", label: "R2" },
+    ],
+    edges: [{ id: "e1", source: "r1", target: "hit" }, { id: "e2", source: "r2", target: "retry" }],
+  };
+}
+
+function mountLifeline(statusAgg) {
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  return mount(root, lifelineSpec(statusAgg), { animation: { duration: 40 } });
+}
+
+test("run-render: the default rollup leaves a container painted failed for the rest of the run", async () => {
+  const g = mountLifeline();
+  const run = g.run({});
+  run.play();
+  await pumpUntil(() => run.state().done, 1200);
+  await pump(2);
+  assert.equal(g.renderer.node("svc").getAttribute("data-run"), "failed");
+  g.destroy();
+});
+
+test("run-render: statusAgg 'latest' repaints the container once a later call succeeds", async () => {
+  const g = mountLifeline("latest");
+  const seen = [];
+  g.on("runstatus", (ev) => { if (ev.id === "svc") seen.push(ev.status); });
+  const run = g.run({});
+  run.play();
+
+  await pumpUntil(() => run.state().nodes.hit.status === "failed", 1200);
+  await pump(2);
+  assert.equal(g.renderer.node("svc").getAttribute("data-run"), "failed", "red while the failure is the latest news");
+
+  await pumpUntil(() => run.state().done, 1200);
+  await pump(2);
+  assert.equal(g.renderer.node("svc").getAttribute("data-run"), "done", "…and back to done once the retry lands");
+  assert.equal(g.renderer.node("hit").getAttribute("data-run"), "failed", "the child that failed stays failed");
+  assert.deepEqual(seen.slice(-2), ["failed", "done"], "the flip is announced on the same bus channel");
+  g.destroy();
+});
+
+test("run-render: statusAgg 'none' never paints the container from its children at all", async () => {
+  const g = mountLifeline("none");
+  const run = g.run({});
+  run.play();
+  await pumpUntil(() => run.state().done, 1200);
+  await pump(2);
+  assert.equal(g.renderer.node("svc").getAttribute("data-run"), "done");
+  assert.equal(g.renderer.node("hit").getAttribute("data-run"), "failed");
+  g.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// F21 — the occupancy badge and the preset's duration chip have separate slots, including
+// in the gutter above a short box, where the chip row lifts to clear a centred label.
+// ---------------------------------------------------------------------------
+
+test("run-render: the ×N occupancy badge and the preset's duration chip never share a slot", async () => {
+  const { textWidth } = await import("../src/measure.js");
+  const BADGE_FONT = "600 10px system-ui,-apple-system,'Segoe UI',sans-serif";
+  const root = makeEl("div");
+  root.ownerDocument = doc;
+  const g = mount(root, {
+    nodes: [
+      { id: "A", label: "A", data: { duration: "1s" } },
+      // Explicit w/h opts out of the measure hook, so the box stays 36px tall and the
+      // preset lifts its chip row into the gutter the badge also lives in.
+      { id: "M", label: "M", w: 120, h: 36, data: { duration: "300ms" } },
+    ],
+    edges: [{ id: "e1", source: "A", target: "M" }],
+  }, { animation: { duration: 40 }, preset: "pipeline" });
+
+  const run = g.run({ mode: "live" });
+  run.start("A");
+  await pump(2);
+  run.finish("A");
+  await pumpUntil(() => run.state().nodes.M.occupancy > 0, 200);
+  run.spawn("M", 3);
+  await pumpUntil(() => run.state().nodes.M.occupancy === 4, 200);
+  await pump(2);
+
+  const badge = findAllEls(root, (n) => (n.attrs.class || "") === "smv-token-badge" && n.textContent === "×4")[0];
+  assert.ok(badge, "the occupancy badge is drawn");
+  const chip = findAllEls(g.renderer.node("M"), (n) => (n.attrs.class || "") === "smv-chip")[0];
+  assert.ok(chip && chip.textContent === "300ms", "the preset chip is drawn");
+
+  const rect = g.layoutResult().nodes.M;
+  const left = rect.x - rect.w / 2;
+  const chipRight = left + Number(chip.attrs.x); // .smv-chip is text-anchor:end
+  assert.equal(Number(chip.attrs.y), -7, "sanity: the short box lifted its chip row");
+  assert.equal(Number(badge.attrs.y), rect.y - rect.h / 2 - 7, "badge and chip share the gutter");
+  // .smv-token-badge is text-anchor:start from the box's left edge; .smv-chip runs
+  // leftwards from the right edge. The two spans must not meet.
+  assert.ok(
+    Number(badge.attrs.x) + textWidth("×4", BADGE_FONT) < chipRight - textWidth("300ms", BADGE_FONT),
+    "the badge's span ends before the chip's begins",
+  );
 
   g.destroy();
 });

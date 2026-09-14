@@ -99,8 +99,9 @@
   <div class="lookfor">
     <b>What to look for</b>
     <ul>
-      <li>The dashed <em>needs changes</em> arc ticking an iteration badge, capped at
-        <code>maxIterations: 3</code>.</li>
+      <li>Each rejection is a real failed attempt: the dashed <em>needs changes</em> arc
+        (<code>onFail: true</code>) sends the draft back and ticks an iteration badge, until
+        <code>recover: true</code> lets the fourth pass ship.</li>
       <li><em>Policy check</em> + <em>Human review</em> folding into one node — the duration
         chip odometers <code>4h → 12s</code>, with a “faster” badge over the merge.</li>
       <li>A new fan-out after automation: most drafts go straight to <em>Send to customer</em>,
@@ -128,8 +129,8 @@
 </div>
 
 <p class="legend">
-  Legend — chip = duration, ✋ manual / ⚡ automated, dashed arc = the retry loop
-  (<code>loop:true, maxIterations:3</code>), thickened edge after automation = a redirected
+  Legend — chip = duration, ✋ manual / ⚡ automated, dashed arc = the review's retry arc
+  (<code>loop:true, onFail:true, maxIterations:3</code>), thickened edge after automation = a redirected
   edge condense re-pointed, slim bar under the graph = total hands-on duration across every
   node currently on screen.
 </p>
@@ -162,8 +163,8 @@
   // ===========================================================================
   // 1. The graph
   //
-  // draft -> policy -> review -> publish, with a bounded "needs changes" loop from
-  // review back to draft. Automation later condenses [policy, review] into one
+  // draft -> policy -> review -> publish, with a bounded "needs changes" retry arc from
+  // review back to draft — every rejection is a real failed attempt that replays the draft. Automation later condenses [policy, review] into one
   // "auto-approver" node and adds a small spot-check side node fed by a fan-out.
   // ===========================================================================
 
@@ -189,17 +190,27 @@
   var SEED = { nodes: [automated("draft", "Draft reply", "3m")], edges: [] };
 
   var WAVE_POLICY = [add(automated("policy", "Policy check", "8s")), link("e1", "draft", "policy")];
-  var WAVE_REVIEW = [add(manual("review", "Human review", "4h")), link("e2", "policy", "review")];
+  // "Needs changes" is a real failed attempt, not a bare loop tick: the reviewer rejects the
+  // draft (`data.fail`), the reject arc below is marked `onFail: true` so it carries the
+  // retry back to `draft`, and `recover: true` says the attempt that spends the last retry
+  // is the one that finally ships.
+  var REVIEW = manual("review", "Human review", "4h");
+  REVIEW.data.fail = { reason: "needs changes", recover: true };
+
+  var WAVE_REVIEW = [add(REVIEW), link("e2", "policy", "review")];
   var WAVE_PUBLISH = [
     add(automated("publish", "Send to customer", "2m")),
     link("e3", "review", "publish"),
-    link("reject", "review", "draft", { loop: true, maxIterations: 3, label: "needs changes" }),
+    link("reject", "review", "draft", {
+      loop: true, onFail: true, maxIterations: 3,
+      label: { text: "needs changes", pill: true },
+    }),
   ];
 
-  // The two automation moments (Act 2). [policy, review] is convex only once the reject
-  // loop is gone — that loop is exactly what makes {policy, review} non-convex (draft is
-  // reachable from review and draft flows straight back into policy), so retiring the loop
-  // is not just narrative color, it is what makes the condense legal.
+  // The two automation moments (Act 2). Retiring the reject arc first is the STORY, not a
+  // precondition: a loop edge is not a path through the set, so {policy, review} would be
+  // convex with the arc still up and condense would simply re-point it onto the merged node.
+  // The new approver clears a draft or escalates it, so there is no "send it back" arc left.
   var CONDENSE_SET = ["policy", "review"];
   var AUTO_APPROVER = automated("auto-approver", "Auto-approver", "12s");
   var SPOTCHECK = manual("spotcheck", "Human spot-check", "10m");
@@ -256,9 +267,9 @@
     cam({ nodes: ["policy", "review"], k: 1.35, pad: 72 }),
     spot(CONDENSE_SET, "warn", true),
     hold(900),
-    cap("The reject loop won’t be needed — the new approver either clears a draft outright or hands it to a person."),
+    cap("No more “send it back”: the new approver either clears a draft outright or hands it to a person."),
     { op: "removeEdge", args: ["reject"] },
-    hold(400),
+    hold(500),
     { op: "condense", args: [CONDENSE_SET, AUTO_APPROVER] },
     { op: "highlight", args: [{ nodes: [AUTO_APPROVER.id], variant: "ok" }] },
     cap("Policy check + human review, merged into one automated approver: 4h → 12s."),
@@ -267,7 +278,9 @@
 
     { label: "spot-check" },
     cap("A model shouldn’t clear every reply blind — route a sample of them to a person instead."),
-    grow([add(SPOTCHECK), link("f1", "auto-approver", "spotcheck", { label: "10% sample" })], 550),
+    grow([add(SPOTCHECK), link("f1", "auto-approver", "spotcheck", {
+      label: { text: "10% sample", pill: true },
+    })], 550),
     cam({ nodes: ["auto-approver", "spotcheck", "publish"], pad: 72 }),
     hold(600),
     { op: "run.seek", ms: 0 },
@@ -291,7 +304,7 @@
   // ===========================================================================
 
   var RUN_OPTS = {
-    iterations: { reject: 3 },      // capped to the edge's own max
+    iterations: { reject: 3 },      // the retry budget the onFail arc hands the review
     hopMs: P(180),
     dwell: function (sec, ctx) {
       var mode = ctx.node && ctx.node.data && ctx.node.data.mode;
@@ -321,10 +334,11 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto", // plays itself only when the URL carries ?auto=1
     });
+    window.smv = g; // the documented handle: g.finished resolves when the story ends
     run = g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
-    if (AUTO) run.speed(0.8); // extra headroom so ?auto=1 finishes well under the 45s budget
+    if (AUTO) run.speed(1.25); // a bare speed() is playback only, so the declared total is untouched
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -401,7 +415,6 @@
   // ---- story wiring ------------------------------------------------------------
 
   var checks = {};
-  var storyDone = false;
 
   sb.on("step", function (ev) {
     paintRail();
@@ -413,40 +426,20 @@
     }
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () {
-    storyDone = true;
-    paintRail();
-    phaseEl.textContent = "story complete";
-    tTotal.setAttribute("data-hot", "");
-  });
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 40000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
 
-  function transportPlay() {
-    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
-    if (btn) btn.click(); else sb.play();
-  }
-
-  var started = false;
+  var started = AUTO; // autoplay: "auto" already started it under ?auto=1
   function start() {
     if (started) return;
     started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
-    transportPlay();
+    sb.play();
   }
 
   playBtn.addEventListener("click", start);
+  if (AUTO) playBtn.disabled = true;
   resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
 
   function writeReport() {
@@ -460,24 +453,25 @@
     return obs.loopIteration + " of max " + obs.loopMax + "  (" + (obs.loopBadge || loopBadgeText()) + ")";
   }
 
-  async function auto() {
-    await sleep(300);              // mount's initial fit gets one beat
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
-    await sleep(400);              // the last commit settles
-    writeReport();
-    phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
-    window.__smvExit = { done: true, errors: errors };
-  }
-
-  paintRail();
-  if (AUTO) {
-    auto().catch(function (err) {
-      errors.push("auto: " + String((err && err.message) || err));
+  // The story's end is the library's own signal, for the visitor and for the headless
+  // checker alike; __smvExit stays because it also carries this page's error list.
+  g.finished.then(function () {
+    paintRail();
+    tTotal.setAttribute("data-hot", "");
+    if (!AUTO) { phaseEl.textContent = "story complete"; return; }
+    return sleep(400).then(function () { // the last commit settles
       writeReport();
+      phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
       window.__smvExit = { done: true, errors: errors };
     });
-  }
+  }).catch(function (err) {
+    errors.push("finish: " + String((err && err.message) || err));
+    writeReport();
+    window.__smvExit = { done: true, errors: errors };
+  });
+
+  paintRail();
+  if (AUTO) phaseEl.textContent = "playing…";
 })();
 </script>
 

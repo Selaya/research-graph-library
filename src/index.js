@@ -10,20 +10,20 @@ import { layout } from "./layout.js";
 import { createTicker, EASE, prefersReducedMotion } from "./anim.js";
 import { createScene } from "./scene.js";
 import { createRenderer } from "./render.js";
-import { createViewport } from "./viewport.js";
+import { createViewport, paneInsets } from "./viewport.js";
 import { injectStyles } from "./styles.js";
 import { createViewState } from "./viewstate.js";
 import { runCondense, CONDENSE_PHASES } from "./condense-anim.js";
 import { runSplit } from "./split-anim.js";
-import { createDirector, resolveCameraTarget } from "./director.js";
+import { createDirector, resolveCameraTarget, NODES_MAX_K } from "./director.js";
 import { makeQuery, cloneItem } from "./query.js";
 import { attachA11y } from "./a11y.js";
 import { attachTapToggle } from "./interact.js";
 import { createRunTransport } from "./run-transport.js";
 import { createRunRender } from "./run-render.js";
-import { createStoryboard } from "./storyboard.js";
+import { createStoryboard, STORYBOARD_OPS as OPS } from "./storyboard.js";
 import { createTransport } from "./transport.js";
-import { applyPipelinePreset } from "./preset-pipeline.js";
+import { applyPipelinePreset, PIPELINE_MEASURE, PIPELINE_EDGE_LABEL_MAX_W } from "./preset-pipeline.js";
 
 export const version = "0.1.0";
 
@@ -64,6 +64,15 @@ function hasCameraOp(steps) {
     if (s.op !== "batch") return false;
     return hasCameraOp(Array.isArray(s.steps) ? s.steps : (s.args && s.args[0]) || []);
   });
+}
+
+/** F36 — `autoplay: "auto"` defers to the page's own URL (`?auto=1`, or `auto=true`), which
+ *  is what every demo page hand-rolled; `true` always plays, anything else never does. */
+function wantsAutoplay(v, doc) {
+  if (v !== "auto") return !!v;
+  const view = doc && doc.defaultView;
+  const loc = (view && view.location) || (typeof location !== "undefined" ? location : null);
+  return /[?&]auto=(1|true)(&|$)/.test((loc && loc.search) || "");
 }
 
 /** Awaitable + cancelable handle handed back by every mutation (§5.3). */
@@ -111,7 +120,10 @@ export function mount(el, spec = {}, opts = {}) {
   injectStyles(root.ownerDocument || doc);
 
   const store = new Store(spec);
-  const vs = createViewState(store);
+  // Declared before the view state because measurement reads it (F22: `layout.measure`),
+  // and `g.layout(o)` mutates this same object in place, so the getter below stays live.
+  const layoutOpts = { dir: "LR", ...(opts.layout || {}) };
+  const vs = createViewState(store, () => layoutOpts.measure);
   const bus = emitter();
   // D15 — recording mode overrides the environment: a manual ticker is stepped frame by
   // frame by the renderer CLI (M4b) instead of riding rAF, and `data-smv-record` on the
@@ -126,7 +138,6 @@ export function mount(el, spec = {}, opts = {}) {
   root.setAttribute("data-smv-theme", opts.theme || "auto");
   if (recording) root.setAttribute("data-smv-record", "");
 
-  const layoutOpts = { dir: "LR", ...(opts.layout || {}) };
   const anim = opts.animation || {};
   // D15 — `motion:"full"` is the recorder saying "the environment is not the audience".
   const reduced = opts.motion === "full" ? false : prefersReducedMotion();
@@ -157,6 +168,9 @@ export function mount(el, spec = {}, opts = {}) {
     ticker,
     reduced,
     lastLayout: () => last,
+    // F16 — a highlight aimed at a collapsed descendant lands on the ancestor drawn in its
+    // place, so a script does not have to filter its ids through layoutResult() first.
+    resolveId: (id) => vs.visibleAncestor(id),
     emphasize: (id, v) => renderer.emphasize(id, v),
     dim: (id, v) => renderer.dim(id, v),
   });
@@ -181,12 +195,21 @@ export function mount(el, spec = {}, opts = {}) {
   function styleNow() {
     const v = vs.view();
     const sizes = { ...v.sizes };
-    if (last) for (const [id, r] of Object.entries(last.nodes)) sizes[id] = { w: r.w, h: r.h };
+    // F22 — the solver's box replaces the measured w/h, but NOT the label reserve that
+    // came with it: `reserve` is the chrome the measure hook parked in the corners, and
+    // dropping it here would hand the label the whole (widened) box again.
+    if (last) for (const [id, r] of Object.entries(last.nodes)) sizes[id] = { ...sizes[id], w: r.w, h: r.h };
     renderer.styleCommit({
       nodes: v.nodes, edges: v.edges, reversed: pinnedReversals,
       style: styleFn, sizes, props: director.propsLayer(),
+      edgeLabelMaxW: layoutOpts.edgeLabelMaxW,
     });
   }
+
+  /** F15 — every fit aims at the pane MINUS the chrome the library mounted over it (the
+   *  transport bar, the preset's total bar, the caption strip), measured rather than
+   *  assumed. Zero without getBoundingClientRect: a headless mount fits as it always did. */
+  const chromeInset = () => paneInsets(root, renderer.svg);
 
   scene.onFrame((visual) => renderer.frame(visual));
 
@@ -295,11 +318,17 @@ export function mount(el, spec = {}, opts = {}) {
     lastSlots = res.slots || null;
 
     // Containers get their real (solver-computed) box here, so labels truncate to it.
+    // The spread keeps the measured `reserve` (F22) alive across that swap — the layout
+    // result only carries geometry, and a dropped reserve puts a long label back under
+    // the chip the widened box was measured for.
     const sizes = { ...v.sizes };
-    for (const [id, r] of Object.entries(res.nodes)) sizes[id] = { w: r.w, h: r.h };
+    for (const [id, r] of Object.entries(res.nodes)) sizes[id] = { ...sizes[id], w: r.w, h: r.h };
     renderer.styleCommit({
       nodes: v.nodes, edges: v.edges,
       reversed: pinnedReversals, style: styleFn, sizes,
+      // F26 — the edge-label truncation cap, drawing-wide (`layout.edgeLabelMaxW`); a
+      // per-edge `label: {maxW}` still beats it.
+      edgeLabelMaxW: layoutOpts.edgeLabelMaxW,
       // D16 — the director's override layer, merged over styleFn by the renderer. Read
       // here (and in styleNow) and nowhere else: propsLayer() rolls its own shadow
       // forward, so exactly one read per style commit is the contract.
@@ -326,7 +355,7 @@ export function mount(el, spec = {}, opts = {}) {
       viewport.anchor(before, after, dur);
       // The auto-refit rides the SAME computed duration, so reduced motion shrinks it too
       // (through M3 it was a flat 350ms tween whatever the environment asked for).
-      if (!viewport.userMoved && !viewport.contains(res.bounds)) viewport.fit(res.bounds, { pad: 24, duration: dur });
+      if (!viewport.userMoved && !viewport.contains(res.bounds)) viewport.fit(res.bounds, { pad: 24, duration: dur, inset: chromeInset() });
     }
 
     bus.emit("commit", {
@@ -396,17 +425,70 @@ export function mount(el, spec = {}, opts = {}) {
   const tbus = emitter(); // transport-facing "something moved" channel
   const notify = () => tbus.emit("change", null);
 
+  // F36 — the "story finished" signal every page used to hand-roll as `window.__smvExit`.
+  // ONE promise per instance, settled the first time the storyboard runs out of steps, a
+  // page calls g.finish() (live mode has no declared end to reach), or the instance is
+  // destroyed — so awaiting it can never hang a headless checker.
+  const finishedD = deferred();
+  let finishedWith = null;
+  function markFinished(reason) {
+    if (finishedWith) return;
+    finishedWith = { reason };
+    bus.emit("finish", finishedWith);
+    finishedD.resolve(finishedWith);
+  }
+
   function disposeRun() {
     if (runRender) { runRender.destroy(); runRender = null; }
     if (runCtl) { runCtl.destroy(); runCtl = null; }
   }
+
+  /** F6 — every `run.on(type, fn)` registered through the handle, so a `g.run(opts)`
+   *  recompile can re-seat them on the fresh transport. The handle is conceptually the
+   *  SAME run (that is what `g.run()` returns), so its subscriptions outlive the compile
+   *  that replaced it — pages used to re-attach after every recompile. `off()` (and the
+   *  unsubscriber `on()` hands back) drops the entry, so nothing is resurrected. */
+  const runSubs = new Set();
 
   function createRun(o) {
     disposeRun();
     runOpts = o || {};
     runCtl = createRunTransport(internals, runOpts);
     runRender = createRunRender(internals, runCtl);
-    runCtl.on("*", notify);
+    // Raw handles, captured BEFORE the wrappers below: the run layer's own subscriptions
+    // (run-render's, and this one) belong to this transport and are rebuilt per compile —
+    // only what a CALLER registered is carried forward.
+    const rawOn = runCtl.on, rawOff = runCtl.off;
+    // One wildcard hop does both jobs: keep the transport bar in step, and mirror every
+    // run event onto the instance bus as `run:<type>` (F6) — `g.on("run:finish", …)`
+    // outlives any number of recompiles, the same way `g.on("runstatus")` always has.
+    rawOn("*", (type, payload) => { notify(); bus.emit("run:" + type, payload); });
+    // Re-seat onto THIS transport, keeping the live undo on the sub: the unsubscriber a
+    // caller is holding was closed over `sub`, not over any one generation's undo, so it
+    // still drops the handler after any number of recompiles.
+    for (const sub of runSubs) sub.undo = rawOn(sub.type, sub.fn);
+    runCtl.on = (type, fn) => {
+      const sub = { type, fn, undo: rawOn(type, fn) };
+      runSubs.add(sub);
+      return () => { runSubs.delete(sub); sub.undo(); };
+    };
+    runCtl.off = (type, fn) => {
+      // Drop it through the sub's OWN undo, never through this generation's `rawOff`: a
+      // handle held across a `g.run(opts)` recompile closes over the OLD transport's off,
+      // while the handler itself was re-seated onto the new one above. Deleting only the
+      // bookkeeping entry left it firing on the live bus with nothing tracking it — and
+      // RUN.md promises `off()` drops a listener "for good, from either handle".
+      let found = false;
+      for (const sub of runSubs) {
+        if (sub.type !== type || sub.fn !== fn) continue;
+        runSubs.delete(sub);
+        sub.undo();
+        found = true;
+      }
+      // Nothing of ours matched: a listener attached straight to the transport (or one
+      // already dropped) still goes to the raw off, which is a no-op if it is not there.
+      if (!found) rawOff(type, fn);
+    };
     notify();
     return runCtl;
   }
@@ -457,6 +539,20 @@ export function mount(el, spec = {}, opts = {}) {
     switch (step.op) {
       case "wait":
         return waitMs(step.ms ?? args[0] ?? 0);
+      case "run": {
+        // Exactly g.run(opts): tear down and recompile. Listeners survive it (F6), so a
+        // story can recompile mid-play without the page re-attaching anything.
+        createRun(args[0] || runOpts);
+        return null;
+      }
+      case "run.reset": {
+        // The SAME transport, back at t=0 — identity, listeners and (in live mode) the
+        // event log all intact; `args[0]` overrides the compile inputs if given.
+        const r = ensureRun();
+        r.reset(args[0] || r.options(), 0);
+        notify();
+        return null;
+      }
       case "run.play": {
         const r = ensureRun();
         const u = untilOf(step);
@@ -510,8 +606,20 @@ export function mount(el, spec = {}, opts = {}) {
         // was drawn with rather than a future drawing's.
         slots: lastSlots ? { ...lastSlots } : null,
         slotsKey,
+        // A `layout` step mutates the instance-wide options in place, so they are state a
+        // step moves (G2) — without this a backward seek past `{op:"layout",args:[{dir:"TB"}]}`
+        // would replay the older spec in the NEWER direction.
+        layout: { ...layoutOpts },
         runTime: runCtl ? runCtl.time() : 0,
-        runOpts: runCtl ? runCtl.options() : null,
+        // The compile inputs are state a step moves too, now that `{op:"run", args:[opts]}`
+        // is part of the declared timeline (F5) — so they are snapshotted whether or not a
+        // transport exists yet. `runCompiled:false` means "no run had been compiled at this
+        // point", which is NOT the same as "a run compiled with no opts": conflating the two
+        // left a LATER run step's opts sitting in `runOpts` after a backward seek, and the
+        // next implicit compile (a replayed `run.play`, the transport bar's play button, a
+        // bare g.run()) rebuilt the schedule from those future inputs.
+        runCompiled: !!runCtl,
+        runOpts: runCtl ? runCtl.options() : { ...runOpts },
         // D14 — emphasis and the caption are state a step moves, so they are always here.
         ...director.snapshot(),
         // D13 — the camera is NOT, unless the script has taken it. Snapshotting it
@@ -539,6 +647,10 @@ export function mount(el, spec = {}, opts = {}) {
       lastLayers = (snap.layers || []).map((rank) => [...rank]);
       lastSlots = snap.slots ? { ...snap.slots } : null;
       slotsKey = snap.slotsKey ?? null;
+      if (snap.layout) {
+        for (const k of Object.keys(layoutOpts)) delete layoutOpts[k];
+        Object.assign(layoutOpts, snap.layout);
+      }
       // BEFORE the relayout, unlike the camera below: the property override layer (D16) is
       // read by the style commit *inside* relayout, so restoring it afterwards would leave
       // the step's overrides on screen for a whole commit. Emphasis is re-asserted off the
@@ -554,10 +666,15 @@ export function mount(el, spec = {}, opts = {}) {
       }
       // Re-seat the SAME transport in place: g.run() identity (and every listener on it)
       // has to survive a backward seek.
-      if (snap.runOpts) {
+      if (snap.runCompiled) {
         if (runCtl) { runOpts = { ...snap.runOpts }; runCtl.reset(snap.runOpts, snap.runTime || 0); }
         else createRun(snap.runOpts).seek(snap.runTime || 0);
-      } else disposeRun();
+      } else {
+        // No transport at this point in the story: put the compile INPUTS back as well, or
+        // the next implicit compile is seeded from a future `run` step's opts.
+        runOpts = { ...(snap.runOpts || {}) };
+        disposeRun();
+      }
       notify();
       return tr;
     },
@@ -571,7 +688,7 @@ export function mount(el, spec = {}, opts = {}) {
     sb = createStoryboard(host, sbSteps);
     sb.on("step", notify);
     sb.on("seek", notify);
-    sb.on("done", () => { sbPlaying = false; notify(); });
+    sb.on("done", () => { sbPlaying = false; notify(); markFinished("storyboard"); });
     return sb;
   }
 
@@ -590,6 +707,10 @@ export function mount(el, spec = {}, opts = {}) {
    *  read this one number, so they cannot disagree about where a step sits. */
   function durOf(step) {
     if (!step || step.op === undefined) return 0;      // labels are zero-duration positions
+    // BEFORE `dur`: a recompile/reset is instant and puts the run clock back to 0, which
+    // stepSlices() prices as a 0ms slice. Honouring a `dur` here would make durOf(), the
+    // cue sheet and bin/smv-fit disagree about a step nothing ever waits for.
+    if (step.op === "run" || step.op === "run.reset") return 0;
     if (step.dur != null) return Math.max(0, step.dur);
     const a0 = step.args && step.args[0];
     switch (step.op) {
@@ -615,6 +736,9 @@ export function mount(el, spec = {}, opts = {}) {
   function stepSlices() {
     let base = 0; // absolute run time at the start of the step being measured
     return (sbSteps || []).map((s) => {
+      // A recompile or a reset puts the run's own clock back to 0, so the next run.play
+      // step's share is measured from there — not from where the previous one stopped.
+      if (s.op === "run" || s.op === "run.reset") { base = 0; return { dur: 0, base }; }
       if (s.op === "run.play" && runCtl) {
         const u = untilOf(s);
         const end = u != null ? runCtl.timeOf(u) : runCtl.duration;
@@ -818,10 +942,89 @@ export function mount(el, spec = {}, opts = {}) {
       return commitOrDefer(null, undefined, { applied: true });
     },
 
-    update(id, patch) {
-      const item = store.update(id, patch);
+    /** `patch.data` merges; `data: { key: undefined }` REMOVES that key, and
+     *  `{ replace: true }` swaps the whole `data` payload instead of merging into it.
+     *  `collapsed` is not stored view state — it is folded into the view once, at first
+     *  sight — so a `collapsed` patch is routed to the real expand()/collapse() rather
+     *  than quietly doing nothing. */
+    update(id, patch, o) {
+      const item = store.update(id, patch, o);
       bus.emit("update", { id, patch, item });
+      if (patch && patch.collapsed !== undefined && store.hasNode(id)) {
+        vs.isContainer(id); // fold any spec-level `collapsed:true` in before reading the set
+        const was = vs.collapsed.has(id);
+        const view = patch.collapsed ? g.collapse(id) : g.expand(id);
+        // Only the view half went through expand()/collapse(). When that actually moved,
+        // its relayout carries the rest of the patch too; when it was a no-op (already in
+        // that state) the other fields in the same patch still have to reach the screen.
+        if (vs.collapsed.has(id) !== was || Object.keys(patch).every((k) => k === "collapsed")) return view;
+      }
       return commitOrDefer(store.hasNode(id) ? id : null, undefined, { applied: true });
+    },
+
+    /** F30 — dry-run the structural guards. `ops` is either a `batch()`-shaped function
+     *  (called with a probe that has the mutation methods) or an array of storyboard-shaped
+     *  `{op, args}` steps. Everything runs against a throwaway clone of the store, so
+     *  nothing commits and nothing renders; every GraphError the ops would have thrown
+     *  comes back in `errors` (an op that fails simply does not land in the clone, and the
+     *  ops after it are still checked). */
+    validate(ops) {
+      const probe = new Store(store.snapshot());
+      const errors = [];
+      const guard = (fn) => (...args) => {
+        try { fn(...args); } catch (err) {
+          if (!(err instanceof GraphError)) throw err;
+          errors.push(err);
+        }
+      };
+      const copy = (item) => (item ? cloneItem(item) : undefined);
+      const viewProbe = (id) => {
+        if (!probe.hasNode(id)) errors.push(new GraphError("missing", `node "${id}" does not exist`));
+      };
+      const api = {
+        node: (id) => copy(probe.node(id)),
+        edge: (id) => copy(probe.edge(id)),
+        children: (id) => probe.children(id).map(cloneItem),
+        spec: () => probe.spec(),
+        condense: guard((ids, n) => {
+          if (!n || n.id == null || n.id === "") throw new GraphError("node-id", "condense needs a new node with a non-empty id");
+          probe.condense([...ids], n);
+        }),
+        // View-only ops: nothing to commit, but the real expand()/collapse() throw on an
+        // unknown id, so a patch that folds a node it removed earlier still has to fail here.
+        expand: (id) => viewProbe(id), collapse: (id) => viewProbe(id),
+        expandAll() {}, collapseAll() {},
+        batch: (fn) => { fn(api); },
+      };
+      for (const m of ["addEdge", "removeNode", "removeEdge", "update", "split"]) {
+        api[m] = guard((...args) => probe[m](...args));
+      }
+      // NOT part of the loop above: `{after}` is g.addNode's own sugar (the node PLUS an
+      // implicit `e:<after>-><id>` edge), and `Store.addNode` takes one argument, so
+      // forwarding straight to the clone dropped the option silently — a dangling `after`
+      // validated clean and then threw for real halfway through, and a later removeEdge of
+      // the implicit edge reported a phantom "missing". The probe mints the same edge, in
+      // the same order, so the verdict matches what the op would actually do.
+      api.addNode = guard((node, o) => {
+        const n = probe.addNode(node);
+        const after = o && o.after;
+        if (after != null) probe.addEdge({ id: `e:${after}->${n.id}`, source: after, target: n.id });
+      });
+      const applyProbe = (step) => {
+        const op = (step && step.op) || "";
+        if (op === "batch") {
+          for (const k of (step.steps || (step.args && step.args[0]) || [])) applyProbe(k);
+          return;
+        }
+        if (op && typeof api[op] === "function") { api[op](...(step.args || [])); return; }
+        // Director/transport ops and bare `label` markers carry nothing structural to check.
+        if (OPS.has(op)) return;
+        if (!op && step && step.label != null) return;
+        errors.push(new GraphError("validate-op", `unknown op "${op}" in validate()`));
+      };
+      if (typeof ops === "function") ops(api);
+      else for (const step of ops || []) applyProbe(step);
+      return { ok: errors.length === 0, errors };
     },
 
     /** D5 — children bloom out of the container's *previous* centre. */
@@ -959,6 +1162,17 @@ export function mount(el, spec = {}, opts = {}) {
     /** The transport-facing view of where the story is (also what the bar renders from). */
     timeline,
 
+    /** F36 — the story's end, as one promise resolving `{reason}`: `"storyboard"` when the
+     *  script ran out of steps, `"finish"` (or whatever `g.finish(reason)` was given) when
+     *  a page marked it done by hand, `"destroy"` when the instance was torn down. Never
+     *  rejects, never re-arms; a second story on the same instance does not re-open it. */
+    finished: finishedD.promise,
+
+    /** Mark the story finished — the explicit end for a live-mode or hand-driven page,
+     *  which has no last storyboard step to reach. Idempotent: the first call wins, and it
+     *  also emits `"finish"` on the instance bus. */
+    finish(reason) { markFinished(reason || "finish"); return g; },
+
     /** One relayout for many ops. An op that throws mid-batch still has to leave through
      *  the drain: the ops that DID land are in the store and must be rendered, the
      *  awaitables already handed out must settle, and batchDefer/batchFocal/batchExtra
@@ -1004,9 +1218,12 @@ export function mount(el, spec = {}, opts = {}) {
      *  OVER the style function, `g.props(null)` to clear. Replace-not-accumulate like
      *  highlight, and state like it too — snapshotted, restored, and re-applied to the
      *  fresh <g> a commit builds for a re-added id (it rides the style commit, which runs
-     *  before the elements exist). Only --smv-* keys, same as every other styling path. */
-    props(map) {
-      director.props(map);
+     *  before the elements exist). Only --smv-* keys, same as every other styling path.
+     *  F18 — `g.props(patch, { merge: true })` patches the layer instead of replacing it:
+     *  unnamed ids keep their overrides, a `null` value drops one key, a `null` entry drops
+     *  one id, and `g.props(null)` still clears the lot. */
+    props(map, o) {
+      director.props(map, o);
       styleNow();
       return g;
     },
@@ -1021,7 +1238,9 @@ export function mount(el, spec = {}, opts = {}) {
     fitView(o = {}) {
       // G9 — the fit tween shrinks under reduced motion instead of running at full length.
       const dur = o.animate === false ? 0 : (reduced ? 1 : (o.duration ?? baseDuration));
-      if (last) viewport.fit(last.bounds, { pad: o.pad ?? 24, duration: dur });
+      // F15 — the mounted chrome is subtracted by default; `inset: 0` opts back out, and an
+      // explicit inset (a legend of the host page's own) replaces the measurement.
+      if (last) viewport.fit(last.bounds, { pad: o.pad ?? 24, duration: dur, inset: o.inset ?? chromeInset() });
       viewport.userMoved = false;
       return g;
     },
@@ -1037,7 +1256,15 @@ export function mount(el, spec = {}, opts = {}) {
       // must not "helpfully" refit over a shot the script composed.
       cameraOwned = true;
       viewport.userMoved = true;
-      const to = resolveCameraTarget(o, last, viewport.size(), viewport.target);
+      // F15/F17 — the pane the shot is composed in carries its chrome inset, and a
+      // multi-node fit is lidded at NODES_MAX_K so "look at these two" is not a close-up.
+      // Both are defaults: `inset`/`maxK` (or an explicit `k`) on the target still win.
+      const size = { ...viewport.size(), inset: o.inset ?? chromeInset() };
+      // Only a MULTI-NODE FIT is lidded: a `node` close-up (which wins over `nodes`) and an
+      // explicit `k` are scale requests, not fits, and are left alone.
+      const lid = Array.isArray(o.nodes) && !o.node && o.k === undefined && o.maxK === undefined;
+      const target = lid ? { ...o, maxK: NODES_MAX_K } : o;
+      const to = resolveCameraTarget(target, last, size, viewport.target, (id) => vs.visibleAncestor(id));
       // D12 — the declared timeline is the contract, and durOf() reads `step.dur` FIRST, so
       // the tween has to as well: args-first here would let a step declaring both durations
       // play for one length while the scrubber, cues and frame count measured the other.
@@ -1076,6 +1303,7 @@ export function mount(el, spec = {}, opts = {}) {
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      markFinished("destroy");
       if (a11y) { a11y.destroy(); a11y = null; }
       if (tap) { tap.destroy(); tap = null; }
       if (transport) { transport.destroy(); transport = null; }
@@ -1101,8 +1329,15 @@ export function mount(el, spec = {}, opts = {}) {
   // different meaning.
   Object.assign(g, makeQuery(store));
 
-  // The preset subscribes to "commit", so it has to exist before the first one.
-  if (opts.preset === "pipeline") preset = applyPipelinePreset(g);
+  // The preset subscribes to "commit", so it has to exist before the first one — and its
+  // measurement/edge-label defaults have to be in `layoutOpts` before the initial relayout
+  // below, or the first drawing is the only one that ignores them (F22/F23/F26).
+  const presetOpts = opts.preset && typeof opts.preset === "object" ? opts.preset : null;
+  if ((presetOpts ? presetOpts.name : opts.preset) === "pipeline") {
+    if (layoutOpts.measure === undefined) layoutOpts.measure = PIPELINE_MEASURE;
+    if (layoutOpts.edgeLabelMaxW === undefined) layoutOpts.edgeLabelMaxW = PIPELINE_EDGE_LABEL_MAX_W;
+    preset = applyPipelinePreset(g, presetOpts || {});
+  }
 
   // Highlight reassertion (D14): render.js builds a FRESH <g> for a re-added id, so a
   // commit that revives an emphasised node (a backward seek, an expand) hands back a blank
@@ -1111,15 +1346,25 @@ export function mount(el, spec = {}, opts = {}) {
   // elements exist.
   bus.on("commit", () => director.reassert());
 
-  // Initial paint: land immediately (nothing to tween from), then fit once (D10).
+  // Initial paint: land immediately (nothing to tween from). The one auto-fit (D10) waits
+  // until the chrome below has mounted, so F15's inset measurement sees the real pane.
   relayout({ duration: 0 });
-  viewport.fit(last.bounds, { pad: 24 });
+
+  // Tap/click a container toggles it (same public path the keyboard uses), and every clean
+  // tap publishes `nodeclick`/`edgeclick` (F27). `interaction: {click: false}` drops the
+  // events; `{tapToggle: false}` drops only the expand/collapse.
+  const ia = opts.interaction || {};
+  const clickEmit = ia.click === false ? null : (t, p) => bus.emit(t, p);
 
   // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
-  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg });
-  // Tap/click a container toggles it (same public path the keyboard uses).
-  if (!(opts.interaction && opts.interaction.tapToggle === false)) {
-    tap = attachTapToggle(g, { svg: renderer.svg });
+  // Enter/Space there publishes the same `nodeclick` a tap does (F27).
+  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg, emit: clickEmit });
+  if (ia.tapToggle !== false || ia.click !== false) {
+    tap = attachTapToggle(g, {
+      svg: renderer.svg,
+      toggle: ia.tapToggle !== false,
+      emit: clickEmit,
+    });
   }
 
   if (opts.storyboard) buildStoryboard(opts.storyboard);
@@ -1127,7 +1372,8 @@ export function mount(el, spec = {}, opts = {}) {
     root.classList.add("smv-has-transport"); // the preset's total bar steps up out of the way
     transport = createTransport(root, controller);
   }
-  if (opts.autoplay && sb) { sbPlaying = true; sb.play(); }
+  viewport.fit(last.bounds, { pad: 24, inset: chromeInset() });
+  if (wantsAutoplay(opts.autoplay, doc) && sb) { sbPlaying = true; sb.play(); }
 
   return g;
 }

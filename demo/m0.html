@@ -34,6 +34,8 @@
   never flip sides: after each append's layout commit we record whether every point of its
   geometry sits at or below the vertical centres of its endpoints.
   Zoom is ctrl/⌘ + wheel — plain scroll is never hijacked.
+  The run is hand-driven, so the page marks its own end with <code>g.finish()</code> and
+  reports from <code>g.finished</code>.
 </p>
 
 <div class="bar">
@@ -92,6 +94,10 @@
     return;
   }
 
+  // The documented "story finished" convention: park the instance on window.smv and let the
+  // report hang off g.finished, which this page resolves by hand with g.finish().
+  window.smv = g;
+
   /**
    * The consistent-side invariant (D3): for an LR flow the loop arc bows BELOW the row.
    * "below" = every point sits at-or-below both endpoint centres; "above" = the mirror.
@@ -109,6 +115,7 @@
 
   var backEdgeSides = [];
   var recording = false;
+  var finishing = false;
   g.on("commit", function (c) {
     if (!recording) return;
     backEdgeSides.push(loopSide(c.nodes, c.edges));
@@ -116,8 +123,23 @@
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
+  // One report, written when the story ends — g.finished also resolves on destroy(), so the
+  // page can never be left mid-sentence.
+  g.finished.then(function (end) {
+    var consistent = backEdgeSides.length === APPENDS &&
+      backEdgeSides.every(function (s) { return s === backEdgeSides[0]; }) &&
+      (backEdgeSides[0] === "below" || backEdgeSides[0] === "above");
+
+    statusEl.textContent = consistent && errors.length === 0 ? "done — clean" : "done — see report";
+    outEl.textContent =
+      "backEdgeSides: " + JSON.stringify(backEdgeSides) + "\n" +
+      "consistent side: " + consistent + "\n" +
+      "finished: " + end.reason + "\n" +
+      "errors: " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+  });
+
   async function runExit() {
-    if (recording || window.__smvExit) return;
+    if (recording || finishing) return;
     runBtn.disabled = true;
     backEdgeSides.length = 0;
     recording = true;
@@ -139,18 +161,11 @@
     statusEl.textContent = "settling";
     await sleep(DURATION * 3); // let the final transition finish and the viewport settle
     recording = false;
+    finishing = true;
 
-    var consistent = backEdgeSides.length === APPENDS &&
-      backEdgeSides.every(function (s) { return s === backEdgeSides[0]; }) &&
-      (backEdgeSides[0] === "below" || backEdgeSides[0] === "above");
-
+    // The checker prefers __smvExit because it also carries this page's own error list.
     window.__smvExit = { done: true, errors: errors, backEdgeSides: backEdgeSides };
-
-    statusEl.textContent = consistent && errors.length === 0 ? "done — clean" : "done — see report";
-    outEl.textContent =
-      "backEdgeSides: " + JSON.stringify(backEdgeSides) + "\n" +
-      "consistent side: " + consistent + "\n" +
-      "errors: " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
+    g.finish("m0-exit");   // hand-driven story: it has no last storyboard step to reach
   }
 
   runBtn.addEventListener("click", runExit);

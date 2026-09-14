@@ -11,7 +11,7 @@
 // In Mode B there is nothing to compile — see createLiveTransport below.
 
 import { compileRun } from "./run.js";
-import { replayLive, liveBoundaries } from "./run-live.js";
+import { replayLive, liveBoundaries, liveFedTargets } from "./run-live.js";
 import { emitter } from "./events.js";
 
 function deferred() {
@@ -19,6 +19,9 @@ function deferred() {
   const promise = new Promise((r) => { resolve = r; });
   return { promise, resolve };
 }
+
+/** The live log's vocabulary, for re-emitting a seeded log (reset({ replay: true })). */
+const LIVE_TYPES = new Set(["start", "finish", "fail", "spawn"]);
 
 /** Latest timestamp an event log reaches (0 for an empty one). */
 function logFloor(log) {
@@ -77,8 +80,16 @@ function createSimTransport(internals, opts = {}) {
   if (Number.isFinite(opts.hopMs)) base.hopMs = opts.hopMs;
   if (typeof opts.dwell === "function") base.dwell = opts.dwell;
   let rates = (opts.rates || []).map((r) => ({ ...r }));
+  /** Extra seeds minted by inject() — a compile input like `rates`, so they survive every
+   *  recompile and round-trip through options()/reset() with the rest of them (F3). */
+  let entries = (opts.entries || []).map((e) => ({ id: e.id, at: +e.at || 0 }));
+  /** F7 — a bare speed() is PLAYBACK, not a compile input: it scales how fast the ticker
+   *  walks the declared timeline, exactly as it does in live mode, and leaves `duration`
+   *  (what a page reports as "this pipeline takes 3h 20m") alone. Only a `{branch}` speed
+   *  is a rate event, because only that one really re-times the work. */
+  let viewSpeed = Number.isFinite(opts.playbackSpeed) && opts.playbackSpeed >= 0 ? opts.playbackSpeed : 1;
 
-  let sim = compileRun(store.spec(), { ...base, rates });
+  let sim = compileRun(store.spec(), { ...base, rates, entries });
   let t = 0;              // virtual pipeline time, ms
   let cursor = 0;         // # of events at/below t already re-emitted
   let playing = false;
@@ -95,11 +106,38 @@ function createSimTransport(internals, opts = {}) {
   }
 
   function recompile() {
-    sim = compileRun(store.spec(), { ...base, rates });
+    const prev = sim;
+    sim = compileRun(store.spec(), { ...base, rates, entries });
     dirty = false;
     if (t > sim.duration) t = sim.duration;
     syncCursor();
+    if (prev && t > 0) replayBacklog(prev);
     bus.emit("recompile", { time: t, duration: sim.duration });
+  }
+
+  /** F4 — a node whose compiled events are ALREADY behind the cursor (added mid-run, or
+   *  injected at a past instant) would otherwise never light up: forward playback only
+   *  re-emits what it crosses, and the scrub-back path is deliberately silent (D8). So
+   *  after a recompile, replay the backlog for nodes the previous schedule had nothing for
+   *  at or below `t` — new to the story, so nothing can be firing twice. */
+  function replayBacklog(prev) {
+    // Counted per (node, event type), not per node: an inject() into a node that has
+    // ALREADY been visited adds a second `enter`/`start` at the cursor, and a set keyed by
+    // node id would swallow exactly that — the saga token-refresh case F3 exists for.
+    // Only the SURPLUS over what the previous schedule already told the page is replayed.
+    const seen = new Map();
+    const key = (ev) => ev.nodeId + "\u0000" + ev.type;
+    for (const ev of prev.events) {
+      if (ev.t > t) break;
+      if (ev.nodeId != null) seen.set(key(ev), (seen.get(key(ev)) || 0) + 1);
+    }
+    for (const ev of sim.events) {
+      if (ev.t > t) break;
+      if (ev.nodeId == null) continue;
+      const c = seen.get(key(ev)) || 0;
+      if (c > 0) seen.set(key(ev), c - 1);
+      else bus.emit(ev.type, ev);
+    }
   }
 
   /** Lazy: a graph mutation only costs a recompile when someone actually samples. */
@@ -147,7 +185,7 @@ function createSimTransport(internals, opts = {}) {
     if (!playing) return;
     const dt = now - lastNow;
     lastNow = now;
-    advanceTo(t + (dt > 0 ? dt : 0));
+    advanceTo(t + (dt > 0 ? dt * viewSpeed : 0));
     bus.emit("tick", { time: t, duration: current().duration });
     if (satisfied()) endPlay();
   }
@@ -184,11 +222,30 @@ function createSimTransport(internals, opts = {}) {
 
   function speed(factor, o = {}) {
     if (!(Number.isFinite(factor) && factor >= 0)) return t;
-    rates.push({ t, scope: o && o.branch != null ? o.branch : "*", factor });
-    recompile();
-    bus.emit("speed", { factor, branch: (o && o.branch) ?? null, time: t });
+    const branch = o && o.branch != null && o.branch !== "*" ? o.branch : null;
+    if (branch == null) viewSpeed = factor;      // playback only — the schedule is untouched
+    else { rates.push({ t, scope: branch, factor }); recompile(); }
+    bus.emit("speed", { factor, branch, time: t });
     if (playing && satisfied()) endPlay();
     return t;
+  }
+
+  /** F3 — mint a token at `nodeId` on the compiled clock. `at` defaults to now; the
+   *  schedule is recompiled (and extended) around it, and the seed is remembered, so it
+   *  survives later recompiles exactly as a `rates` entry does. A seed in the past replays
+   *  its backlog through replayBacklog above, so the node lights up rather than appearing
+   *  already finished. */
+  function inject(nodeId, o = {}) {
+    if (destroyed) return t;
+    if (!store.hasNode(nodeId)) {
+      console.warn(`[smv:run] inject("${nodeId}") — no node "${nodeId}" in the current graph; ` +
+        `the seed is kept and takes effect if "${nodeId}" is added later.`);
+    }
+    const at = Math.max(0, Number.isFinite(+(o && o.at)) ? +o.at : t);
+    entries.push({ id: nodeId, at });
+    recompile();
+    bus.emit("inject", { nodeId, at, time: t });
+    return at;
   }
 
   /** step() = next boundary across all tokens; step({token}) = that branch's next boundary.
@@ -219,6 +276,8 @@ function createSimTransport(internals, opts = {}) {
     if (Number.isFinite(o.hopMs)) base.hopMs = o.hopMs;
     if (typeof o.dwell === "function") base.dwell = o.dwell;
     rates = (o.rates || []).map((r) => ({ ...r }));
+    entries = (o.entries || []).map((e) => ({ id: e.id, at: +e.at || 0 }));
+    viewSpeed = Number.isFinite(o.playbackSpeed) && o.playbackSpeed >= 0 ? o.playbackSpeed : 1;
     t = 0;
     recompile();
     advanceTo(time, false); // silent: a restore is a state jump, not a re-run (D8)
@@ -231,8 +290,12 @@ function createSimTransport(internals, opts = {}) {
    *  being something to wait for (see satisfied()). Falls back to the whole run. */
   function timeOf(nodeId) {
     const s = current();
+    // `terminal === false` marks a non-terminal retry attempt (F1): it is NOT the instant
+    // the node stops being something to wait for — satisfied() reads status, which only
+    // turns 'failed' on the terminal attempt — so a slice sized from here must skip it.
     for (const ev of s.events) {
-      if ((ev.type === "finish" || ev.type === "fail") && ev.nodeId === nodeId) return ev.t;
+      if (ev.nodeId !== nodeId || ev.terminal === false) continue;
+      if (ev.type === "finish" || ev.type === "fail") return ev.t;
     }
     return s.duration;
   }
@@ -289,7 +352,7 @@ function createSimTransport(internals, opts = {}) {
   }
 
   return {
-    play, pause, seek, speed, step, timeOf, reset,
+    play, pause, seek, speed, step, timeOf, reset, inject,
     /** Force a recompile against the live spec (used after a storyboard restore). */
     reload() { dirty = true; return current().duration; },
     get playing() { return playing; },
@@ -298,9 +361,22 @@ function createSimTransport(internals, opts = {}) {
     get promise() { return pending ? pending.promise : Promise.resolve({ canceled: false }); },
     time: () => t,
     state: () => current().stateAt(t),
-    sim: () => current(),
+    /** `declared` is the compiled timeline's own length (= `duration`, unmoved by
+     *  playback); `playback` is how long that takes on the wall clock at the current bare
+     *  speed() multiplier — Infinity at speed 0, which is a freeze (F7). */
+    sim: () => {
+      const s = current();
+      s.declared = s.duration;
+      s.playback = viewSpeed > 0 ? s.duration / viewSpeed : Infinity;
+      return s;
+    },
+    /** The playback multiplier a bare speed() set (1 = real declared time). */
+    playbackSpeed: () => viewSpeed,
     /** The live compile inputs, for a storyboard snapshot's `runOpts` (G2). */
-    options: () => ({ ...base, rates: rates.map((r) => ({ ...r })) }),
+    options: () => ({
+      ...base, rates: rates.map((r) => ({ ...r })),
+      entries: entries.map((e) => ({ ...e })), playbackSpeed: viewSpeed,
+    }),
     on: (type, fn) => bus.on(type, fn),
     off: (type, fn) => bus.off(type, fn),
     destroy() {
@@ -341,6 +417,14 @@ function createLiveTransport(internals, opts = {}) {
   const bus = emitter();
 
   const hopMs = Number.isFinite(opts.hopMs) && opts.hopMs >= 0 ? opts.hopMs : undefined;
+  /** F14 — the shortest crossing a hop may be squashed to when a start() claims it while
+   *  it is still in the air. Trace timestamps make the parent's dispatch instant the
+   *  child's start instant, which otherwise teleports the token between activations. */
+  const minHopMs = Number.isFinite(opts.minHopMs) && opts.minHopMs > 0 ? opts.minHopMs : undefined;
+  /** F11 — whether a bare start() may mint a token where nothing is waiting. Default true
+   *  (the historical behaviour, and how a root seeds itself); false makes the warned-about
+   *  phantom start a no-op instead, and `start(id, { spawn: true })` opts back in per call. */
+  const spawnOnStart = opts.spawnOnStart !== false;
   /** Edge id -> the live instant it entered the run. The log is HISTORY (D4: "time-travel
    *  into history"), so a finish written before an edge existed must not be re-resolved
    *  over it — without this, adding an edge retroactively fans a token out of a node that
@@ -348,6 +432,7 @@ function createLiveTransport(internals, opts = {}) {
   const edgeBornAt = new Map();
   const liveOpts = () => {
     const o = hopMs == null ? {} : { hopMs };
+    if (minHopMs != null) o.minHopMs = minHopMs;
     if (edgeBornAt.size) o.bornAt = edgeBornAt;
     return o;
   };
@@ -357,8 +442,12 @@ function createLiveTransport(internals, opts = {}) {
   /** The frontier is how far this run's history reaches: real elapsed ms since creation,
    *  floored by any log it was seeded with (`opts.log`/`reset`) — otherwise seeded events
    *  are unreachable, since `t` is clamped to the frontier and nothing past 0 could be
-   *  sampled. With no seed this is exactly the pinned "starts at 0". */
-  let frontier = logFloor(log);
+   *  sampled — and by `opts.now`, an explicit epoch (F12) for a run resuming a session that
+   *  has been going for a while: without it every later `{ at }` stamped from a server clock
+   *  is clamped back onto the seeded log's span. With neither this is the pinned "starts at 0".
+   */
+  const epochOf = (o) => Math.max(logFloor(o && o.log), Number.isFinite(+(o && o.now)) ? Math.max(0, +o.now) : 0);
+  let frontier = epochOf(opts);
   let t = frontier;
   let following = true;
   let playing = false;
@@ -386,14 +475,61 @@ function createLiveTransport(internals, opts = {}) {
   // comparison per frame instead of a full replay.
   const revOf = () => (typeof store.rev === "number" ? store.rev : NaN); // NaN => never cache
   let cache = null;
-  function stateAt(tt) {
+  /** The memoized replay itself. Internal diagnostics read it directly; every public
+   *  caller goes through stateAt(), which hands out a private copy (consumers write into
+   *  what they get). */
+  function stateRaw(tt) {
     const rev = revOf();
-    if (cache && cache.t === tt && cache.rev === rev && cache.logRev === logRev) return cloneState(cache.state);
+    if (cache && cache.t === tt && cache.rev === rev && cache.logRev === logRev) return cache.state;
     const st = replayLive(store.spec(), log, tt, liveOpts());
     cache = { t: tt, rev, logRev, state: st };
-    return cloneState(st);
+    return st;
   }
+  function stateAt(tt) { return cloneState(stateRaw(tt)); }
   const touchLog = () => { logRev++; };
+
+  // ---- cheap arrival bookkeeping (F11's guard) ---------------------------------------
+  // The phantom-start guard needs one question answered — "could anything be waiting on
+  // this node?" — and answering it from a full replay per start() doubled the cost of the
+  // live engine's hot path (finish(A); start(B); … at stream rates). `feed` tracks, per
+  // node, how many units of work have plausibly been handed to it (an upstream finish, a
+  // spawn) and not yet consumed (a start/finish/fail on it). It is a conservative filter,
+  // never a verdict: a positive count only SKIPS the exact check, so the guard can never
+  // warn about a node something really did feed. Zero falls through to the real replay.
+  const feed = new Map();
+  const bump = (id, d) => { const v = (feed.get(id) || 0) + d; if (v > 0) feed.set(id, v); else feed.delete(id); };
+  /** Fold ONE log entry into the counter: a start consumes one, a finish/fail drains the
+   *  node (and a finish hands one to each non-loop successor), a spawn injects n. */
+  function noteLog(e) {
+    if (!e || e.id == null) return;
+    if (e.type === "start") bump(e.id, -1);
+    else if (e.type === "spawn") { if (Number.isFinite(e.n) && e.n > 0) bump(e.id, Math.floor(e.n)); }
+    else if (e.type === "finish" || e.type === "fail") {
+      feed.delete(e.id);
+      if (e.type === "finish") {
+        for (const x of store.edges.values()) if (!x.loop && x.source === e.id && x.target !== e.id) bump(x.target, 1);
+      }
+    }
+  }
+  const reseedFeed = () => { feed.clear(); for (const e of log) noteLog(e); };
+  reseedFeed();
+
+  /** Non-root membership, cached against the store revision: the scan is O(V+E) and
+   *  start() is called once per streamed event. It has to be the ENGINE's notion of "fed
+   *  by something" (liveFedTargets), not merely "has a non-loop in-edge": replayLive also
+   *  drops the back edges an untagged cycle is broken at, so a graph drawn as a plain
+   *  feedback pair does have a root there. Deciding it locally called every node a
+   *  non-root, which warned on the legitimate seeding start() — and under
+   *  `spawnOnStart: false` discarded it, leaving the run with no way to begin at all. */
+  let fedSet = null, fedRev = NaN;
+  function isRoot(id) {
+    const rev = revOf();
+    if (!fedSet || !Object.is(rev, fedRev)) {
+      fedSet = liveFedTargets([...store.nodes.values()], [...store.edges.values()]);
+      fedRev = rev;
+    }
+    return !fedSet.has(id);
+  }
 
   /** `until` is a node's status, not a timestamp — and in live mode `t` is glued to the
    *  frontier by default, so consulting the frontier FIRST made every `play({until})` from
@@ -501,30 +637,69 @@ function createLiveTransport(internals, opts = {}) {
     console.warn(`run-transport: ${fn}("${id}") — non-numeric n (${JSON.stringify(n)}); ignored.`);
   }
 
+  /** Is any token in `st` on a wire pointing at `id`? */
+  function crossingTo(st, id) {
+    for (const tk of st.tokens) {
+      if (tk.at.kind !== "edge") continue;
+      const e = store.edge(tk.at.id);
+      if (e && e.target === id) return true;
+    }
+    return false;
+  }
+
+  /** F11 — would this start() fabricate a token? True only when the node is a non-root with
+   *  nothing waiting on it, nothing crossing towards it, and no finished attempt to retry:
+   *  a root seeding itself, a queued arrival being picked up, a hop being claimed mid-air,
+   *  and a restart of a done/failed node (the live loop iteration) are all legitimate. */
+  function phantomStart(id, at) {
+    if (!store.hasNode(id) || (feed.get(id) || 0) > 0 || isRoot(id)) return false;
+    const st = stateRaw(at);
+    const n = st.nodes[id];
+    if (!n || n.waiting > 0) return false;
+    if (n.status === "done" || n.status === "failed") return false;
+    return !crossingTo(st, id);
+  }
+
   function start(id, o) {
     if (destroyed) return t;
     if (!store.hasNode(id)) warnUnknownNode("start", id);
     const at = stampAt(o);
-    log.push({ t: at, type: "start", id });
+    if (!(o && o.spawn) && phantomStart(id, at)) {
+      console.warn(`[smv:live] start("${id}") — nothing is waiting on "${id}" and it is not a root, ` +
+        `so this mints a token out of nothing. Pass { spawn: true } if that is what you mean` +
+        (spawnOnStart ? "." : "; ignored."));
+      if (!spawnOnStart) return at;
+    }
+    const sv = { t: at, type: "start", id };
+    log.push(sv); noteLog(sv);
     touchLog();
     bus.emit("start", { id, t: at });
     return at;
+  }
+
+  /** Is `id` unoccupied at `at` — i.e. would a finish()/fail() there be a no-op? With
+   *  `minHopMs` a start() that claimed a hop is booked on the node but has not landed yet,
+   *  so it is deliberately absent from `occupancy`; the terminal event that follows it is
+   *  real (the engine defers it to the landing), not a no-op, so a crossing towards `id`
+   *  counts as occupied here. */
+  function unoccupied(id, at) {
+    const st = stateRaw(at);
+    const n = st.nodes[id];
+    if (!n || n.occupancy > 0) return false;
+    return !(minHopMs != null && crossingTo(st, id));
   }
 
   function finishNode(id, o) {
     if (destroyed) return t;
     const at = stampAt(o);
     if (!store.hasNode(id)) warnUnknownNode("finish", id);
-    else {
-      const n = stateAt(at).nodes[id];
-      if (n && n.occupancy === 0) {
-        console.warn(`run-transport: finish("${id}") — "${id}" has zero current occupancy; this finish() is a no-op.`);
-      }
+    else if (unoccupied(id, at)) {
+      console.warn(`run-transport: finish("${id}") — "${id}" has zero current occupancy; this finish() is a no-op.`);
     }
     if (o && o.n !== undefined && !Number.isFinite(o.n)) warnBadN("finish", id, o.n);
     const ev = { t: at, type: "finish", id };
     if (o && Number.isFinite(o.n)) ev.n = o.n;
-    log.push(ev);
+    log.push(ev); noteLog(ev);
     touchLog();
     bus.emit("finish", { id, t: at, n: ev.n });
     return at;
@@ -539,15 +714,12 @@ function createLiveTransport(internals, opts = {}) {
     if (destroyed) return t;
     const at = stampAt(o);
     if (!store.hasNode(id)) warnUnknownNode("fail", id);
-    else {
-      const n = stateAt(at).nodes[id];
-      if (n && n.occupancy === 0) {
-        console.warn(`run-transport: fail("${id}") — "${id}" has zero current occupancy; this fail() is a no-op.`);
-      }
+    else if (unoccupied(id, at)) {
+      console.warn(`run-transport: fail("${id}") — "${id}" has zero current occupancy; this fail() is a no-op.`);
     }
     const ev = { t: at, type: "fail", id };
     if (o && typeof o.reason === "string" && o.reason) ev.reason = o.reason;
-    log.push(ev);
+    log.push(ev); noteLog(ev);
     touchLog();
     bus.emit("fail", { id, t: at, reason: ev.reason });
     return at;
@@ -558,7 +730,8 @@ function createLiveTransport(internals, opts = {}) {
     if (!store.hasNode(id)) warnUnknownNode("spawn", id);
     if (!Number.isFinite(n)) warnBadN("spawn", id, n);
     const at = stampAt(o);
-    log.push({ t: at, type: "spawn", id, n });
+    const sp = { t: at, type: "spawn", id, n };
+    log.push(sp); noteLog(sp);
     touchLog();
     bus.emit("spawn", { id, t: at, n });
     return at;
@@ -584,12 +757,26 @@ function createLiveTransport(internals, opts = {}) {
     if (p) p.resolve({ canceled: true });
     log = (o.log || []).map((e) => ({ ...e }));
     touchLog();
+    reseedFeed();
     edgeBornAt.clear();
-    frontier = logFloor(log);
+    frontier = epochOf(o);
     lastNow = ticker.now();
     t = Math.max(0, Math.min(frontier, Number.isFinite(+time) ? +time : 0));
     following = t >= frontier;
     bus.emit("seek", { time: t, duration: frontier });
+    // F12 — `replay: true` pushes the seeded entries back through this handle's emitter, so
+    // UI beats that hang off run.on('fail'/'start'/…) rebuild from a restored log instead of
+    // only from the live entries that follow it. Marked `replay: true` so a listener can
+    // tell history from news.
+    if (o.replay) {
+      for (const e of log) {
+        if (!e || !LIVE_TYPES.has(e.type)) continue;
+        const ev = { id: e.id, t: e.t, replay: true };
+        if (e.n !== undefined) ev.n = e.n;
+        if (e.reason !== undefined) ev.reason = e.reason;
+        bus.emit(e.type, ev);
+      }
+    }
     return t;
   }
 
@@ -638,10 +825,20 @@ function createLiveTransport(internals, opts = {}) {
     now: () => frontier,
     log: () => log.map((e) => ({ ...e })),
     state: () => stateAt(t),
-    sim: () => ({ duration: frontier, events: log.map((e) => ({ ...e })), stateAt }),
+    sim: () => ({
+      duration: frontier, declared: frontier, playback: viewSpeed > 0 ? frontier / viewSpeed : Infinity,
+      events: log.map((e) => ({ ...e })), stateAt,
+    }),
+    /** The playback multiplier speed() set — the same reading as Mode A's (F7). */
+    playbackSpeed: () => viewSpeed,
     /** Carries the LOG, not just the compile inputs: a storyboard snapshot/restore pair
      *  (`reset(options(), time)`) would otherwise silently delete a live run's history. */
-    options: () => ({ hopMs, mode: "live", log: log.map((e) => ({ ...e })) }),
+    options: () => {
+      const o = { hopMs, mode: "live", now: frontier, log: log.map((e) => ({ ...e })) };
+      if (minHopMs != null) o.minHopMs = minHopMs;
+      if (!spawnOnStart) o.spawnOnStart = false;
+      return o;
+    },
     on: (type, fn) => bus.on(type, fn),
     off: (type, fn) => bus.off(type, fn),
     destroy() {

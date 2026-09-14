@@ -102,12 +102,14 @@
   <h1>Interactive spec editor <small>— edit the JSON, watch the difference animate</small></h1>
   <p class="lede">
     The left pane is the graph's own <code>spec</code>, as JSON, plus a storyboard script.
-    <b>Apply</b> never remounts: it diffs what you typed against <code>g.spec()</code> and commits
-    only the difference through one <code>g.batch()</code> of <code>addNode</code> /
-    <code>removeNode</code> / <code>addEdge</code> / <code>removeEdge</code> / <code>update</code>,
-    so every id you kept keeps its DOM node and tweens into place. Misuse — a dangling edge, a
-    <code>loop:true</code> edge with no <code>maxIterations</code> — throws a
-    <code>GraphError</code>, caught and shown with its code.
+    <b>Apply</b> never remounts: it diffs what you typed against <code>g.spec()</code> into one
+    list of <code>addNode</code> / <code>removeNode</code> / <code>addEdge</code> /
+    <code>removeEdge</code> / <code>update</code> ops, dry-runs that whole list through
+    <code>g.validate(ops)</code>, and only then replays the very same list inside one
+    <code>g.batch()</code> — so every id you kept keeps its DOM node and tweens into place.
+    Misuse — a dangling edge, a <code>loop:true</code> edge with no <code>maxIterations</code> —
+    comes back from <code>validate()</code> as a list of <code>GraphError</code>s with their
+    codes, and nothing is committed at all.
   </p>
 </header>
 
@@ -157,19 +159,26 @@
   <li>Load <b>fan-out / join</b> over <b>pipeline</b>: the whole graph is replaced, but the
     commit is one animated batch, not a remount — the transport bar never resets.</li>
   <li>Every kept id keeps its DOM node: change one <code>data.duration</code> and the chip
-    odometers in place via <code>update()</code>. <code>collapsed</code> is view state, not spec
-    state, so a changed flag is dispatched to <code>g.expand()</code>/<code>g.collapse()</code>.</li>
+    odometers in place via <code>update()</code>. Delete a key from a node's <code>data</code>
+    and the diff sends <code>data: { key: undefined }</code>, which unsets it; flip
+    <code>collapsed</code> and the same <code>update()</code> routes itself to
+    <code>g.expand()</code>/<code>g.collapse()</code>.</li>
   <li><b>Run</b> plays <code>g.run()</code> — Mode A, compiled from the declared
     <code>data.duration</code>s (<code>45m</code>, <code>90s</code>, …).</li>
   <li>The fan-out example carries <code>data.fail</code> on <code>canary.ap</code> and a
     <code>join:{count:2}</code> quorum on <em>Promote</em>: one leg goes red, two green legs
     still fire the join.</li>
-  <li>The loop example's dashed arc is <code>loop:true, maxIterations:3</code> — watch the
-    iteration badge tick before the token leaves for <em>Announce</em>.</li>
+  <li>The loop example's dashed arc is <code>loop:true, onFail:true, maxIterations:3</code>:
+    <em>Health check</em> declares <code>data.fail</code> with <code>recover:true</code>, so the
+    failure takes the arc back to <em>Deploy</em>, the iteration badge ticks 1/3 → 3/3, and the
+    fourth attempt passes. Its pill edge label carries the whole retry policy, untruncated.</li>
+  <li>Click any node (or focus it and press Enter) — <code>g.on('nodeclick')</code> selects that
+    record's line in the JSON above and focuses the node in the graph.</li>
   <li>Delete a node an edge still points at, or drop <code>maxIterations</code> from the loop
-    edge: Apply shows the <code>GraphError</code> code (<code>dangling</code>,
-    <code>unbounded-loop</code>) instead of throwing into the console. <b>Play storyboard</b>
-    validates the script at build time the same way (<code>storyboard-op</code>, by step index).</li>
+    edge: <code>g.validate()</code> reports every <code>GraphError</code> it would have thrown
+    (<code>dangling</code>, <code>unbounded-loop</code>) against a throwaway clone, so the whole
+    patch is refused with the graph untouched. <b>Play storyboard</b> validates the script at
+    build time the same way (<code>storyboard-op</code>, by step index).</li>
 </ul>
 
 </main>
@@ -283,26 +292,28 @@
         nodes: [
           { id: "pack", label: "Package release", data: { duration: "30s" } },
           { id: "deploy", label: "Deploy to staging", data: { duration: "25s" } },
-          { id: "health", label: "Health check", data: { duration: "10s" } },
+          { id: "health", label: "Health check",
+            data: { duration: "10s", fail: { reason: "readiness probe 503", recover: true } } },
           { id: "announce", label: "Announce release", data: { duration: "5s" } }
         ],
         edges: [
           { id: "c1", source: "pack", target: "deploy" },
           { id: "c2", source: "deploy", target: "health" },
           { id: "c3", source: "health", target: "announce" },
-          { id: "retry", source: "health", target: "deploy", loop: true, maxIterations: 3, label: "retry" }
+          { id: "retry", source: "health", target: "deploy", loop: true, onFail: true, maxIterations: 3,
+            label: { text: "on fail · redeploy, backoff 200ms → 800ms", place: "start", pill: true, maxW: 240 } }
         ]
       },
       steps: [
         { label: "retry loop" },
         { op: "run.seek", ms: 0 },
         { op: "camera", args: [{ fit: true, pad: 34, dur: 600 }] },
-        { op: "caption", args: ["The dashed arc is loop:true, maxIterations:3 — bounded, never an open cycle.", { place: "bottom" }] },
+        { op: "caption", args: ["The dashed arc is loop:true, onFail:true, maxIterations:3 — a bounded retry budget.", { place: "bottom" }] },
         { op: "highlight", args: [{ nodes: ["deploy", "health"], edges: ["retry"], variant: "focus", dim: true }] },
         { op: "wait", ms: 1100 },
         { label: "run" },
         { op: "clearHighlight" },
-        { op: "caption", args: ["The iteration badge ticks 1/3 → 3/3 before the token leaves for Announce.", { place: "bottom" }] },
+        { op: "caption", args: ["Health check fails, the arc replays Deploy, the badge ticks 1/3 → 3/3 — then recover:true lets the fourth attempt pass.", { place: "bottom" }] },
         { op: "run.play" },
         { label: "done" },
         { op: "caption", args: [null] },
@@ -382,7 +393,8 @@
     };
     add("span", "code", chipText);
     add("span", null, head);
-    if (body) add("p", null, body);
+    if (Array.isArray(body)) body.forEach(function (t) { add("p", null, t); });
+    else if (body) add("p", null, body);
     if (hint) add("p", "hint", hint);
     errEl.setAttribute("data-show", "");
     errEl.setAttribute("data-kind", kind);
@@ -397,7 +409,7 @@
       isGraph ? "GraphError thrown by " + where : "not a GraphError — " + where,
       String((err && err.message) || err).replace(/^\[smv:[^\]]+\]\s*/, ""),
       isGraph
-        ? "Thrown synchronously, before this op touched the store — but g.batch() is not transactional, so ops committed earlier in the same Apply are still on screen."
+        ? "g.validate() passed this op against the clone but the real store threw — and g.batch() is not transactional, so ops committed earlier in the same Apply are still on screen."
         : "Fix the JSON and press Apply again."
     );
     setPhase("error: " + code, true);
@@ -405,6 +417,23 @@
   }
 
   function showOk(title, detail) { showPanel("ok", "recovered", title, null, detail); }
+
+  /** g.validate() collects every GraphError the op list would have thrown instead of
+   *  stopping at the first, so the panel can list them all and the patch is simply refused. */
+  function showErrors(errs, opCount) {
+    var first = errs[0] || {};
+    showPanel(
+      "bad",
+      "[smv:" + (first.code || "error") + "]",
+      "g.validate() refused the patch — " + errs.length + " of " + opCount + " ops would throw",
+      errs.map(function (e) {
+        return e.code + ": " + String(e.message || e).replace(/^\[smv:[^\]]+\]\s*/, "");
+      }),
+      "Every op ran against a throwaway clone of the store, so nothing was committed: the graph on the right is exactly as it was."
+    );
+    setPhase("refused: " + (first.code || "error"), true);
+    return first.code;
+  }
 
   // ---------------------------------------------------------------------------
   // The diff: old spec (g.spec()/g.nodes()/g.edges()) vs. the parsed textarea.
@@ -416,19 +445,32 @@
     return m;
   }
 
+  /** The update() patch for one surviving record. `data` is merged by the store, so a key
+   *  the editor deleted is sent as `undefined`, which unsets it. */
   function patchOf(oldItem, newItem) {
-    var patch = {}, keys = [], k;
+    var patch = {}, keys = [], k, i;
     for (k in newItem) {
       if (k === "id") continue;
       if (stable(newItem[k]) !== stable(oldItem[k])) { patch[k] = newItem[k]; keys.push(k); }
     }
-    return { patch: patch, keys: keys };
+    var od = oldItem.data, nd = newItem.data, unset = [];
+    if (od && typeof od === "object") {
+      for (k in od) if (!nd || !(k in nd)) unset.push(k);
+    }
+    if (unset.length) {
+      var d = {};
+      for (k in (nd || {})) d[k] = nd[k];
+      for (i = 0; i < unset.length; i++) d[unset[i]] = undefined;
+      patch.data = d;
+      if (keys.indexOf("data") === -1) keys.push("data");
+    }
+    return { patch: patch, keys: keys, unset: unset };
   }
 
   function computeDiff(oldSpec, newSpec) {
     var oN = byId(oldSpec.nodes), nN = byId(newSpec.nodes);
     var oE = byId(oldSpec.edges), nE = byId(newSpec.edges);
-    var d = { addNodes: [], delNodes: [], addEdges: [], delEdges: [], updates: [], view: [], lines: [], count: 0 };
+    var d = { addNodes: [], delNodes: [], addEdges: [], delEdges: [], updates: [], lines: [], count: 0 };
     var id, i;
 
     // --- removals. removeNode() cascades its descendants, so a doomed child must not be
@@ -473,16 +515,13 @@
       if (!on) continue;
       var r = patchOf(on, nn);
       if (!r.keys.length) continue;
-      // `collapsed` is folded into the view state once, at the node's first sighting, so
-      // patching the spec field alone would never open or close the box.
-      if (r.keys.indexOf("collapsed") !== -1) d.view.push({ id: nn.id, collapsed: !!nn.collapsed });
-      d.updates.push({ kind: "node", id: nn.id, patch: r.patch, keys: r.keys });
+      d.updates.push({ kind: "node", id: nn.id, patch: r.patch, keys: r.keys, unset: r.unset });
     }
     for (i = 0; i < newSpec.edges.length; i++) {
       var ne = newSpec.edges[i], oe = oE[ne.id];
       if (!oe) continue;
       var re = patchOf(oe, ne);
-      if (re.keys.length) d.updates.push({ kind: "edge", id: ne.id, patch: re.patch, keys: re.keys });
+      if (re.keys.length) d.updates.push({ kind: "edge", id: ne.id, patch: re.patch, keys: re.keys, unset: re.unset });
     }
 
     d.count = d.addNodes.length + d.delNodes.length + d.addEdges.length + d.delEdges.length + d.updates.length;
@@ -494,6 +533,18 @@
       d.updates.length ? "~" + d.updates.length + " changed" : ""
     ].filter(Boolean).join(" · ") || "no changes";
     return d;
+  }
+
+  /** The diff as one list of storyboard-shaped ops — handed to g.validate() first, then
+   *  replayed verbatim inside one g.batch(). */
+  function opsOf(d) {
+    var ops = [], i;
+    for (i = 0; i < d.delEdges.length; i++) ops.push({ op: "removeEdge", args: [d.delEdges[i]] });
+    for (i = 0; i < d.delNodes.length; i++) ops.push({ op: "removeNode", args: [d.delNodes[i]] });
+    for (i = 0; i < d.addNodes.length; i++) ops.push({ op: "addNode", args: [d.addNodes[i]] });
+    for (i = 0; i < d.addEdges.length; i++) ops.push({ op: "addEdge", args: [d.addEdges[i]] });
+    for (i = 0; i < d.updates.length; i++) ops.push({ op: "update", args: [d.updates[i].id, d.updates[i].patch] });
+    return ops;
   }
 
   /** One rendered diff row: a coloured marker, the op it will dispatch, and an annotation. */
@@ -516,7 +567,7 @@
   function renderDiff(d) {
     diffEl.textContent = "";
     diffHead.textContent = d.count
-      ? d.summary + "  —  one g.batch(), one relayout"
+      ? d.summary + "  —  validated, then one g.batch(), one relayout"
       : "no difference between the editor and g.spec()";
     if (!d.count) {
       var none = document.createElement("span");
@@ -533,9 +584,11 @@
     d.addEdges.forEach(function (e) {
       line("add", "+", "addEdge     " + e.id, e.source + " → " + e.target + (e.loop ? "  (loop)" : ""));
     });
-    d.updates.forEach(function (u) { line("chg", "~", "update      " + u.id, "{" + u.keys.join(", ") + "}"); });
-    d.view.forEach(function (v) {
-      line("chg", "~", (v.collapsed ? "collapse    " : "expand      ") + v.id, "view state, not spec state");
+    d.updates.forEach(function (u) {
+      var note = "{" + u.keys.join(", ") + "}";
+      if (u.unset && u.unset.length) note += "  unsets " + u.unset.join(", ");
+      if (u.keys.indexOf("collapsed") !== -1) note += "  collapsed → expand()/collapse()";
+      line("chg", "~", "update      " + u.id, note);
     });
   }
 
@@ -553,6 +606,7 @@
       preset: "pipeline"
     });
     g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from the start
+    window.smv = g;  // the documented handle: g.finished resolves when this page calls g.finish()
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     setPhase("mount failed", true);
@@ -561,6 +615,27 @@
   }
 
   var fmtMs = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
+
+  /** A clean tap on a node — and Enter/Space on a focused one — publishes 'nodeclick', so the
+   *  editor selects that record's line without resolving hit targets of its own. */
+  function selectRecord(id, isEdge) {
+    var text = specEl.value, at = text.indexOf('"id": "' + id + '"');
+    if (at < 0) {
+      setPhase("selected " + id + " — not a record in the editor", true);
+    } else {
+      var start = text.lastIndexOf("\n", at) + 1;
+      var end = text.indexOf("\n", at);
+      specEl.focus();
+      specEl.setSelectionRange(start, end < 0 ? text.length : end);
+      setPhase("selected " + id);
+    }
+    g.highlight(isEdge
+      ? { edges: [id], variant: "focus", dim: true }
+      : { nodes: [id], variant: "focus", dim: true });
+  }
+
+  g.on("nodeclick", function (ev) { selectRecord(ev.id, false); });
+  g.on("edgeclick", function (ev) { selectRecord(ev.id, true); });
 
   function refreshSize() {
     mSize.textContent = g.nodes().length + " nodes · " + g.edges().length + " edges";
@@ -616,20 +691,23 @@
     mDiff.textContent = d.summary;
     if (!d.count) { setPhase("no changes to apply"); return Promise.resolve(true); }
 
+    // Dry-run first: every op against a throwaway clone, every GraphError collected. A bad
+    // patch is refused whole, before the store has seen any of it.
+    var ops = opsOf(d);
+    var check = g.validate(ops);
+    if (!check.ok) {
+      diffHead.textContent = "refused — " + d.summary + ", nothing committed";
+      showErrors(check.errors, ops.length);
+      return Promise.resolve(false);
+    }
+
     applying = true;
     setPhase("applying " + d.summary + "…");
+    g.clearHighlight();
     var handle = null, thrown = null;
     try {
       handle = g.batch(function (gg) {
-        var i;
-        for (i = 0; i < d.delEdges.length; i++) gg.removeEdge(d.delEdges[i]);
-        for (i = 0; i < d.delNodes.length; i++) gg.removeNode(d.delNodes[i]);
-        for (i = 0; i < d.addNodes.length; i++) gg.addNode(d.addNodes[i]);
-        for (i = 0; i < d.addEdges.length; i++) gg.addEdge(d.addEdges[i]);
-        for (i = 0; i < d.updates.length; i++) gg.update(d.updates[i].id, d.updates[i].patch);
-        for (i = 0; i < d.view.length; i++) {
-          if (d.view[i].collapsed) gg.collapse(d.view[i].id); else gg.expand(d.view[i].id);
-        }
+        for (var i = 0; i < ops.length; i++) gg[ops[i].op].apply(gg, ops[i].args);
       });
     } catch (err) {
       thrown = err;
@@ -653,6 +731,7 @@
   /** Play the compiled Mode A run from the top; resolves when the schedule has played out. */
   function runAll() {
     var run = g.run();
+    g.clearHighlight();
     run.seek(0);
     setPhase("running…");
     return run.play().then(function (r) {
@@ -726,6 +805,16 @@
     await sleep(250);
     await runAll();
 
+    // 2b — fix ap-south by deleting data.fail. The diff sends `data: { fail: undefined }`,
+    // which unsets the key, so the same node reads green on the recompiled clock.
+    var fixed = JSON.parse(specEl.value);
+    fixed.nodes.forEach(function (n) { if (n.id === "canary.ap") delete n.data.fail; });
+    specEl.value = fmtSpec(fixed);
+    await apply();
+    var green = g.run();
+    green.seek(green.duration);
+    await sleep(500);
+
     // 3 — the loop example, then its storyboard.
     loadPreset(2);
     await sleep(200);
@@ -734,16 +823,16 @@
     await runAll();
     await playStory();
 
-    // 4 — one deliberate misuse to close on: a loop edge with no maxIterations. addEdge
-    // throws GraphError('unbounded-loop') before anything reaches the store.
+    // 4 — one deliberate misuse to close on: a loop edge with no maxIterations. validate()
+    // reports GraphError('unbounded-loop') from the clone, so the patch is refused whole.
     var broken = JSON.parse(specEl.value);
     broken.edges.push({ id: "rollback", source: "announce", target: "pack", loop: true });
     specEl.value = fmtSpec(broken);
     await apply();
     await sleep(600);
     loadPreset(2);
-    showOk("caught [smv:unbounded-loop] — nothing committed",
-      "addEdge validates before it writes, so the bad edge never reached the store: the graph is exactly as it was.");
+    showOk("g.validate() caught [smv:unbounded-loop] — the patch was refused",
+      "The op list was dry-run against a clone of the store, so the bad edge never reached the graph: it is exactly as it was.");
 
     // Park the run on its final frame so the closing view still carries the loop's
     // iteration badge and every node's terminal status.
@@ -752,6 +841,7 @@
 
     await sleep(300);
     setPhase(errors.length ? "done — with errors" : "done — three examples applied, run and narrated");
+    g.finish("demo");              // resolves window.smv.finished
     window.__smvExit = { done: true, errors: errors };
   }
 

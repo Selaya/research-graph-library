@@ -82,7 +82,9 @@
     <code>vpc</code> fans out to two subnets and a security group; <code>rds</code> and
     <code>eks-cluster</code> each wait on all three (an AND-join) before creating; the
     cluster then unblocks a node group and an IAM role, and both must finish before
-    <code>app-deployment</code>. That's the clean apply. Then a change request adds a
+    <code>app-deployment</code>. The node group's first create call comes back
+    <code>InsufficientInstanceCapacity</code> and the apply retries it — a declared
+    failure with a retry budget, riding its own <code>onFail</code> arc. Then a change request adds a
     <code>dns-record</code> depending on the deployment — and someone also wires the
     deployment back onto the record, a circular dependency Terraform would refuse to plan.
     The graph renders it anyway, as a back edge, calls it out, then the bad edge is
@@ -104,6 +106,7 @@
   <div class="tile"><i>apply clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
   <div class="tile"><i>resources created</i><span id="m-created">0/10</span></div>
   <div class="tile"><i>rds / eks-cluster join</i><span id="m-join">0/3 · 0/3</span></div>
+  <div class="tile"><i>eks-node-group attempts</i><span id="m-retry">—</span></div>
   <div class="tile"><i>graph state</i><span id="m-state">acyclic</span></div>
 </div>
 
@@ -115,6 +118,10 @@
   <li>Durations are real-world-shaped — <code>rds</code> 8 minutes, <code>eks-cluster</code>
     12 minutes, a subnet 20 seconds — compressed for playback but still visibly different
     rates.</li>
+  <li><code>eks-node-group</code> declares
+    <code>fail: { reason, retries: 1, recover: true }</code> and a self <code>onFail</code>
+    arc: attempt 1 goes red with the reason, the arc ticks an <b>iter 1/1</b> badge, and
+    attempt 2 succeeds — one declared failure, no second compile.</li>
   <li>Watch for the <b>dashed back edge</b> when the change request lands: <code>dns-record
     → app-deployment</code>, a <code>loop:true, maxIterations:1</code> edge that makes the
     dependency graph cyclic — a warn highlight and caption call it out.</li>
@@ -174,9 +181,16 @@
   ];
 
   var WAVE_COMPUTE = [
-    { op: "addNode", args: [{ id: "eks-node-group", label: "eks-node-group", data: { duration: "3m" } }] },
+    { op: "addNode", args: [{ id: "eks-node-group", label: "eks-node-group", data: {
+        duration: "3m",
+        // A declared failure with a retry budget: attempt 1 fails, the onFail arc below
+        // ticks the iteration badge, and the attempt that spends the last retry succeeds.
+        fail: { reason: "InsufficientInstanceCapacity", retries: 1, recover: true },
+      } }] },
     { op: "addNode", args: [{ id: "iam-role", label: "iam-role", join: "all", data: { duration: "10s" } }] },
     { op: "addEdge", args: [{ id: "e-eks-ng", source: "eks-cluster", target: "eks-node-group" }] },
+    { op: "addEdge", args: [{ id: "e-ng-retry", source: "eks-node-group", target: "eks-node-group",
+        loop: true, onFail: true, maxIterations: 1 }] },
     { op: "addEdge", args: [{ id: "e-eks-iam", source: "eks-cluster", target: "iam-role" }] },
     { op: "addEdge", args: [{ id: "e-rds-iam", source: "rds", target: "iam-role" }] },
   ];
@@ -186,6 +200,21 @@
     { op: "addEdge", args: [{ id: "e-ng-app", source: "eks-node-group", target: "app-deployment" }] },
     { op: "addEdge", args: [{ id: "e-iam-app", source: "iam-role", target: "app-deployment" }] },
   ];
+
+  // Pacing: a log curve over the graph's own declared durations (8m rds / 12m eks-cluster
+  // down to 5s dns-record) so the spread is visible without the pane taking literal
+  // minutes to play, and stays inside the auto-mode budget once combined with playbackSpeed.
+  var RUN_OPTS = {
+    hopMs: 180,
+    dwell: function (sec, ctx) {
+      if (sec == null) return 340;
+      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
+      return 240 + 1500 * f;
+    },
+    // Playback rate is a pure view multiplier, so the compiled totals the tiles report
+    // stay put; every compile the story makes (the replay `run` op) inherits it.
+    playbackSpeed: AUTO ? 3 : 1,
+  };
 
   var STEPS = [
     { label: "assemble" },
@@ -212,23 +241,17 @@
     { op: "wait", ms: 900 },
     { op: "caption", args: [null] },
     { label: "replay" },
+    // A fresh transport at t = 0 so the replayed apply — including dns-record now that the
+    // cycle is gone — runs from a clean schedule instead of a stale mid-flight one.
+    { op: "run", args: [RUN_OPTS] },
     { op: "run.play" },
     { label: "done" },
   ];
 
-  var APPLY_AT = 6, CYCLE_AT = 11, FIX_AT = 18, REPLAY_AT = 23;
-
-  // Pacing: a log curve over the graph's own declared durations (8m rds / 12m eks-cluster
-  // down to 5s dns-record) so the spread is visible without the pane taking literal
-  // minutes to play, and stays inside the 45s auto-mode budget once combined with speed().
-  var RUN_OPTS = {
-    hopMs: 180,
-    dwell: function (sec, ctx) {
-      if (sec == null) return 340;
-      var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
-      return 240 + 1500 * f;
-    },
-  };
+  var stepIndex = function (pred) { for (var i = 0; i < STEPS.length; i++) if (pred(STEPS[i])) return i; return -1; };
+  var APPLY_AT = stepIndex(function (s) { return s.op === "run.play"; });
+  var CYCLE_AT = stepIndex(function (s) { return s.op === "addEdge" && s.args[0].id === "cycle-edge"; });
+  var FIX_AT = stepIndex(function (s) { return s.op === "removeEdge"; });
 
   var ALL_RESOURCES = [
     "vpc", "subnet-a", "subnet-b", "security-group", "rds", "eks-cluster",
@@ -240,7 +263,8 @@
   var $ = function (sel) { return document.querySelector(sel); };
   var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
   var playBtn = $("#play"), resetBtn = $("#reset");
-  var mTime = $("#m-time"), mCreated = $("#m-created"), mJoin = $("#m-join"), mState = $("#m-state");
+  var mTime = $("#m-time"), mCreated = $("#m-created"), mJoin = $("#m-join");
+  var mRetry = $("#m-retry"), mState = $("#m-state");
 
   var g;
   try {
@@ -251,8 +275,9 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",
     });
+    window.smv = g;
     g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
@@ -284,6 +309,11 @@
 
   var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
 
+  // The dependency cycle, as opposed to the node group's retry arc, which is also a loop edge.
+  function cycleEdges() {
+    return g.edges({ loop: true }).filter(function (e) { return e.id !== "e-ng-retry"; });
+  }
+
   function sampleFrame() {
     var run = g.run();
     if (!run) return;
@@ -304,7 +334,27 @@
   g.ticker.add(sampleFrame);
 
   var checks = {};
-  var storyDone = false;
+
+  // The retry narrates itself off the run bus mirrored onto `g` (F6), so it survives the
+  // `run` recompile the story makes at the replay beat without re-subscribing.
+  g.on("run:fail", function (ev) {
+    if (ev.nodeId !== "eks-node-group") return;
+    mRetry.textContent = "attempt " + ev.attempt + " · " + (ev.reason || "failed");
+    mRetry.className = "bad";
+    checks.retryReason = ev.reason;
+    checks.retryTerminal = ev.terminal;
+  });
+  g.on("run:loop", function (ev) {
+    if (ev.nodeId !== "eks-node-group") return;
+    mRetry.textContent = "retry " + ev.iteration + "/" + ev.max + " · " + (ev.edgeId || "in place");
+    checks.retryEdgeId = ev.edgeId;
+  });
+  g.on("run:finish", function (ev) {
+    if (ev.nodeId !== "eks-node-group") return;
+    mRetry.textContent = "created on attempt " + (ev.attempt || 1);
+    mRetry.className = "";
+    checks.retryRecoveredOn = ev.attempt || 1;
+  });
 
   sb.on("step", function (ev) {
     paintRail();
@@ -315,25 +365,19 @@
       ALL_RESOURCES.slice(0, 9).forEach(function (id) { if (st0.nodes[id] && st0.nodes[id].status === "done") checks.createdAfterFirstApply++; });
     }
     if (ev.index === CYCLE_AT) {
-      checks.cycleEdges = g.edges({ loop: true }).map(function (e) { return e.id; });
+      checks.cycleEdges = cycleEdges().map(function (e) { return e.id; });
       mState.textContent = "cyclic";
       mState.className = "bad";
     }
     if (ev.index === FIX_AT) {
-      checks.cycleEdgeRemoved = g.edges({ loop: true }).length === 0;
+      checks.cycleEdgeRemoved = cycleEdges().length === 0;
       mState.textContent = "acyclic";
       mState.className = "";
-    }
-    if (ev.index === REPLAY_AT) {
-      // Fresh transport at t=0 so the replayed apply — including dns-record now that the
-      // cycle is gone — runs from a clean schedule instead of a stale mid-flight one.
-      g.run(RUN_OPTS);
     }
     phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
   });
   sb.on("seek", paintRail);
   sb.on("done", function () {
-    storyDone = true;
     paintRail();
     phaseEl.textContent = "story complete";
     var st = g.run().state();
@@ -343,30 +387,16 @@
   });
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
 
-  function transportPlay() {
-    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
-    if (btn) btn.click(); else sb.play();
-  }
-
-  var started = false;
+  var started = AUTO; // autoplay: 'auto' already started the story under ?auto=1
   function start() {
     if (started) return;
     started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
-    transportPlay();
+    sb.play();
   }
+  if (AUTO) { playBtn.disabled = true; phaseEl.textContent = "playing…"; }
 
   playBtn.addEventListener("click", start);
   resetBtn.addEventListener("click", function () { window.location.href = window.location.pathname; });
@@ -375,6 +405,8 @@
     reportEl.textContent =
       "resources done after first apply   " + checks.createdAfterFirstApply + "/9\n" +
       "loop-tagged edges at cycle beat    " + JSON.stringify(checks.cycleEdges) + "\n" +
+      "node group retry                   " + checks.retryReason + " · recovered on attempt " +
+        checks.retryRecoveredOn + " via " + checks.retryEdgeId + "\n" +
       "cycle edge removed on fix          " + checks.cycleEdgeRemoved + "\n" +
       "dns-record done after replay       " + checks.dnsRecordDone + "\n" +
       "resources done after replay        " + checks.createdAfterReplay + "/10\n" +
@@ -382,13 +414,7 @@
   }
 
   async function auto() {
-    var speedUp = function () { var r = g.run(); if (r && typeof r.speed === "function") r.speed(3); };
-    speedUp();
-    // Every fresh run() the story creates (see REPLAY_AT above) needs its own speed-up too.
-    sb.on("step", function (ev) { if (ev.index === REPLAY_AT) speedUp(); });
-    await sleep(200);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
+    await g.finished;
     await sleep(300);
     writeReport();
     phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";

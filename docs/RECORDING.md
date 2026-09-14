@@ -40,6 +40,21 @@ until playback reached it and threw a bare `TypeError` instead of the library's 
 
 - `node` frames one node's box; `nodes` the union box; `fit:true` the whole graph.
   `pad` (default 24) pads the framing; `k` on a box target is an explicit scale instead.
+  A `nodes` union is fitted at `maxK: 1.5` unless the target says otherwise, so two nodes
+  in a short pane read as "look at these two" rather than an extreme close-up.
+- A framed box is fitted and centred inside the pane **minus the chrome the library itself
+  mounted** over it — the transport bar, the preset's total-duration bar, the caption
+  strip. `inset: {top,right,bottom,left}` (or a bare number) replaces that measurement with
+  your own; `inset: 0` opts out. No more hand-tuned `by:{dy:-40}` nudge after every fit.
+  Only those bars are measured (they hug the top/bottom edge) — a rail of your own down the
+  side of the pane is an `inset: {left}`/`{right}` you pass. The caption strip is *transient*:
+  a fit taken while a caption is up reserves its height, and clearing the caption does not
+  re-fit, so if a shot should rest at the same framing all the way through a beat, fit
+  before you caption (or pass an explicit `inset`).
+- A `node`/`nodes` id that is currently inside a **collapsed** container resolves to the
+  nearest drawn ancestor — the box the viewer can actually see. Only an id that resolves
+  to nothing drawn warns (`[smv:camera]`), so a script no longer has to filter its ids
+  through `g.layoutResult()` before every shot. `highlight` resolves ids the same way.
 - `x`/`y`/`k` is an absolute transform (screen px + scale).
 - `zoom` (or a bare `k`) scales about the pane centre — "lean in on this", not on the
   world origin. `by:{dx,dy}` is a screen-px pan, applied after any zoom.
@@ -73,6 +88,7 @@ Under `prefers-reduced-motion` it holds still at full strength instead of disapp
 
 ```json
 { "op": "props", "args": [{ "clean": { "--smv-fill": "#7c5cff" }, "e1": { "--smv-stroke": "#f5a" } }] }
+{ "op": "props", "args": [{ "e1": { "--smv-stroke": null } }, { "merge": true }] }
 { "op": "props", "args": [null] }
 ```
 
@@ -84,6 +100,13 @@ a node that leaves and comes back. `args:[null]` clears the layer and the styled
 returns — clearing an override does not strip what `style()` was already setting. Only
 `--smv-*` keys are accepted (D7); anything else throws.
 
+A second argument, `{"merge": true}`, makes the call a **patch** instead: ids the patch
+does not name keep their overrides, named ids merge key by key, a `null` value drops one
+key and a `null` entry drops one id. That is what an event handler recolouring a single
+node wants — no re-sending every other node's colour to keep it. `args:[null]` still clears
+the whole layer. Status colour (`done`/`failed`) now composes with whatever colour you set
+rather than being hidden by it — see docs/THEMING.md.
+
 **`caption`** — one narration overlay (`role="status"`, bottom-centred).
 
 ```json
@@ -94,6 +117,28 @@ returns — clearing an override does not strip what `style()` was already setti
 `place: "top"` moves it up; `variant: "note"` mutes/italicizes. Mounting with
 `captions: false` hides the overlay but keeps the text in the state and the cue sheet —
 so you can burn subtitles in from `g.cues()` instead.
+
+**`run` / `run.reset` / `expandAll` / `collapseAll` / `layout`** — the rest of `g`'s own
+methods, method-shaped like every other op, so a beat that used to need an
+`sb.on("step")` handler stays inside the declared timeline (and inside `g.cues()`):
+
+```json
+{ "op": "run", "args": [{ "iterations": { "retry": 1 } }] },
+{ "op": "run.play", "until": "verify" },
+{ "op": "run.reset" },
+{ "op": "expandAll" },
+{ "op": "layout", "args": [{ "dir": "TB" }] },
+{ "op": "collapseAll" }
+```
+
+`run` is `g.run(opts)` — a full recompile, with the page's `run.on(...)` listeners carried
+across (`docs/RUN.md`); `run.reset` re-seats the same transport at t = 0 without replacing
+it. Both are zero-duration flips that restart the run's clock, so the next `run.play` step
+is priced from 0. `expandAll`/`collapseAll`/`layout` are the ordinary mutation ops they
+look like, priced at the mount's `animation.duration` unless the step declares `dur`.
+Options-shaped ops are validated at build time like everything else: `{"op":"run","args":
+["deploy"]}` throws `GraphError('storyboard-step')` at its own index rather than failing
+mid-take.
 
 ### Pacing: `dur` and `wait`
 
@@ -144,14 +189,33 @@ only thing on the public export map; to put `dur` on a mutation step, author the
 ```js
 const g = SparkleMotion.mount("#pipe", spec, {
   controls: true,        // transport bar: play/pause/step/scrub, current label
-  autoplay: false,
+  autoplay: false,       // true plays at once; "auto" plays only when the URL has ?auto=1
   storyboard: steps,     // or g.storyboard(steps) after mount
 });
 ```
 
+**Knowing when the story ended.** `g.finished` is one promise per instance, resolving
+`{reason}` when the storyboard runs out of steps (`"storyboard"`), when the page calls
+`g.finish()` — the explicit end for a live-mode story, which has no last step to reach —
+or when the instance is destroyed (`"destroy"`, so awaiting it can never hang). It never
+rejects and never re-arms.
+
+```js
+const g = SparkleMotion.mount("#pipe", spec, { storyboard: steps, autoplay: "auto" });
+window.smv = g;                          // the convention headless checkers look for
+await g.finished;                        // { reason: "storyboard" }
+```
+
+`autoplay: "auto"` + `window.smv` + `g.finished` is all a page needs to be driveable
+unattended: `scripts/check-demos.mjs` opens each page with `?auto=1`, waits on
+`window.smv.finished` (or `window.__smv`, the record pack's global), and then asserts the
+render. A page that ends on its own terms — a live feed, a hand-driven tour — calls
+`g.finish()` when it is done. (The older `window.__smvExit = {done, errors}` hook every
+demo page still uses keeps working, and wins when a page offers both.)
+
 Scrubbing works through everything: each step is snapshotted before it runs (G2), and
-emphasis, the caption, and — once the script has a camera op — the viewport are part of
-that snapshot, so a backward seek restores the shot, not just the graph. A forward scrub
+emphasis, the caption, the layout options a `layout` step changed, and — once the script
+has a camera op — the viewport are part of that snapshot, so a backward seek restores the shot, not just the graph. A forward scrub
 replays camera/highlight/caption instantly (you asked for a position, not a screening).
 
 For a self-contained file:

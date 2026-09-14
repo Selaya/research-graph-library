@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRenderer } from "../src/render.js";
+import { CSS } from "../src/styles.js";
 import { GraphError } from "../src/store.js";
 
 // ---------------------------------------------------------------------------
@@ -179,4 +180,70 @@ test("styleCommit(): the bad key is reported for the offending node's own id, no
     }),
     /"second"/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// F18 — status colour composes with the role/props colour instead of losing to it.
+// props()/style() write --smv-fill INLINE on the node group, which outranks the status
+// rules, so a role-coloured node used to show no done/failed tint at all. Status now
+// paints --smv-status-fill, mixed OVER whatever --smv-fill resolved to.
+// ---------------------------------------------------------------------------
+
+/** The body of the single `@supports (color:color-mix(...))` block. */
+function supportsBlock() {
+  const at = CSS.indexOf("@supports (color:color-mix(");
+  assert.ok(at >= 0, "the composition is guarded by @supports");
+  let depth = 0;
+  for (let i = CSS.indexOf("{", at); i < CSS.length; i++) {
+    if (CSS[i] === "{") depth++;
+    else if (CSS[i] === "}" && --depth === 0) return CSS.slice(at, i + 1);
+  }
+  throw new Error("unterminated @supports block");
+}
+
+test("styles: the node box paints the status channel over the role fill, with --smv-fill as the fallback", () => {
+  const block = supportsBlock();
+  assert.match(block, /\.smv-node rect\.smv-node-box\{fill:var\(--smv-status-fill,var\(--smv-fill\)\)\}/);
+  // Unguarded, the sheet is exactly what it was: a renderer without color-mix (an exported
+  // SVG opened in an older viewer) keeps painting var(--smv-fill) and nothing goes black.
+  const before = CSS.slice(0, CSS.indexOf("@supports (color:color-mix("));
+  assert.match(before, /\.smv-node rect\.smv-node-box\{\s*fill:var\(--smv-fill\);/);
+});
+
+test("styles: every run/spec status defines --smv-status-fill as its token mixed over --smv-fill", () => {
+  const block = supportsBlock();
+  for (const [attrs, token] of [
+    ['\\[data-status="done"\\],\\.smv-node\\[data-run="done"\\]', "--smv-ok"],
+    ['\\[data-status="active"\\],\\.smv-node\\[data-run="active"\\]', "--smv-active"],
+    ['\\[data-run="failed"\\]', "--smv-fail"],
+  ]) {
+    const re = new RegExp(
+      `\\.smv-node${attrs}\\{\\s*--smv-status-fill:color-mix\\(in srgb,var\\(${token}\\) ` +
+      "var\\(--smv-status-mix,70%\\),var\\(--smv-fill\\)\\)[;}]",
+    );
+    assert.match(block, re, `${token} composes`);
+  }
+});
+
+test("styles: the status rules still set --smv-fill, so an un-overridden node mixes a colour with itself", () => {
+  // That is what keeps the default picture identical: color-mix(X 70%, X) is X. The legacy
+  // declarations are also what a theme overriding --smv-ok keeps steering.
+  assert.match(CSS, /\.smv-node\[data-status="done"\]\{--smv-fill:var\(--smv-ok\)/);
+  assert.match(CSS, /\.smv-node\[data-run="done"\]\{--smv-fill:var\(--smv-ok\)/);
+  assert.match(CSS, /\.smv-node\[data-run="failed"\]\{--smv-fill:var\(--smv-fail\)/);
+  // --smv-status-mix is themeable, and never defined as a token: 100% restores "status wins".
+  assert.equal((CSS.match(/--smv-status-mix:/g) || []).length, 0);
+  assert.equal((CSS.match(/var\(--smv-status-mix,70%\)/g) || []).length, 3);
+});
+
+test("styles: a collapsed container carrying a spec status takes the status tint over container grey", () => {
+  // [data-container] sets --smv-fill AFTER the status rules at equal specificity, so such a
+  // node painted plain container grey before F18. It now mixes the status token over that
+  // grey, like any other override — documented in THEMING.md's data-* precedence section.
+  const status = CSS.indexOf('.smv-node[data-status="done"]{--smv-fill:var(--smv-ok)');
+  const container = CSS.indexOf(".smv-node[data-container]{--smv-fill:var(--smv-container)");
+  assert.ok(status >= 0 && container > status, "[data-container] still wins --smv-fill");
+  // …and the status channel is written regardless of [data-container], which is what makes
+  // the tint show through.
+  assert.doesNotMatch(supportsBlock(), /data-status="done"\][^{]*:not\(\[data-container\]\)/);
 });

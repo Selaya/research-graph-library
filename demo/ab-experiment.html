@@ -105,7 +105,7 @@
   <div class="tile"><i>run clock</i><span id="m-time">0.0s <em>/ 0.0s</em></span></div>
   <div class="tile"><i>live tokens</i><span id="m-tokens">0</span></div>
   <div class="tile"><i>join · analyze</i><span id="m-join">—</span></div>
-  <div class="tile" id="t-loop"><i>iterate loop</i><span id="m-loop">iter 0/3</span></div>
+  <div class="tile" id="t-loop"><i>iterate loop</i><span id="m-loop">iter 0/2</span></div>
 </div>
 
 <p class="legend">
@@ -216,7 +216,7 @@
     hold(400),
     { op: "run.play" }, // plays the loop ticks (live-narrated below) then falls through to ship
     cam({ node: "ship", k: 1.5, pad: 60, dur: 800 }),
-    { op: "props", args: [{ ship: { "--smv-fill": "#c9971f" } }] },
+    { op: "props", args: [{ ship: { "--smv-fill": "#c9971f" } }, { merge: true }] },
     hi(["ship"], "ok", { pulse: true }),
     cap("Shipped — the redesigned variant B wins."),
   ];
@@ -240,7 +240,7 @@
       controls: true,
       preset: "pipeline",
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto", // F36: plays by itself only when the URL carries ?auto=1
     });
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
@@ -248,10 +248,13 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
+  window.smv = g; // the instance the finish convention (and npm run check-demos) looks for
 
-  // Iteration 1: capped at a single loop crossing, so "iterate 1" resolves fast, and the
-  // decision node's own out-edge to `ship` is the one it falls through to right after.
-  var run = g.run({ hopMs: 220, iterations: { iterate: 2 } });
+  // The loop is capped below the edge's declared 3 tries, so the story resolves fast and
+  // the decision node falls through to `ship` on the last one. `state().loops` and the
+  // `loop` event report the edge's *declared* max, so the page prints its own cap.
+  var LOOP_CAP = 2;
+  var run = g.run({ hopMs: 220, iterations: { iterate: LOOP_CAP } });
 
   var sb = g.storyboard();
   var LABELS = sb.labels();
@@ -286,7 +289,7 @@
     var j = st.joins.stats;
     mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "—";
     var lp = st.loops.iterate;
-    mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/3";
+    mLoop.textContent = "iter " + (lp ? lp.iteration : 0) + "/" + LOOP_CAP;
   }
   g.ticker.add(sampleFrame);
 
@@ -298,40 +301,26 @@
     lossNarrated = true;
     // Round 1: variant B trails control and variant A.
     g.highlight({ nodes: ["variant-b"], variant: "warn", dim: false });
-    g.props({ "variant-b": { "--smv-fill": LOSE_COLOR }, "control": { "--smv-fill": WIN_COLOR } });
+    g.props({ "variant-b": { "--smv-fill": LOSE_COLOR }, "control": { "--smv-fill": WIN_COLOR } }, { merge: true });
     g.caption("Round 1: control leads, variant B underperforms. Iterating on design.", { place: "bottom" });
   });
   run.on("loop", function (ev) {
-    if (!ev || ev.edgeId !== "iterate" || ev.iteration !== ev.max || winNarrated) return;
+    if (!ev || ev.edgeId !== "iterate" || ev.iteration < LOOP_CAP || winNarrated) return;
     winNarrated = true;
-    // The final capped iteration: the redesigned variant B pulls ahead.
-    g.props({ "variant-b": { "--smv-fill": WIN_COLOR }, "control": null });
+    // The final iteration this play reaches: the redesigned variant B pulls ahead. The
+    // merge drops control's override and leaves every other node's alone.
+    g.props({ "variant-b": { "--smv-fill": WIN_COLOR }, "control": null }, { merge: true });
     g.highlight({ nodes: ["variant-b"], variant: "ok", pulse: true });
     g.caption("Iteration " + ev.iteration + ": the redesigned variant B wins — shipping it.", { place: "bottom" });
   });
 
-  var storyDone = false;
   sb.on("step", function (ev) {
     paintRail();
-    g.fitView({ animate: true });
     phaseEl.textContent = "step " + ev.index + " · " + (sb.position().label || "");
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
 
-  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
-
-  var started = false;
+  var started = AUTO; // autoplay:"auto" already started the script under ?auto=1
   function start() {
     if (started) return;
     started = true;
@@ -352,24 +341,20 @@
       "errors               " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
 
-  async function auto() {
-    if (g.run()) g.run().speed(3);
-    await sleep(200);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
-    await sleep(300);
+  // One promise per instance, resolved when the script runs out of steps — no per-page
+  // "story finished" plumbing. `window.__smvExit` stays as the older checker hook.
+  g.finished.then(function () {
+    paintRail();
     writeReport();
     phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
     window.__smvExit = { done: true, errors: errors };
-  }
+  });
 
   paintRail();
   if (AUTO) {
-    auto().catch(function (err) {
-      errors.push("auto: " + String((err && err.message) || err));
-      writeReport();
-      window.__smvExit = { done: true, errors: errors };
-    });
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    run.speed(3); // a pure playback multiplier: the reported duration does not move
   }
 })();
 </script>

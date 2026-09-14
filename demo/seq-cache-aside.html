@@ -38,6 +38,7 @@
   aside li.now { color: var(--ink); font-weight: 600; }
   aside li.done { color: var(--ink); }
   aside li.done::marker { color: #2f9e6a; }
+  aside li.picked { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
   ul.watch { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
   ul.watch li { margin: 0 0 4px; }
   footer { margin-top: 20px; color: var(--muted); font-size: 12.5px; }
@@ -71,12 +72,15 @@
     <ul class="watch">
       <li>Cold: five hops, ~24ms, most of it one Postgres round trip.</li>
       <li>Warm: Redis alone answers — three hops, ~2ms.</li>
-      <li><b>MISS</b>/<b>HIT</b> label what Redis actually decided; message text is the wire call.</li>
+      <li><b>MISS</b>/<b>HIT</b> label what Redis actually decided; the pill on each arrow is
+        the wire call, and the small chip beside it is that wire's own
+        <code>data.duration</code> — 12ms over the internet, 0.2ms inside the VPC.</li>
       <li>Five minutes on, the key's TTL lapses and <em>two</em> clients miss at once — watch
         both balls converge on Postgres for the same row.</li>
       <li>The last beat condenses request one's Redis→Postgres→Redis span into one
         "read-through cache" hop — same latency, one box. Watch its duration chip and the
-        total-duration bar at the bottom (the pipeline preset).</li>
+        total-duration bar at the bottom (sum and critical path, from the pipeline preset).</li>
+      <li>Click any activation box to pick its line out of the message list.</li>
       <li>Scrub the transport bar backward — every structural step, condense included,
         snapshots cleanly.</li>
     </ul>
@@ -95,9 +99,11 @@
   window.addEventListener("error", function (e) { errors.push(String((e && e.message) || e)); });
   window.addEventListener("unhandledrejection", function (e) { errors.push("unhandledrejection: " + String(e && e.reason)); });
   var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
-  var P = AUTO ? 0.45 : 1; // pace multiplier
+  var P = AUTO ? 0.45 : 1; // pace multiplier for the director beats (camera, captions, waits)
 
   // ---- actors -----------------------------------------------------------------------
+  // `container: true` — a lifeline from the first frame, before any activation is parented
+  // to it: a header-only column the solver gets as a container, not a leaf.
   var ACTORS = [
     { id: "app", label: "Web app" },
     { id: "app2", label: "Web app #2" },
@@ -107,65 +113,67 @@
   ];
 
   // Each entry is one activation: who runs it (actor), the incoming message (msg, edge
-  // label — null means "no wire message, just the next thing this actor does"), what the
+  // label — null means "no wire message, just the next thing this actor does"), how long
+  // that message spends on the wire (wire — null falls back to the run's hopMs), what the
   // actor does while the ball dwells (node), how long that really takes (dur), which
   // activation it arrives FROM (from — null only for the very first), the row it sits on,
   // and an optional `group` shared by activations that happen at the same instant (a real
   // fan-out — different actor columns, same row).
   var MSGS = [
     // -- request 1: cold -------------------------------------------------------------
-    { id: "app.1", actor: "app", node: "GET /products/42", msg: null, dur: "1ms", from: null, row: 0 },
-    { id: "api.1", actor: "api", node: "route request", msg: "GET /products/42", dur: "0.3ms", from: "app.1", row: 1 },
-    { id: "redis.1", actor: "redis", node: "MISS", msg: "GET product:42", dur: "0.4ms", from: "api.1", row: 2 },
-    { id: "api.2", actor: "api", node: "miss → query DB", msg: "nil", dur: "0.3ms", from: "redis.1", row: 3 },
-    { id: "pg.1", actor: "pg", node: "query products", msg: "SELECT id=42", dur: "18ms", from: "api.2", row: 4 },
-    { id: "api.3", actor: "api", node: "cache the row", msg: "row", dur: "0.3ms", from: "pg.1", row: 5 },
-    { id: "redis.2", actor: "redis", node: "SET ex=300", msg: "SET product:42 ex=300", dur: "0.5ms", from: "api.3", row: 6 },
-    { id: "api.4", actor: "api", node: "shape response", msg: "OK", dur: "0.3ms", from: "redis.2", row: 7 },
-    { id: "app.2", actor: "app", node: "render product", msg: "200 OK", dur: "0.2s", from: "api.4", row: 8 },
+    { id: "app.1", actor: "app", node: "GET /products/42", msg: null, wire: null, dur: "1ms", from: null, row: 0 },
+    { id: "api.1", actor: "api", node: "route request", msg: "GET /products/42", wire: "12ms", dur: "0.3ms", from: "app.1", row: 1 },
+    { id: "redis.1", actor: "redis", node: "MISS", msg: "GET product:42", wire: "0.2ms", dur: "0.4ms", from: "api.1", row: 2 },
+    { id: "api.2", actor: "api", node: "miss → query DB", msg: "nil", wire: "0.2ms", dur: "0.3ms", from: "redis.1", row: 3 },
+    { id: "pg.1", actor: "pg", node: "query products", msg: "SELECT * FROM products WHERE id = 42", wire: "1.2ms", dur: "18ms", from: "api.2", row: 4 },
+    { id: "api.3", actor: "api", node: "cache the row", msg: "row", wire: "1.2ms", dur: "0.3ms", from: "pg.1", row: 5 },
+    { id: "redis.2", actor: "redis", node: "SET ex=300", msg: "SET product:42 ex=300", wire: "0.2ms", dur: "0.5ms", from: "api.3", row: 6 },
+    { id: "api.4", actor: "api", node: "shape response", msg: "OK", wire: "0.2ms", dur: "0.3ms", from: "redis.2", row: 7 },
+    { id: "app.2", actor: "app", node: "render product", msg: "200 OK", wire: "12ms", dur: "0.2s", from: "api.4", row: 8 },
     // -- request 2: warm (gap: TTL still fresh) ---------------------------------------
-    { id: "app.3", actor: "app", node: "GET /products/42", msg: null, dur: "1ms", from: "app.2", row: 10 },
-    { id: "api.5", actor: "api", node: "route request", msg: "GET /products/42", dur: "0.3ms", from: "app.3", row: 11 },
-    { id: "redis.3", actor: "redis", node: "HIT", msg: "GET product:42", dur: "0.4ms", from: "api.5", row: 12 },
-    { id: "api.6", actor: "api", node: "serve from cache", msg: "row", dur: "0.3ms", from: "redis.3", row: 13 },
-    { id: "app.4", actor: "app", node: "render product", msg: "200 OK", dur: "0.2s", from: "api.6", row: 14 },
+    { id: "app.3", actor: "app", node: "GET /products/42", msg: null, wire: null, dur: "1ms", from: "app.2", row: 10 },
+    { id: "api.5", actor: "api", node: "route request", msg: "GET /products/42", wire: "12ms", dur: "0.3ms", from: "app.3", row: 11 },
+    { id: "redis.3", actor: "redis", node: "HIT", msg: "GET product:42", wire: "0.2ms", dur: "0.4ms", from: "api.5", row: 12 },
+    { id: "api.6", actor: "api", node: "serve from cache", msg: "row", wire: "0.2ms", dur: "0.3ms", from: "redis.3", row: 13 },
+    { id: "app.4", actor: "app", node: "render product", msg: "200 OK", wire: "12ms", dur: "0.2s", from: "api.6", row: 14 },
     // -- request 3: stampede (gap: 5 minutes, TTL expires) ----------------------------
-    { id: "app.5", actor: "app", node: "TTL expired", msg: "5 min later", dur: "1ms", from: "app.4", row: 16 },
-    { id: "api.s1", actor: "api", node: "route request", msg: "GET /products/42", dur: "0.3ms", from: "app.5", row: 17, group: "g1" },
-    { id: "app2.1", actor: "app2", node: "GET /products/42", msg: "meanwhile", dur: "1ms", from: "app.5", row: 17, group: "g1" },
-    { id: "redis.s1", actor: "redis", node: "MISS", msg: "GET product:42", dur: "0.4ms", from: "api.s1", row: 18, group: "g2" },
-    { id: "api.s2", actor: "api", node: "route request", msg: "GET /products/42", dur: "0.3ms", from: "app2.1", row: 18, group: "g2" },
-    { id: "pg.s1", actor: "pg", node: "query products", msg: "SELECT id=42", dur: "18ms", from: "redis.s1", row: 19, group: "g3" },
-    { id: "redis.s2", actor: "redis", node: "MISS", msg: "GET product:42", dur: "0.4ms", from: "api.s2", row: 19, group: "g3" },
-    { id: "pg.s2", actor: "pg", node: "query products", msg: "SELECT id=42", dur: "18ms", from: "redis.s2", row: 20 },
+    // The 5-minute gap is a caption and a row gap, not a wire time: a real 300s edge
+    // duration would be the longest declared time in the graph and flatten everything else.
+    { id: "app.5", actor: "app", node: "TTL expired", msg: "5 min later", wire: null, dur: "1ms", from: "app.4", row: 16 },
+    { id: "api.s1", actor: "api", node: "route request", msg: "GET /products/42", wire: "12ms", dur: "0.3ms", from: "app.5", row: 17, group: "g1" },
+    { id: "app2.1", actor: "app2", node: "GET /products/42", msg: "meanwhile", wire: null, dur: "1ms", from: "app.5", row: 17, group: "g1" },
+    { id: "redis.s1", actor: "redis", node: "MISS", msg: "GET product:42", wire: "0.2ms", dur: "0.4ms", from: "api.s1", row: 18, group: "g2" },
+    { id: "api.s2", actor: "api", node: "route request", msg: "GET /products/42", wire: "12ms", dur: "0.3ms", from: "app2.1", row: 18, group: "g2" },
+    { id: "pg.s1", actor: "pg", node: "query products", msg: "SELECT * FROM products WHERE id = 42", wire: "1.2ms", dur: "18ms", from: "redis.s1", row: 19, group: "g3" },
+    { id: "redis.s2", actor: "redis", node: "MISS", msg: "GET product:42", wire: "0.2ms", dur: "0.4ms", from: "api.s2", row: 19, group: "g3" },
+    { id: "pg.s2", actor: "pg", node: "query products", msg: "SELECT * FROM products WHERE id = 42", wire: "1.2ms", dur: "18ms", from: "redis.s2", row: 20 },
   ];
   // Request 1's real hops the closing beat folds into one "read-through" activation.
   var CONDENSE_IDS = ["redis.1", "api.2", "pg.1", "api.3", "redis.2"];
   var REQ1_IDS = ["app.1", "api.1", "redis.1", "api.2", "pg.1", "api.3", "redis.2", "api.4", "app.2"];
 
+  // The solver only needs the column order up front: every node carries its own placement
+  // in `data.seq`, which the layout shell hands straight to the solver.
   var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
-  MSGS.forEach(function (m) { seq.place(m.id, m.actor, m.row); });
-  seq.place("readthrough.1", "api", 3); // lands where the merge's earliest activation sat
 
-  function byId(id) { for (var i = 0; i < MSGS.length; i++) if (MSGS[i].id === id) return MSGS[i]; return null; }
-
-  // The pipeline preset draws a duration chip in every node's top-right corner (D6/M6);
-  // the core layout has no idea that chip exists, so a short label ("MISS", "HIT") in an
-  // auto-sized box collides with it. Size every activation box explicitly — label's own
-  // footprint plus the chip's, side by side with a gap — so nothing overlaps.
-  var measureCtx = document.createElement("canvas").getContext("2d");
-  var LABEL_FONT = "500 13px system-ui, -apple-system, 'Segoe UI', sans-serif";
-  var CHIP_FONT = "600 10px system-ui, -apple-system, 'Segoe UI', sans-serif";
-  function textW(s, font) { measureCtx.font = font; return measureCtx.measureText(String(s)).width; }
-  function sizedNode(id, actor, label, dur) {
-    var w = Math.max(60, Math.ceil(textW(label, LABEL_FONT)) + 28 + Math.ceil(textW(dur, CHIP_FONT)) + 20);
-    return { id: id, parent: actor, label: label, data: { duration: dur }, w: w, h: 36 };
+  function nodeOf(m) {
+    return {
+      id: m.id, parent: m.actor, label: m.node,
+      data: { duration: m.dur, seq: { actor: m.actor, row: m.row } },
+    };
   }
-  function nodeOf(m) { return sizedNode(m.id, m.actor, m.node, m.dur); }
-  function edgeOf(m) { return { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id, label: m.msg }; }
+  function edgeOf(m) {
+    var e = { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id };
+    // The message text IS the content of a sequence diagram: upright, on a pill, and given
+    // room to say the whole call instead of being clipped at the default cap.
+    if (m.msg) e.label = { text: m.msg, place: "mid", pill: true, maxW: 230 };
+    if (m.wire) e.data = { duration: m.wire };   // this wire's own hop time
+    return e;
+  }
 
   var SEED = {
-    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label, container: true }; })
+      .concat([nodeOf(MSGS[0])]),
     edges: [],
   };
 
@@ -201,7 +209,7 @@
       i += 2;
     } else {
       addBatch([nodeOf(m)], [edgeOf(m)]);
-      STEPS.push({ op: "camera", args: [{ nodes: [m.from, m.id], k: 1, pad: 120, dur: 300 * P }] });
+      STEPS.push({ op: "camera", args: [{ nodes: [m.from, m.id], pad: 120, dur: 300 * P }] });
       STEPS.push({ op: "run.play", until: m.id });
       i += 1;
     }
@@ -227,13 +235,16 @@
   }
 
   // ---- closing beat: condense request 1's read-through span into one hop ------------
+  // The sources sit on three different lifelines, so the merged node names its own parent
+  // (the API column) and carries its own `data.seq` placement for the solver.
+  var READTHROUGH = {
+    id: "readthrough.1", parent: "api", label: "read-through cache (1 hop)",
+    data: { duration: "18.9ms", seq: { actor: "api", row: 3 } },  // where the merge's earliest activation sat
+  };
   STEPS.push({ label: "condense" });
   STEPS.push({ op: "camera", args: [{ nodes: CONDENSE_IDS, pad: 90, dur: 400 * P }] });
   STEPS.push({ op: "caption", args: ["Folding request 1's miss → fetch → fill into one hop.", { place: "top" }] });
-  STEPS.push({
-    op: "condense",
-    args: [CONDENSE_IDS, sizedNode("readthrough.1", "api", "read-through cache (1 hop)", "18.9ms")],
-  });
+  STEPS.push({ op: "condense", args: [CONDENSE_IDS, READTHROUGH] });
   STEPS.push({ op: "highlight", args: [{ nodes: ["readthrough.1"], variant: "ok", pulse: true }] });
   STEPS.push({ op: "camera", args: [{ node: "readthrough.1", k: 1.1, pad: 100, dur: 400 * P }] });
   STEPS.push({ op: "caption", args: ["Same real latency — now one conceptual hop.", { place: "top" }] });
@@ -241,13 +252,13 @@
   STEPS.push({ op: "clearHighlight", args: [] });
   STEPS.push({ label: "done" });
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
-  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -30 }, dur: 200 * P }] }); // clear the transport bar
   STEPS.push({ op: "caption", args: ["Cold vs warm: watch the total-duration bar below.", { place: "top" }] });
   STEPS.push({ op: "wait", ms: 900 * P });
 
   var RUN_OPTS = {
-    hopMs: 480 * P, // the message in flight — the part worth watching
-    dwell: function (sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; },
+    hopMs: 300,     // the default crossing; every real message declares its own duration
+    dwell: function (sec) { return sec == null ? 300 : 260 + 340 * Math.min(1, sec / 0.3); },
+    playbackSpeed: AUTO ? 2.4 : 1,  // playback only — the declared times stay what they are
   };
 
   // ---- mount --------------------------------------------------------------------
@@ -260,9 +271,9 @@
       layout: { dir: "TB", solver: seq.solver, nodesep: 34, ranksep: 20, marginx: 22, marginy: 16, minColWidth: 148 },
       animation: { duration: 340 * P, easing: "cubic-out" },
       controls: true,
-      preset: "pipeline",
+      preset: { name: "pipeline", total: "both" },
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",   // plays by itself only under ?auto=1
     });
     g.run(RUN_OPTS);
     sb = g.storyboard();
@@ -272,6 +283,7 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
+  window.smv = g;   // the convention check-demos looks for
   window.__g = g;
 
   // ---- side panel: the message list lights up as the ball arrives ----------------------
@@ -290,25 +302,34 @@
     li.classList.add("now");
   });
 
+  // Click an activation to pick its line out of the list.
+  g.on("nodeclick", function (ev) {
+    msgsEl.querySelectorAll("li.picked").forEach(function (x) { x.classList.remove("picked"); });
+    var li = document.getElementById("li-" + String(ev.id).replace(/\./g, "-"));
+    if (!li) return;
+    li.classList.add("picked");
+    li.scrollIntoView({ block: "nearest" });
+  });
+
   // ---- controls -------------------------------------------------------------------
-  var playing = false;
+  var playing = AUTO;
   function finish() {
     playing = false;
     phaseEl.textContent = "story complete — scrub the bar or Restart";
     window.__smvExit = { done: true, errors: errors };
   }
+  g.finished.then(finish, function (e) { errors.push("finished: " + String(e && e.message || e)); finish(); });
+  if (AUTO) phaseEl.textContent = "playing…";
   $("#play").addEventListener("click", function () {
     if (playing) return;
     playing = true;
     phaseEl.textContent = "playing…";
-    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+    Promise.resolve(sb.play()).catch(function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
   });
   $("#step").addEventListener("click", function () {
     Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
   });
   $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
-
-  if (AUTO) $("#play").click();
 })();
 </script>
 </body>

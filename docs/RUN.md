@@ -18,11 +18,27 @@ g.run(opts);   // ALWAYS tear down the current transport and create a fresh one
 
 `g.run()` with **no argument** returns the transport already attached to `g`, creating one
 with default options only if none exists yet. `g.run(opts)` — even `g.run({})` — always
-destroys whatever transport is attached and builds a new one from `opts`, at time 0. This
-matters because destroying the old transport removes its ticker hook and abandons its
-listeners: anything you registered with `run.on(...)` on the old object stops firing, and
-you have to re-register on the object `g.run(opts)` hands back. If you just want to keep
-playing the run that already exists, call `g.run()`.
+destroys whatever transport is attached and builds a new one from `opts`, at time 0. If you
+just want to keep playing the run that already exists, call `g.run()`.
+
+**Your listeners survive the recompile.** Everything you registered with `run.on(type, fn)`
+is carried onto the fresh transport — the handle is conceptually the same run, and
+re-attaching after every `g.run(opts)` was pure ceremony. `run.off(type, fn)` (and the
+unsubscriber `on()` hands back) still drops it for good, from either handle. Methods are
+not carried: the *old* object is destroyed, so call `play()`/`seek()` on the one
+`g.run(opts)` returned (or just on `g.run()`).
+
+Every run event is also mirrored onto the instance bus under a `run:` prefix, so a listener
+registered on `g` outlives any number of recompiles — including ones a storyboard's own
+`run` op does:
+
+```js
+g.on("run:finish", ({ nodeId }) => console.log(nodeId, "done"));
+g.on("run:end", () => console.log("schedule over"));
+```
+
+`g.on("runstatus")` is the older, narrower channel (per-node status transitions, what the
+ARIA layer listens to); `run:*` is the whole vocabulary below, verbatim.
 
 `opts` (all optional): `{ iterations, rates, hopMs, dwell, mode }`. Omit `mode` (or pass
 `"simulate"`) for Mode A; `mode: "live"` switches to Mode B (`docs/LIVE.md`). The Mode A
@@ -32,10 +48,15 @@ fields:
   for this compile, capped at that edge's own `maxIterations`.
 - `rates: [{ t, scope: nodeId | "*", factor }]` — pre-seed speed changes (see **Per-branch
   speed** below); `speed()` appends to this list and recompiles.
-- `hopMs` — edge-crossing time in ms (default 300).
+- `hopMs` — edge-crossing time in ms (default 300), for every edge that does not declare a
+  `data.duration` of its own (see **Edge durations**).
 - `dwell(sec, ctx) => ms` — override the default dwell-time formula per node; return a
   non-negative finite number to use it, anything else falls back to the default. `ctx` is
-  `{ id, node, maxSec, default }`.
+  `{ id, node, maxSec, default }`. Nodes only — an edge's hop is never passed through it.
+- `entries: [{ id, at }]` — extra seed tokens, minted at `at` ms on the compiled clock.
+  This is what `run.inject()` appends to; see **Seeding tokens**.
+- `playbackSpeed` — the playback multiplier a bare `speed()` set. A transport field, not a
+  compile input: it is here so `options()`/`reset()` round-trip it (see **Playback**).
 
 ## The run handle
 
@@ -46,9 +67,11 @@ Every method below is on the object `g.run(opts)` returns.
 | `play({ until? })` | `Promise<{canceled}>` | Runs the ticker forward. With `until: nodeId`, resolves the instant that node reaches `'done'` **or** `'failed'` — never hangs on a step that fails. Without it, resolves at the end of the schedule. Awaiting twice while already playing shares the same promise. |
 | `pause()` | `number` (current `t`) | Stops the ticker hook; `play()`'s pending promise survives and resumes on the next `play()`. |
 | `seek(ms)` | `number` | Jumps to `ms` (clamped to `[0, duration]`) without re-firing events already passed — a scrub is a state restore, not a replay (D8). |
-| `speed(factor, { branch? })` | `number` | Appends a rate event at the current time and recompiles. `factor` multiplies dwell/hop time for every token from here on; `branch: nodeId` scopes it to tokens entering that node, omitted/`"*"` is global. `factor: 0` freezes a branch (this is how `step({token})` isolates one branch). |
+| `speed(factor, { branch? })` | `number` | **Bare** (`branch` omitted or `"*"`): a pure playback multiplier — the clock walks the same schedule faster or slower, `duration` does not move, `0` freezes the run. **With `branch: nodeId`**: a rate event appended at the current time, which recompiles and really does re-time that branch's dwells and hops (`0` freezes it for good). See **Playback vs the declared timeline**. |
+| `playbackSpeed()` | `number` | The multiplier a bare `speed()` set; `1` is real declared time. |
+| `inject(nodeId, { at? })` | `number` | Mints a token at `nodeId` (`at` defaults to now), recompiling and extending the schedule around it. See **Seeding tokens**. |
 | `step({ token? })` | `number` | Jumps to the next event boundary. No `token`: the next boundary across every token. `token: id`: that token's own next boundary (a join's fire time counts as a boundary for every token it consumed). |
-| `timeOf(nodeId)` | `number` | First instant `nodeId` emits `'finish'` **or** `'fail'` — what a storyboard `run.play({until})` step is worth on the cumulative timeline. Falls back to `duration` if the node never does either. |
+| `timeOf(nodeId)` | `number` | First instant `nodeId` emits `'finish'` **or** a *terminal* `'fail'` — what a storyboard `run.play({until})` step is worth on the cumulative timeline. Non-terminal retry attempts are skipped, so this agrees with where `play({until})` really stops. Falls back to `duration` if the node never does either. |
 | `reset(opts, time?)` | `number` | Re-seats the *same* transport (same identity, same listeners) with new compile inputs, silently jumping to `time` (default 0) — used by storyboard restores, not something you usually call directly. |
 | `reload()` | `number` | Forces a recompile against the live spec and returns the new `duration`. |
 | `playing` (getter) | `boolean` | |
@@ -56,8 +79,8 @@ Every method below is on the object `g.run(opts)` returns.
 | `promise` (getter) | `Promise<{canceled}>` | The awaitable for whatever `play()` target is current; `pause()` never resolves it. |
 | `time()` | `number` | Current virtual ms. |
 | `state()` | `RunState` | `stateAt(time())` — see **Sampling a state** below. |
-| `sim()` | `Sim` | The compiled artifact: `{ duration, events, boundaries, stateAt(t), nextBoundary(t, tokenId?) }`. |
-| `options()` | `object` | The live compile inputs (`{iterations, hopMs, dwell, rates}`), for snapshotting. |
+| `sim()` | `Sim` | The compiled artifact: `{ duration, declared, playback, events, boundaries, stateAt(t), nextBoundary(t, tokenId?) }`. |
+| `options()` | `object` | The live compile inputs (`{iterations, hopMs, dwell, rates, entries, playbackSpeed}`), for snapshotting. |
 | `on(type, fn)` / `off(type, fn)` | `() => void` / `void` | Subscribe to transport and forwarded engine events — see **Event vocabulary**. |
 | `destroy()` | `void` | Tears the transport down; `g.run(opts)` calls this on the outgoing transport automatically. |
 
@@ -69,6 +92,7 @@ Every method below is on the object `g.run(opts)` returns.
 {
   tokens: [{ id, rate, at: { kind: "node" | "edge", id, progress } }],
   nodes: { [id]: { status: "pending" | "active" | "done" | "failed", progress, occupancy } },
+  // 'failed' only once a retry budget (if any) is spent — see Retries below
   edges: { [id]: { traversed } },       // 0..1
   joins: { [id]: { arrived, needed, fired } },
   loops: { [edgeId]: { iteration, max } },
@@ -76,10 +100,43 @@ Every method below is on the object `g.run(opts)` returns.
 }
 ```
 
+In live mode (`docs/LIVE.md`) each node entry carries three more keys: `waiting`/`active`
+(the occupancy split — `waiting + active === occupancy`) and `overBudget` (the live dwell
+outran the node's declared `data.duration`).
+
 A `'failed'` node reports `progress: 1` and `occupancy: 0` — terminal like `'done'`, so its
 fill never reads as "still going." A container's status/progress rolls up from its
-descendants (union window; earliest failure wins): `play({until: containerId})` means "until
-everything inside it is finished or has failed."
+descendants (union window; see `statusAgg` below for the failure half):
+`play({until: containerId})` means "until everything inside it is finished or has failed."
+
+### `statusAgg` — how a descendant's failure rolls up
+
+A container is never an executable step, so its `'failed'` can only come from its
+descendants. `statusAgg` on the container spec picks the policy, the status mirror of
+`durationAgg`:
+
+| `statusAgg` | the container reads `'failed'`… |
+|---|---|
+| `'earliest-fail'` *(default)* | from the earliest descendant failure onward — the rest of the run stays red |
+| `'latest'` | while the most recent descendant outcome is a failure; a later success clears it again |
+| `'none'` | never — only its own window drives it |
+
+```js
+{ id: "auth", label: "auth service", statusAgg: "latest" }   // a lifeline, not a pipeline
+```
+
+In a pipeline `'earliest-fail'` is right: one red cell means the matrix is red. On a
+sequence-diagram lifeline it is not — a 401 on one call would paint the whole actor column
+red for the rest of the story even after a retried call on the same actor succeeds.
+Each container reads its own leaf descendants, so nested containers can hold different
+policies. An unknown value warns (`[smv:run] node "x" has an unknown statusAgg …`) and
+falls back to `'earliest-fail'`. The policy never touches the descendants themselves: the
+node that failed still reports `'failed'`.
+
+`play({ until: containerId })` still stops the first time that container reads `'failed'`
+(both terminal statuses end a wait) — under `'latest'` that is the first failing
+descendant, even though a later success would have cleared it. Wait on the descendant, or
+use `'none'`, if you want the container's whole span.
 
 ## Duration grammar
 
@@ -124,6 +181,80 @@ corrupt the time-sorted event order (a node reporting `'done'` before it reporte
 `'active'`); they now reject-and-warn instead of clamping, so the mistake stays visible
 rather than getting silently coerced to 0 or 5.
 
+## Edge durations
+
+`hopMs` is one number for the whole graph, but in a sequence diagram the wire time *is* the
+story. An edge may declare its own:
+
+```js
+{ id: "call", source: "gw", target: "search", data: { duration: "400ms" } }
+```
+
+Same grammar as a node's `data.duration`, same pacing formula, same diagnostics (an
+unparseable value warns, emits a `'warn'` event carrying `edgeId`, and falls back). Declared
+edge times join the node durations in the `maxSec` that scales everything, so a five-minute
+wire compresses the boxes rather than being compressed by them. An edge that declares
+nothing crosses in `hopMs` (default 300) as before. `opts.dwell` is a node hook and is never
+consulted for an edge.
+
+## Seeding tokens
+
+By default the compiler mints one token per **root** (a node with no non-loop in-edges,
+containers excluded) at t = 0. Three declarations move that:
+
+```js
+{ id: "poll",       data: { startAt: 8000 } }        // this root's token appears at 8s
+{ id: "compensate", data: { entry: true } }          // an EXTRA seed, even though it has in-edges
+run.inject("compensate", { at: run.time() });        // …or mint one imperatively
+```
+
+- **`data.startAt`** — when a seed token appears, in ms on the compiled clock. A string goes
+  through the duration grammar (seconds), so `"2s"` is 2000. Unparseable values warn
+  (`[smv:run]`), emit a `'warn'` event and seed at 0. It only means something on a seed: on
+  a node reached through an in-edge it warns and is ignored (add `entry: true` if you meant
+  to seed it).
+- **`data.entry: true`** — this node is seeded whether or not it is a root. A saga's
+  compensation branch, a token refresh after a 401: the second request is a token-level
+  need, not a reason to bolt on a new root node.
+- **`run.inject(nodeId, { at })`** — the same seed, minted at runtime. `at` defaults to the
+  current time; the schedule is recompiled and extended around it. The seed is a *compile
+  input* (it lands in `options().entries`), so it survives every later recompile and
+  round-trips through a storyboard snapshot. Injecting into a container seeds every entry
+  child (see **Containers with several ports**). An unknown id warns and is kept, in case
+  the node is added later.
+
+A seed is not a join arrival. Seeding a fan-in node (`entry: true` or `inject()`) gives it
+its own token straight away; the node's implicit AND-join still waits for all of its real
+in-edges, so no upstream branch is fired early or dropped.
+
+A node whose compiled `enter`/`start` are **already behind the clock** — one added mid-run,
+or injected at a past instant — has its backlog re-emitted once on the run bus after the
+recompile. Forward playback only re-emits what it crosses and a scrub back is deliberately
+silent (D8), so without this a node that joins the story late would light up nowhere. The
+backlog is counted per node *and* event type, so injecting into a node that has **already
+run** re-emits its second `enter`/`start` rather than swallowing them — which is the point
+of a token refresh or a re-run of a step the clock is already past.
+
+## Playback vs the declared timeline
+
+The compiled schedule is the *declared* timeline: what the pipeline says it takes. How fast
+you watch it is a separate axis, and `speed()` splits along that line:
+
+```js
+run.speed(2);                       // playback: same schedule, walked twice as fast
+run.sim().declared;                 // unchanged — still the compiled total
+run.sim().playback;                 // declared / 2 — wall-clock cost at this multiplier
+run.speed(0.5, { branch: "e2e" });  // a RATE EVENT: this really re-times that branch
+```
+
+A bare `speed(f)` (no `branch`, or `branch: "*"`) is a pure playback multiplier, exactly as
+it already is in live mode: `duration` does not move, so a page that prints the compiled
+total as "3h 20m vs 1h 05m" keeps printing it when a visitor drags the speed slider.
+`speed(0)` freezes playback. Only `speed(f, { branch })` appends to `rates` and recompiles —
+that is a statement about the work, so it belongs on the declared timeline. `sim().duration`
+means exactly what it always meant, and `sim().declared` is the same number under a name
+that says which of the two it is.
+
 ## Declared failure: `data.fail`
 
 The declarative counterpart to Mode B's `run.fail(id)`. A node's `data.fail`, if truthy,
@@ -139,7 +270,8 @@ A string value is carried through as the emitted `'fail'` event's `reason` (anno
 only — nothing in the engine reads it back). `data.fail: true` fails with no reason. A
 container can't carry `data.fail` itself (it's never an executable step, D5); if one of its
 descendants fails, the container's own status rolls up to `'failed'` at that descendant's
-failure instant, same as its `'done'` window rolls up from its children's windows.
+failure instant, same as its `'done'` window rolls up from its children's windows — unless
+its `statusAgg` says otherwise (see **`statusAgg`** above).
 
 ```js
 const sim = compileRun(spec);           // or: g.run().sim()
@@ -152,6 +284,86 @@ A sibling branch that never touches the failed node completes normally; an AND-j
 partly by the failing branch never fires (pre-existing "unsatisfiable join" behavior — not
 something `fail` changes) and the run reports `done: false` (stalled) because a token is
 still parked there waiting.
+
+### Retries: `fail: { reason, retries, recover }`
+
+"Fail, then retry" is what a retry loop means, so a declared failure can take one. The
+object form of `data.fail` adds a budget:
+
+```js
+{ id: "call", data: { duration: "2s", fail: { reason: "timeout", retries: 3 } } }
+```
+
+Each attempt runs the dwell in full and emits its own `'fail'` carrying `attempt` (1-based),
+`retries` (the budget) and `terminal`. While retries remain the failure is **not** terminal:
+the node stays `'active'`, a `'loop'` event fires for the retry, and the dwell runs again.
+`'failed'` sticks only on the attempt that finds the budget spent — `retries: 3` means four
+attempts, one `'fail'` each, the last with `terminal: true`.
+
+`recover: true` says the attempt that spends the last retry is the one that works: it emits
+`'finish'` (carrying its `attempt`) and fans out normally, so "fail, retry, pass" is a
+declaration rather than a second compile.
+
+```js
+{ id: "qc", data: { fail: { reason: "seam gap 0.4mm", retries: 1, recover: true } } }
+// attempt 1 fails · loop · attempt 2 finishes and the line moves on
+```
+
+`recover` implies a budget of at least 1, so `{ recover: true }` on its own is still one
+real failing attempt followed by a passing one — a declared failure always produces a
+`'fail'` event.
+
+**The retry's arc.** With no loop edge the retry is in place and the `'loop'` event carries
+`edgeId: null`. Mark a `loop: true` edge out of the failing node with `onFail: true` and it
+becomes the retry's arc instead:
+
+```js
+{ id: "retry", source: "call", target: "call", loop: true, onFail: true, maxIterations: 3 }
+```
+
+- its iteration budget **is** the retry budget when `data.fail` declares no `retries`
+  (`opts.iterations` caps it exactly as it caps an ordinary loop);
+- every retry crosses it, so `state().loops[edgeId]` gives an `iter 2/3` badge on the real
+  arc and `edges[edgeId].traversed` fills. The badge's `max` (and the `'loop'` event's) is
+  the **effective budget**: if `data.fail.retries` is also declared it wins over the arc's
+  `maxIterations`, and the badge says so;
+- the token re-enters the edge's **target**, so an arc back to an upstream step replays that
+  step (a self-arc simply re-runs the failing node). The replay then walks back down to the
+  failing node through its ordinary edges, and neither that walk nor the arc's own hop is
+  gated by the failing node's join: the join fired for the attempt that just failed and the
+  other branches are not replayed, so one retry token crosses it per attempt and the extra
+  arrival is not counted into `joins[id].arrived`. A fan-in step retries like any other;
+- it is inert on a successful finish — `exitNode` skips it. An ordinary `loop: true` edge
+  with no `onFail` keeps today's meaning (it fires when its source *finishes*).
+
+`fail: true` and `fail: "reason"` are unchanged: budget 0, one attempt, terminal — unless an
+`onFail` arc out of that node supplies a budget.
+
+## Containers with several ports
+
+An edge incident to a container attaches to the container's interior: the entry child
+nothing inside points at, or the exit child that points at nothing inside. That is one
+child, so with no internal edges the container's other children never see a token. Declare
+the ports to change it:
+
+```js
+{ id: "tools", entry: ["search", "calc", "sql"], exit: ["search", "calc", "sql"] }
+```
+
+- **`entry: [ids]`** — an edge into the container attaches to *all* of them, a fan-out like
+  any other: one token per entry, `'spawn'` events and all.
+- **`exit: [ids]`** — an edge out of the container is fed by all of them, so the downstream
+  node gets that many non-loop in-edges and its implicit AND-join waits for the whole
+  container (declare `join` on it to make that a race or a quorum instead).
+- Any descendant may be named, not only a direct child; an id from outside the container
+  warns (`[smv:run]`) and is dropped.
+- Unset is the historical behaviour exactly: one inferred entry, one inferred exit.
+
+The several engine edges one spec edge expands into keep that edge's `id`, so `'loop'`
+events, `opts.iterations` and `edges[id].traversed` still name the arc the reader drew. A
+`loop: true` edge into a multi-entry container is one arc too: its iteration budget is spent
+once across the whole expansion (the in-place ticks host on the first entry), not once per
+entry child.
 
 ## Join semantics
 
@@ -222,6 +434,12 @@ you `{ iteration, max }` for an iteration badge (`iter 3/5`); pass
 `opts.iterations: { retry: n }` to `g.run(opts)`/`speed`-driven recompiles to cap a
 particular play at fewer than `maxIterations`.
 
+Because the in-place tick has nothing to re-stage, a story where later iterations should
+look different (a different result, a different branch taken) has to be narrated
+reactively off `run.on('loop', ...)` rather than declared as a storyboard step — see the
+README's "Retry loops" callout for the pattern, and docs/PLAN.md (D18) for a proposed
+`replay` mode that would re-simulate the subgraph per iteration instead.
+
 ## Per-branch speed
 
 ```js
@@ -235,6 +453,45 @@ exactly once, the moment it *enters* a node the rate applies to — already-elap
 never retroactively changes, and children spawned after inherit the rate their parent had.
 `step({token})` is built on this: it sets that token's rate to 0, isolating it. Mode B has no
 equivalent — `branch` is a documented no-op there (see `docs/LIVE.md`).
+
+## Driving a run from a storyboard
+
+Five storyboard ops reach the run, so the whole arc can live in the declared timeline
+(`g.cues()` and `smv-fit` see it) instead of in an `sb.on("step")` handler:
+
+| step | equals |
+|---|---|
+| `{ op: "run", args: [opts] }` | `g.run(opts)` — recompile. Omit `args` to recompile with the opts the run already has. Listeners survive it. |
+| `{ op: "run.reset", args: [opts?] }` | `run.reset(opts ?? run.options(), 0)` — the SAME transport, back at t = 0, keeping its identity, its listeners and (Mode B) its log. |
+| `{ op: "run.play", until? }` | `run.play({until})` — the only op the sequencer awaits. |
+| `{ op: "run.step", token? }` | `run.step({token})` |
+| `{ op: "run.seek", ms }` | `run.seek(ms)` |
+
+`run` and `run.reset` are discrete flips: zero duration on the cumulative timeline, and
+they put the run's clock back to 0, so the next `run.play` step is priced from there.
+
+```json
+{ "op": "run", "args": [{ "iterations": { "retry": 1 } }] },
+{ "op": "run.play", "until": "deploy" },
+{ "op": "caption", "args": ["Retry once more, with the flag flipped."] },
+{ "op": "run", "args": [{ "iterations": { "retry": 3 } }] },
+{ "op": "run.play" }
+```
+
+The fluent builder spells these `runCompile(opts)`, `runReset()`, `run({until})` (kept as
+`run.play`, which is what it has always meant), `runStep()` and `runSeek(ms)`.
+
+**Limitation — one compile per cue sheet.** A `run.play` step is priced off the *compiled*
+transport (`run.timeOf(until)`), and only one compile is live at a time. So in a script like
+the one above, `g.cues()` and `g.timeline()` price **every** `run.play` step against
+whichever compile is current when you ask: before playback starts there is no transport at
+all and each `run.play` falls back to the mount's `animation.duration`, and after the second
+`{op:"run"}` lands every `run.play` is priced against the *second* schedule. If you need a
+cue sheet that is stable and exact — VO fitting, `smv-record`, a scrubber you trust to the
+millisecond — keep one compile per script (put the recompile in a second storyboard, or use
+`run.reset` with the same opts) and call `g.cues()` with the run already compiled.
+`bin/smv-fit` refuses any script containing a `run.play` for the same reason; `run` and
+`run.reset` themselves are priced at 0 ms there, exactly as they are here.
 
 ## Event vocabulary
 
@@ -254,7 +511,8 @@ compiled schedule, re-emitted verbatim as playback crosses each event's timestam
 | `tick` | `{time, duration}` | every ticker frame while playing |
 | `end` | `{time}` | `play()`'s target is satisfied |
 | `cancel` | `{time}` | the pending `play()` was superseded/destroyed before it settled |
-| `recompile` | `{time, duration}` | a graph mutation or `speed()` triggered a recompile |
+| `recompile` | `{time, duration}` | a graph mutation, `inject()` or a per-branch `speed()` triggered a recompile |
+| `inject` | `{nodeId, at, time}` | `inject()` seeded a token mid-graph |
 | `remap` | `{sources, target, progress, ghosts, time}` | a `condense` remapped tokens sitting on the merged sources onto the new node |
 | `destroy` | `{time}` | `destroy()` |
 
@@ -265,12 +523,12 @@ compiled schedule, re-emitted verbatim as playback crosses each event's timestam
 | `enter` | `{t, tokenId, nodeId, edgeId}` | a token arrives at a node (before any join gate) |
 | `start` | `{t, tokenId, nodeId, dwellMs}` | dwell begins |
 | `finish` | `{t, tokenId, nodeId}` | dwell completes, node fans out |
-| `fail` | `{t, tokenId, nodeId, reason?}` | dwell completes, node fails instead (`data.fail`) |
+| `fail` | `{t, tokenId, nodeId, attempt, retries, terminal, reason?}` | dwell completes, node fails instead (`data.fail`); one per attempt, `terminal` on the last |
 | `spawn` | `{t, tokenId, parentId, nodeId, edgeId}` | fan-out created a new token (2nd+ out-edge) |
 | `join` | `{t, nodeId, tokenId, arrived, needed, merged}` | a join policy fired |
 | `drop` | `{t, tokenId, nodeId, edgeId}` | an arrival after the join already fired |
-| `loop` | `{t, tokenId, edgeId, nodeId, iteration, max}` | a loop edge's arc-cross or in-place tick |
-| `warn` | `{t, nodeId, message, value}` | an unparseable/negative `data.duration` |
+| `loop` | `{t, tokenId, edgeId, nodeId, iteration, max}` | a loop edge's arc-cross or in-place tick, or a failure taking a retry (`edgeId: null` without an `onFail` arc) |
+| `warn` | `{t, nodeId \| edgeId, message, value}` | an unparseable/negative `data.duration`, edge duration or `data.startAt`, or a `startAt` on a non-seed |
 | `done` | `{t, stalled}` | the compiled schedule's own end marker |
 
 ## See also

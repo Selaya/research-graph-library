@@ -1,8 +1,8 @@
 // Pipeline preset (§6, M1 contract "src/preset-pipeline.js"). Decorates a mounted
-// instance for the "pipeline of work" story: duration chips + durationAgg rollups,
-// status/mode glyph badges, a total-duration bar, and the condense reveal payoff
-// (odometer roll + transient delta badge). Core knows nothing about durations (C12) —
-// this file is the only place that reads `data.duration`.
+// instance for the "pipeline of work" story: duration chips on nodes AND edges +
+// durationAgg rollups, status/mode glyph badges, a sum/critical-path total bar, and the
+// condense reveal payoff (odometer roll + transient delta badge). Core knows nothing about
+// durations (C12) — this file is the only place that reads `data.duration`.
 //
 // Boundary: subscribes ONLY via the public instance surface (g.on/g.node/g.spec/g.el/
 // g.renderer.node|edge/g.ticker/g.layoutResult) plus DOM elements it creates itself. Never
@@ -11,6 +11,8 @@
 
 import { parseDuration } from "./run.js";
 import { prefersReducedMotion } from "./anim.js";
+import { textWidth } from "./measure.js";
+import { pointAt } from "./path.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 // Mirrors render.js's HEADER_H — the header strip an expanded container reserves up top.
@@ -70,6 +72,55 @@ export function effectiveDurationSec(nodesById, id, cache = new Map()) {
   return agg;
 }
 
+/**
+ * F24 — the OTHER total: the longest chain of declared work through the graph, as opposed
+ * to `effectiveDurationSec` summed over the roots. Computed from the spec alone (so it is
+ * available with or without a compiled run): every edge is collapsed onto the top-level
+ * ancestors of its endpoints, `loop: true` back edges are excluded, and the answer is the
+ * heaviest path. null when the spec has no top-level nodes.
+ */
+export function criticalPathSec(spec, cache = new Map()) {
+  const list = (spec && spec.nodes) || [];
+  const by = new Map(list.map((n) => [n.id, n]));
+  // The top-level ancestor of `id` — bounded, so a malformed parent cycle stops, never hangs.
+  const top = (id) => {
+    for (let i = 0; i < 64; i++) {
+      const n = by.get(id);
+      if (!n) return null;
+      if (n.parent === undefined || !by.has(n.parent)) return id;
+      id = n.parent;
+    }
+    return null;
+  };
+  const succ = new Map();
+  for (const e of (spec && spec.edges) || []) {
+    if (e.loop) continue;
+    const a = top(e.source), b = top(e.target);
+    if (!a || !b || a === b) continue;
+    if (!succ.has(a)) succ.set(a, []);
+    succ.get(a).push(b);
+  }
+  const memo = new Map();
+  const best = (id) => {
+    let v = memo.get(id);
+    if (v !== undefined) return v;
+    memo.set(id, 0); // memo and cycle guard in one: a re-entry contributes nothing
+    let tail = 0;
+    for (const nx of succ.get(id) || []) tail = Math.max(tail, best(nx));
+    const own = effectiveDurationSec(by, id, cache);
+    v = (own > 0 ? own : 0) + tail;
+    memo.set(id, v);
+    return v;
+  };
+  let out = null;
+  for (const n of list) {
+    if (top(n.id) !== n.id) continue;
+    const v = best(n.id);
+    if (out == null || v > out) out = v;
+  }
+  return out;
+}
+
 function roundMultiplier(x) {
   if (!Number.isFinite(x)) return "∞";
   const r = x >= 10 ? Math.round(x) : Math.round(x * 10) / 10;
@@ -105,7 +156,7 @@ export function odometerValueAt(fromSec, toSec, t) {
 export const PRESET_STYLE_MARKER = "data-smv-preset-styles";
 
 export const PRESET_CSS = `
-.smv-chip{font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; fill:var(--smv-muted,#6b7488); text-anchor:end; dominant-baseline:central; pointer-events:none}
+.smv-chip,.smv-edge-chip{font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; fill:var(--smv-muted,#6b7488); text-anchor:end; dominant-baseline:central; pointer-events:none}
 .smv-status-glyph{font:11px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:start; dominant-baseline:central; pointer-events:none}
 .smv-mode-badge{font:11px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:end; dominant-baseline:central; pointer-events:none; opacity:.8}
 /* Ambient decoration, not choreography (D1): an independent looping CSS animation, never
@@ -118,6 +169,11 @@ export const PRESET_CSS = `
 /* Width is set at commit time only (D7) — never a CSS transition, so an odometer-timed
    shrink and a plain relayout shrink read identically instead of racing two clocks. */
 .smv-totalbar-fill{height:100%; background:var(--smv-accent,#5b6ef5); border-radius:2px}
+/* F24: name each total as soon as the bar shows two. F8/F26: edge.data.duration chip. */
+.smv-totalbar-key,.smv-totalbar-alt{flex:none; opacity:.75}
+.smv-totalbar-key:empty,.smv-totalbar-alt:empty{display:none}
+.smv-totalbar-alt:not(:empty)::before{content:"· "}
+.smv-edge-chip{text-anchor:middle; paint-order:stroke fill; stroke:var(--smv-bg,#fbfbfd); stroke-width:3px; stroke-linejoin:round}
 `;
 
 /** Inject the deduped preset stylesheet. Its own marker (G8) — independent of core's, so a
@@ -142,6 +198,61 @@ export function injectPresetStyles(doc) {
 const STATUS_GLYPH = { pending: "⏱", active: "●", done: "✓" }; // clock / dot / check
 const MODE_GLYPH = { manual: "✋", automated: "⚡", auto: "⚡" }; // hand / bolt
 
+// F21/F22/F23 — the node's decoration slots. One row across the top of the box: the status
+// glyph in the left gutter, then (right-aligned) the mode glyph and the duration chip. The
+// occupancy badge run-render.js draws has its own slot ABOVE the box, so nothing shares a
+// corner any more.
+const CHIP_FONT = "600 10px system-ui,-apple-system,'Segoe UI',sans-serif";
+const CHIP_Y = 10;      // the row's baseline, from the box's top edge
+const CHIP_GAP = 10;    // right gutter
+const GLYPH_W = 16;     // one status/mode glyph column
+const CHIP_ROW = 8;     // extra height the row asks measurement for
+const SHORT_H = 42;     // below this a plain box has no room for the row beside its label
+
+const chipTextFor = (data) => formatDuration(parseDuration(data && data.duration));
+const chipWidth = (text) => (text ? Math.ceil(textWidth(text, CHIP_FONT)) : 0);
+
+/** The text the chip will actually carry. With the measure ctx (`{nodes, cache}`) that is
+ *  the EFFECTIVE duration — a container showing a durationAgg rollup has no `data.duration`
+ *  of its own, and measuring only that would reserve nothing for a chip it does draw. */
+const chipTextOf = (node, ctx) =>
+  ctx && ctx.nodes
+    ? formatDuration(effectiveDurationSec(ctx.nodes, node.id, ctx.cache))
+    : chipTextFor(node && node.data);
+
+/**
+ * F22/F23 — what the preset needs reserved on every node it decorates, in the shape
+ * `opts.layout.measure` takes. `mount(..., { preset: 'pipeline' })` installs it unless the
+ * caller supplied their own; pass it by hand alongside `presetPipeline(g)`.
+ *
+ * The label is centred, so BOTH gutters have to be as wide as the wider one for it to clear
+ * the decorations on either side — hence `2 * max(left, right)`.
+ */
+export const PIPELINE_MEASURE = {
+  extraWidth(node, ctx) {
+    const d = (node && node.data) || {};
+    const chip = chipWidth(chipTextOf(node, ctx));
+    const right = chip ? chip + CHIP_GAP : 0;
+    return 2 * Math.max(
+      STATUS_GLYPH[d.status] ? GLYPH_W : 0,
+      right + (MODE_GLYPH[d.mode] ? GLYPH_W : 0),
+    );
+  },
+  extraHeight(node, ctx) {
+    const d = (node && node.data) || {};
+    return chipTextOf(node, ctx) || STATUS_GLYPH[d.status] || MODE_GLYPH[d.mode] ? CHIP_ROW : 0;
+  },
+};
+
+/** Edge labels are the content in a preset-driven diagram — the 90px default cap is not
+ *  enough for "retry ×3 · backoff 200ms → 800ms" (F26). */
+export const PIPELINE_EDGE_LABEL_MAX_W = 180;
+
+/** Detach a decoration, tolerating the DOM-lite hosts this file is tested against. */
+function removeEl(el) {
+  if (el && el.parentNode && typeof el.parentNode.removeChild === "function") el.parentNode.removeChild(el);
+}
+
 function makeText(doc, host, cls) {
   const el = doc.createElementNS(SVG_NS, "text");
   el.setAttribute("class", cls);
@@ -155,16 +266,44 @@ function setXY(el, x, y) {
 }
 
 /** Position the three adornments against the node's *committed* box (D7 — style-commit
- *  time only, never per frame; the chip glides for free as the node's own <g> tweens). */
+ *  time only, never per frame; the chip glides for free as the node's own <g> tweens).
+ *
+ *  The mode glyph is placed off the chip's MEASURED width rather than a fixed inset, so a
+ *  wide chip ("300ms") can no longer sit on top of it (F21). A PLAIN box too short for the
+ *  row to clear its vertically centred label wears the row just above itself instead
+ *  (F23) — which is what `PIPELINE_MEASURE.extraHeight` exists to avoid needing. A
+ *  container never lifts: a collapsed one is 36px by construction, and its chip is the
+ *  rollup the condense odometer and delta badge anchor to, which has to stay in the box. */
 function positionParts(parts, rect) {
   if (!rect) return;
   const w = Number.isFinite(rect.w) ? rect.w : 0;
-  const container = typeof parts.host.hasAttribute === "function" && parts.host.hasAttribute("data-container");
-  const collapsed = typeof parts.host.hasAttribute === "function" && parts.host.hasAttribute("data-collapsed");
-  const y = container && !collapsed ? HEADER_H / 2 : 10;
+  const h = Number.isFinite(rect.h) ? rect.h : 0;
+  const has = (a) => typeof parts.host.hasAttribute === "function" && parts.host.hasAttribute(a);
+  const container = has("data-container");
+  const y = container
+    ? (has("data-collapsed") ? CHIP_Y : HEADER_H / 2)
+    : h > 0 && h < SHORT_H ? -7 : CHIP_Y;
+  const cw = chipWidth(parts.chip.textContent);
   setXY(parts.status, 12, y);
-  setXY(parts.mode, Math.max(12, w - 32), y);
-  setXY(parts.chip, Math.max(12, w - 10), y);
+  setXY(parts.chip, Math.max(12, w - CHIP_GAP), y);
+  setXY(parts.mode, Math.max(12, w - CHIP_GAP - cw - (cw ? 6 : 0)), y);
+}
+
+const EDGE_CHIP_OFFSET = 9;
+
+/** Midpoint of an edge's committed bend chain, pushed off the line on the opposite side
+ *  from the edge label so the two never sit on each other (F26).
+ *
+ *  The point AND the tangent come from pointAt(), i.e. the arc-length midpoint of the whole
+ *  chain — the same function render.js places the label with. Indexing the chain by hand
+ *  used to pick `points[(n-1)/2]` for an odd-length chain (every edge the solver bent), so
+ *  `a === b`, the tangent was (0,0) and the perpendicular push evaluated to nothing: the
+ *  chip landed exactly on the bend point, under the label it is supposed to dodge. */
+function positionEdgeChip(el, points) {
+  if (!points || points.length < 2) return;
+  const mid = pointAt(points, 0.5);
+  const nx = -Math.sin(mid.angle), ny = Math.cos(mid.angle);
+  setXY(el, mid.x - nx * EDGE_CHIP_OFFSET, mid.y - ny * EDGE_CHIP_OFFSET);
 }
 
 const DELTA_BADGE_MS = 1600;
@@ -215,14 +354,11 @@ function popDeltaBadge(ticker, doc, host, text, reduced) {
   const ms = reduced ? 1 : DELTA_BADGE_MS;
   const t0 = ticker.now();
   let done = false;
-  function remove() {
-    if (el.parentNode && typeof el.parentNode.removeChild === "function") el.parentNode.removeChild(el);
-  }
   function step(now) {
     if (now - t0 < ms) return;
     done = true;
     ticker.remove(step);
-    remove();
+    removeEl(el);
   }
   ticker.add(step);
   return {
@@ -230,7 +366,7 @@ function popDeltaBadge(ticker, doc, host, text, reduced) {
       if (done) return;
       done = true;
       ticker.remove(step);
-      remove();
+      removeEl(el);
     },
   };
 }
@@ -249,38 +385,43 @@ function findChildByClass(root, cls) {
 
 function ensureTotalBar(doc, root) {
   if (!doc || typeof doc.createElement !== "function" || !root) return null;
-  const existingWrap = findChildByClass(root, "smv-totalbar");
-  if (existingWrap) {
-    const track = findChildByClass(existingWrap, "smv-totalbar-track");
-    const fill = track && findChildByClass(track, "smv-totalbar-fill");
-    const label = findChildByClass(existingWrap, "smv-totalbar-label");
-    if (track && fill && label) return { wrap: existingWrap, fill, label, maxSec: 0 };
-  }
-  const wrap = doc.createElement("div");
-  wrap.setAttribute("class", "smv-totalbar");
-  const track = doc.createElement("div");
-  track.setAttribute("class", "smv-totalbar-track");
-  const fill = doc.createElement("div");
-  fill.setAttribute("class", "smv-totalbar-fill");
-  track.appendChild(fill);
-  const label = doc.createElement("span");
-  label.setAttribute("class", "smv-totalbar-label");
-  wrap.appendChild(track);
-  wrap.appendChild(label);
-  root.appendChild(wrap);
-  return { wrap, fill, label, maxSec: 0 };
+  const part = (parent, cls, tag) => {
+    let el = findChildByClass(parent, cls);
+    if (!el) {
+      el = doc.createElement(tag);
+      el.setAttribute("class", cls);
+      parent.appendChild(el);
+    }
+    return el;
+  };
+  const wrap = part(root, "smv-totalbar", "div");
+  // Built (or re-found) in reading order: "sum [====] 2h45m · critical 1h05m" (F24).
+  const key = part(wrap, "smv-totalbar-key", "span");
+  const track = part(wrap, "smv-totalbar-track", "div");
+  const fill = part(track, "smv-totalbar-fill", "div");
+  const label = part(wrap, "smv-totalbar-label", "span");
+  const alt = part(wrap, "smv-totalbar-alt", "span");
+  return { wrap, key, fill, label, alt, maxSec: 0 };
 }
 
 /**
- * applyPipelinePreset(g) — the single entry point (also exposed as
+ * applyPipelinePreset(g, opts) — the single entry point (also exposed as
  * `SparkleMotion.presetPipeline` / `opts.preset: 'pipeline'` by the integration layer).
  * Returns `{ destroy() }` so a page that unmounts the preset independently of `g` can.
+ *
+ * `opts.total` (F24) picks what the bottom bar reports: `'sum'` (the declared work added
+ * up), `'critical'` (the longest chain through the graph), or `'both'` — the default,
+ * which labels them so the two numbers on the page can never be confused. `'both'` falls
+ * back to the bare sum whenever the two are equal (a straight pipeline).
  */
-export function applyPipelinePreset(g) {
+export function applyPipelinePreset(g, opts = {}) {
   const doc = (g.el && g.el.ownerDocument) || null;
   injectPresetStyles(doc);
 
+  const want = opts && opts.total;
+  const totalMode = want === "sum" || want === "critical" ? want : "both";
   const parts = new Map(); // id -> {host, chip, status, mode}
+  const edgeParts = new Map(); // edge id -> {host, chip}
   const bar = ensureTotalBar(doc, g.el);
   const liveTimers = new Set(); // in-flight runOdometer()/popDeltaBadge() cancel handles
 
@@ -300,17 +441,34 @@ export function applyPipelinePreset(g) {
     return p;
   }
 
-  function updateTotalBar(totalSec) {
+  /** F8/F26 — `edge.data.duration` as a chip on the wire itself. */
+  function edgeChipFor(id) {
+    const host = g.renderer && g.renderer.edge && g.renderer.edge(id);
+    if (!host || !doc) return null;
+    let p = edgeParts.get(id);
+    if (!p || p.host !== host) {
+      p = { host, chip: makeText(doc, host, "smv-edge-chip") };
+      edgeParts.set(id, p);
+    }
+    return p;
+  }
+
+  function updateTotalBar(sumSec, critSec) {
     if (!bar) return;
-    if (totalSec == null) {
+    if (sumSec == null) {
       bar.wrap.style.setProperty("display", "none");
       return;
     }
     bar.wrap.style.removeProperty("display");
-    bar.maxSec = Math.max(bar.maxSec, totalSec);
-    const pct = bar.maxSec > 0 ? Math.min(100, (totalSec / bar.maxSec) * 100) : 100;
+    const crit = Number.isFinite(critSec) ? critSec : null;
+    const both = totalMode === "both" && crit != null && crit !== sumSec;
+    const primary = totalMode === "critical" && crit != null ? crit : sumSec;
+    bar.maxSec = Math.max(bar.maxSec, primary);
+    const pct = bar.maxSec > 0 ? Math.min(100, (primary / bar.maxSec) * 100) : 100;
     bar.fill.style.setProperty("width", `${pct}%`);
-    bar.label.textContent = formatDuration(totalSec);
+    bar.key.textContent = both ? "sum" : totalMode === "critical" && crit != null ? "critical" : "";
+    bar.label.textContent = formatDuration(primary);
+    bar.alt.textContent = both ? `critical ${formatDuration(crit)}` : "";
   }
 
   function onCommit(ev) {
@@ -333,7 +491,20 @@ export function applyPipelinePreset(g) {
       positionParts(p, ev && ev.nodes && ev.nodes[n.id]);
     }
     for (const id of [...parts.keys()]) if (!nodesById.has(id)) parts.delete(id);
-    updateTotalBar(hasTotal ? total : null);
+
+    const live = new Set();
+    for (const e of spec.edges || []) {
+      const text = chipTextFor(e.data);
+      if (!text) continue;
+      const p = edgeChipFor(e.id);
+      if (!p) continue;
+      live.add(e.id);
+      p.chip.textContent = text;
+      positionEdgeChip(p.chip, ev && ev.edges && ev.edges[e.id] && ev.edges[e.id].points);
+    }
+    for (const [id, p] of edgeParts) if (!live.has(id)) { removeEl(p.chip); edgeParts.delete(id); }
+
+    updateTotalBar(hasTotal ? total : null, hasTotal ? criticalPathSec(spec, cache) : null);
   }
 
   /** Tracks a runOdometer()/popDeltaBadge() cancel handle so destroy() can stop it — wraps
@@ -377,17 +548,13 @@ export function applyPipelinePreset(g) {
       else g.off("condense", onCondense);
       for (const handle of [...liveTimers]) handle.cancel();
       liveTimers.clear();
-      for (const p of parts.values()) {
-        for (const el of [p.chip, p.status, p.mode]) {
-          if (el.parentNode && typeof el.parentNode.removeChild === "function") el.parentNode.removeChild(el);
-        }
-      }
+      for (const p of parts.values()) for (const el of [p.chip, p.status, p.mode]) removeEl(el);
       parts.clear();
-      if (bar && bar.wrap.parentNode && typeof bar.wrap.parentNode.removeChild === "function") {
-        bar.wrap.parentNode.removeChild(bar.wrap);
-      }
+      for (const p of edgeParts.values()) removeEl(p.chip);
+      edgeParts.clear();
+      if (bar) removeEl(bar.wrap);
     },
   };
 }
 
-export default { applyPipelinePreset, injectPresetStyles, formatDuration, aggregateDuration, deltaBadgeText };
+export default { applyPipelinePreset, injectPresetStyles, formatDuration, aggregateDuration, deltaBadgeText, criticalPathSec, PIPELINE_MEASURE };

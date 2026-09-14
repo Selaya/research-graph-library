@@ -13,25 +13,64 @@ export interface NodeSpec {
   label?: string;
   /** Containment: this node is a child of `parent` (compound / container nodes, D5). */
   parent?: string;
-  /** Free-form payload. Two keys are read by the Mode A run engine (src/run.js):
+  /** Free-form payload. Four keys are read by the Mode A run engine (src/run.js):
    *  - `duration`: `"2h" | "45m" | "8s" | "300ms" | 12` (bare number = seconds) — paces
    *    the dwell. Unparseable or negative values warn and fall back to the default.
    *  - `fail`: truthy = this step runs its dwell and then FAILS — status `'failed'`, no
    *    fan-out to its successors, a `'fail'` run event. A string value is carried through
-   *    as that event's `reason`. (Mode B's equivalent is `LiveRun.fail(id)`.) */
+   *    as that event's `reason`; the object form `{reason, retries, recover}` gives it a
+   *    retry budget (see `NodeFail`). (Mode B's equivalent is `LiveRun.fail(id)`.)
+   *  - `entry`: `true` declares an EXTRA seed — this node is minted a token of its own at
+   *    t = 0 even when it has in-edges (a saga's compensation, a token refresh).
+   *  - `startAt`: when this node's seed token appears, in ms on the compiled clock
+   *    (a string goes through the duration grammar, so `"2s"` is 2000). */
   data?: Record<string, unknown>;
   /** Container starts collapsed. */
   collapsed?: boolean;
+  /** Treat this node as a container even before anything names it as a `parent` (F33):
+   *  it draws as a header-only box (`data-container` + `data-empty`) and reaches the
+   *  layout solver flagged `container: true`, instead of being a plain leaf until its
+   *  first child arrives. Ignored (harmlessly) once the node does have children.
+   *  View/layout/render only: collapse, expand, the tap toggle, `aria-expanded` and the
+   *  run engine all keep keying off "has children", so an empty declared container is not
+   *  collapsible and is still an executable step. */
+  container?: boolean;
+  /** F9 — container ports: the descendants an edge INTO this container attaches to. With
+   *  several, the incoming edge fans out to all of them, like any other fan-out. Default
+   *  (unset): the one inferred entry child. */
+  entry?: string[];
+  /** F9 — the descendants an edge OUT of this container is fed by. Several exits give the
+   *  downstream node that many in-edges, so its implicit AND-join waits for all of them. */
+  exit?: string[];
   join?: JoinPolicy;
   type?: string;
   iterate?: unknown;
   children?: unknown;
   /** Container/collapsed-group duration rollup (preset-pipeline). */
   durationAgg?: "sum" | "max";
+  /** Container status rollup from its descendants in Mode A (src/run.js), the status
+   *  mirror of `durationAgg`. `'earliest-fail'` (default) keeps the container `'failed'`
+   *  from the first descendant failure onward; `'latest'` follows the most recent
+   *  descendant outcome, so a later success clears it again; `'none'` never inherits a
+   *  failure at all. */
+  statusAgg?: "earliest-fail" | "latest" | "none";
   w?: number;
   h?: number;
   groups?: unknown;
   [key: string]: unknown;
+}
+
+/** A rich edge label (F25). A bare string is the same thing with every default taken. */
+export interface EdgeLabelSpec {
+  text: string;
+  /** Where along the (clipped) path it rides. Default `'mid'`. */
+  place?: "mid" | "start" | "end";
+  /** Lay the text along the line instead of upright. Default `false`; never upside down. */
+  rotate?: boolean;
+  /** Draw an opaque backing plate instead of the background-colored halo. Default `false`. */
+  pill?: boolean;
+  /** Truncation cap in px for THIS label, beating `LayoutOpts.edgeLabelMaxW` (F26). */
+  maxW?: number;
 }
 
 export interface EdgeSpec {
@@ -41,12 +80,28 @@ export interface EdgeSpec {
   /** Back/retry edge; requires `maxIterations` (D3/D4). */
   loop?: boolean;
   maxIterations?: number;
-  label?: string;
+  /** F1 — a `loop` edge that fires only out of a DECLARED FAILURE at its source: its
+   *  iteration budget is that node's retry budget, and it is the arc each retry crosses.
+   *  It is inert on a successful finish (an ordinary loop edge handles that case). */
+  onFail?: boolean;
+  label?: string | EdgeLabelSpec;
+  /** `data.duration` (same grammar as a node's) is this edge's own hop time (F8); `hopMs`
+   *  is the default for every edge that declares none. */
   data?: Record<string, unknown>;
   /** Meta-edge aggregation weight (>1 renders as a heavier line + badge). */
   weight?: number;
   [key: string]: unknown;
 }
+
+/** The merged-node spec `g.condense()` takes. Same as `NodeSpec`, except `parent` may also
+ *  be `null` — "inherit the sources' common parent", exactly like leaving it out (a spec
+ *  built from a form or a diff has no other way to say "absent"). When the sources have
+ *  DIFFERENT parents there is no common one to inherit: the merged node lands at the top
+ *  level and warns, so name a `parent` explicitly for a cross-container merge. A source
+ *  swallowed by another source (a container named together with one of its own children)
+ *  is not a second parent — its parent is being removed too, so the common parent is still
+ *  the container's. */
+export type CondenseNodeSpec = Omit<NodeSpec, "parent"> & { parent?: string | null };
 
 export interface GraphSpec {
   nodes?: NodeSpec[];
@@ -87,7 +142,10 @@ export type GraphErrorCode =
   | "storyboard-label"
   /** g.batch(fn) was called with an fn that returned a thenable (finding #2): batch
    *  requires a synchronous callback. */
-  | "batch-async";
+  | "batch-async"
+  /** `g.validate()` was handed a step whose `op` is not a known op name. Reported in the
+   *  returned `errors`, never thrown. */
+  | "validate-op";
 
 /** The real, importable error class every `g` mutation method throws (`src/store.js`).
  *  `code` is one of `GraphErrorCode`; `message` is human-readable and already carries the
@@ -192,11 +250,34 @@ export interface LayoutResult {
 // supplies the same contract on top of the optional @dagrejs/dagre peer.
 // ---------------------------------------------------------------------------
 
+/** A node as the drawing sees it: the spec node plus the fields the view pass computed.
+ *  This is what `StyleFn` and `LayoutOpts.hint` are handed. */
+export interface ViewNode extends NodeSpec {
+  w?: number;
+  h?: number;
+  /** Has children, or was declared with `NodeSpec.container` (F33). */
+  container?: true;
+  /** A container with no children yet — mirrored as `data-empty` on the DOM group. */
+  empty?: true;
+  /** Container currently folded shut. */
+  collapsed?: true;
+  /** Hidden descendants, on a collapsed container only (the ×N badge). */
+  count?: number;
+  /** Containment depth, 0 at the root. */
+  depth?: number;
+}
+
 export interface LayoutViewNode {
   id: string;
   w?: number;
   h?: number;
   parent?: string;
+  /** True for a container — one with children, or one declared with `NodeSpec.container`
+   *  before it has any (F33). Absent on leaves. */
+  container?: true;
+  /** The node's own `data`, or whatever `LayoutOpts.hint(node)` picked instead (F32), so a
+   *  placement-driven solver can read per-node hints. Absent when there is nothing to pass. */
+  data?: unknown;
 }
 
 export interface LayoutViewEdge {
@@ -205,7 +286,9 @@ export interface LayoutViewEdge {
   target: string;
 }
 
-/** What the shell hands a solver: acyclic, and no edge incident to a node with children. */
+/** What the shell hands a solver: acyclic, and no edge incident to a node with children.
+ *  Every custom key on `LayoutOpts` reaches the solver untouched, by spread — that is the
+ *  supported channel for a solver's own options. */
 export interface SolverInput {
   nodes: LayoutViewNode[];
   edges: LayoutViewEdge[];
@@ -229,12 +312,38 @@ export type LayoutSolver = (input: SolverInput, opts: LayoutOpts) => SolverResul
 // Options
 // ---------------------------------------------------------------------------
 
+import type { PipelinePresetOpts } from "./preset-pipeline.js";
+
 export type ThemeName = "auto" | "light" | "dark";
 export type EasingName = "linear" | "cubic-out" | "cubic-in-out" | "overshoot";
 export type EasingFn = (t: number) => number;
 
+/** The rest of the graph, handed to a measure hook whose chrome depends on more than the
+ *  node itself (the pipeline preset's rollup chip reads its children's durations). */
+export interface MeasureCtx {
+  nodes: Map<string, NodeSpec>;
+  cache: Map<string, unknown>;
+}
+
+/** F22/F23 - what a decoration layer contributes to node measurement. Each entry is a
+ *  number or a per-node function; anything non-finite reads as 0. A node that declares both
+ *  `w` and `h` opts out entirely; one that declares only `w` keeps that width and still
+ *  gets the reserve. `extraWidth` is reserved CHROME, not label room: the renderer
+ *  truncates the label to the box minus it, so a chip can never be run under. It widens the
+ *  box inside the 220px maximum, never past it. */
+export interface MeasureOpts {
+  extraWidth?: number | ((node: NodeSpec, ctx?: MeasureCtx) => number);
+  extraHeight?: number | ((node: NodeSpec, ctx?: MeasureCtx) => number);
+}
+
 export interface LayoutOpts {
   dir?: "LR" | "TB" | "RL" | "BT";
+  /** Node measurement contributions (F22/F23). `mount(..., {preset:'pipeline'})` installs
+   *  the preset's own unless you set one. */
+  measure?: MeasureOpts | null;
+  /** Edge-label truncation cap in px for the whole drawing (F26). Default 90; the pipeline
+   *  preset raises it to 180 when you set none. Per-edge `label.maxW` still wins. */
+  edgeLabelMaxW?: number;
   nodesep?: number;
   ranksep?: number;
   marginx?: number;
@@ -246,6 +355,9 @@ export interface LayoutOpts {
   prevOrder?: string[][];
   /** The bend half of the same channel (LayoutResult.layers). Persist and pass both. */
   prevLayers?: string[][];
+  /** Pick what each node carries to the solver as `LayoutViewNode.data` (F32). Defaults to
+   *  the node's own `data`; return `undefined` to pass nothing for that node. */
+  hint?: (node: ViewNode) => unknown;
   /**
    * Pin the order of the drawing's DISCONNECTED components (e.g. several parallel
    * pipelines), which nothing else holds in place: with no edges between them, adding or
@@ -289,15 +401,21 @@ export interface MountOpts {
   animation?: AnimationOpts;
   /** Mounts `.smv-transport` (play/pause/step/scrub/speed). */
   controls?: boolean;
-  /** `'pipeline'` applies the bundled preset (duration chips, status glyphs, odometer). */
-  preset?: "pipeline";
+  /** `'pipeline'` applies the bundled preset (duration chips, status glyphs, odometer), and
+   *  installs its measurement/edge-label defaults into `layout` (F22/F23/F26). The object
+   *  form passes options through: `{ name: 'pipeline', total: 'critical' }` (F24). */
+  preset?: "pipeline" | ({ name: "pipeline" } & PipelinePresetOpts);
   /** ARIA + keyboard is on by default; pass `false` to opt out. */
   a11y?: boolean;
-  /** Pointer interactions. `tapToggle` (tap/click a container to expand/collapse) is on
-   *  by default; pass `{ tapToggle: false }` to opt out. */
-  interaction?: { tapToggle?: boolean };
+  /** Pointer interactions. `tapToggle` (tap/click a container to expand/collapse) and
+   *  `click` (the `nodeclick`/`edgeclick` events, F27) are both on by default; either can be
+   *  turned off on its own. */
+  interaction?: { tapToggle?: boolean; click?: boolean };
   storyboard?: StoryboardStep[];
-  autoplay?: boolean;
+  /** `true` plays the storyboard as soon as it is mounted; `'auto'` plays it only when the
+   *  page URL carries `?auto=1` (or `auto=true`) — the headless-verification convention
+   *  `g.finished` completes (F36). */
+  autoplay?: boolean | "auto";
   /** D15 (M4) — `'manual'` drives the shared ticker by hand (`g.ticker.tick(ms)`) instead
    *  of rAF, and stamps `data-smv-record` on the root to kill every CSS transition. What
    *  the deterministic frame renderer mounts with. */
@@ -310,7 +428,7 @@ export interface MountOpts {
 }
 
 /** Node-scoped user style function (§5.6) — return `--smv-*` custom-property values only. */
-export type StyleFn = (node: NodeSpec) => Record<string, string | number> | null | undefined;
+export type StyleFn = (node: ViewNode) => Record<string, string | number> | null | undefined;
 
 // ---------------------------------------------------------------------------
 // Query sugar (src/query.js)
@@ -336,6 +454,14 @@ export interface NodeRunState {
   status: "pending" | "active" | "done" | "failed";
   progress: number;
   occupancy: number;
+  /** Mode B only. Occupants that are not working yet — a landed arrival, or one still held
+   *  by a join that has not fired. `waiting + active === occupancy`. */
+  waiting?: number;
+  /** Mode B only. Occupants currently dwelling (an explicit `start()` picked them up). */
+  active?: number;
+  /** Mode B only. The live dwell outran the node's declared `data.duration` (which in live
+   *  mode is an expectation, never a schedule). Rendered as `data-over-budget`. */
+  overBudget?: boolean;
 }
 export interface EdgeRunState {
   traversed: number;
@@ -365,11 +491,34 @@ export interface RunEvent {
    *  compile-time diagnostic (carries `nodeId`, `message`, `value`). Both are re-emitted
    *  on the run bus by type, like every other event. */
   type: "enter" | "start" | "finish" | "fail" | "spawn" | "join" | "drop" | "loop" | "warn" | "done";
+  /** `fail` events: the 1-based attempt, its retry budget, and whether this one stuck. */
+  attempt?: number;
+  retries?: number;
+  terminal?: boolean;
   [key: string]: unknown;
 }
 
+export interface NodeFail {
+  /** Carried through as the emitted `'fail'` event's `reason`. Annotation only. */
+  reason?: string;
+  /** F1 — attempts AFTER the first. Each spent retry re-runs the dwell and emits its own
+   *  `'fail'` (`terminal: false`) plus a `'loop'`; the node only reaches status `'failed'`
+   *  when the budget is gone. Omitted: an `onFail` loop edge out of this node supplies the
+   *  budget instead, and with neither it is 0 — today's single terminal attempt. */
+  retries?: number;
+  /** The attempt that spends the last retry SUCCEEDS instead: `'finish'`, fan-out, status
+   *  `'done'` — "fail, retry, pass" without recompiling the run. */
+  recover?: boolean;
+}
+
 export interface Sim {
+  /** The DECLARED timeline's length in ms. Playback speed never moves it (F7). */
   duration: number;
+  /** `duration` under its intent-revealing name. */
+  declared?: number;
+  /** Wall-clock ms the declared timeline takes at the current bare `speed()` multiplier
+   *  (`Infinity` at speed 0). Mode A and Mode B both report it. */
+  playback?: number;
   events: RunEvent[];
   boundaries?: number[];
   stateAt(t: number): RunState;
@@ -387,6 +536,14 @@ export interface RunOptsBase {
   rates?: RunRate[];
   hopMs?: number;
   dwell?: (sec: number | null, ctx?: unknown) => number;
+  /** Playback multiplier a bare `speed(f)` set — playback only, never the schedule (F7). */
+  playbackSpeed?: number;
+}
+
+/** An extra seed: one token minted at `id` at `at` ms on the compiled clock (F3). */
+export interface RunEntry {
+  id: string;
+  at?: number;
 }
 
 export interface LiveEvent {
@@ -400,12 +557,35 @@ export interface LiveEvent {
 
 export interface SimRunOpts extends RunOptsBase {
   mode?: "simulate";
+  /** Pre-seed extra tokens (the compile input `run.inject()` appends to, F3). */
+  entries?: RunEntry[];
 }
 export interface LiveRunOpts extends RunOptsBase {
   mode: "live";
   /** Re-seed the live event log (re-seeding/tests). The frontier starts at the seeded
    *  log's own span, so the events handed in are immediately reachable. */
   log?: LiveEvent[];
+  /** Explicit epoch for the frontier, ms. Use it when the run resumes a session that has
+   *  already been running for `now` ms, so later `{ at }` stamps are not clamped back onto
+   *  a frontier that restarted at the seeded log's span. */
+  now?: number;
+  /** Shortest crossing, in ms, a hop may be squashed to when a `start()` claims it while it
+   *  is still in flight (default 0 — the start collapses the hop). Clamped to `hopMs`. Set
+   *  it when replaying real timestamps, where a parent's dispatch instant IS the child's
+   *  start instant and every token would otherwise teleport. */
+  minHopMs?: number;
+  /** Whether a bare `start()` may mint a token where nothing is waiting (default `true`).
+   *  `false` makes a warned-about phantom start a no-op; `start(id, { spawn: true })` still
+   *  mints one deliberately. A root always seeds itself either way. */
+  spawnOnStart?: boolean;
+}
+
+/** What `LiveRun.reset()` accepts — `options()` returns exactly this shape. */
+export interface LiveResetOpts extends Omit<LiveRunOpts, "mode"> {
+  mode?: "live";
+  /** Re-emit every seeded entry through this handle's emitter as it is re-seeded, in log
+   *  order, each payload carrying `replay: true`. */
+  replay?: boolean;
 }
 export type RunOpts = SimRunOpts | LiveRunOpts;
 
@@ -414,13 +594,21 @@ export interface RunControllerBase {
   play(o?: { until?: string }): Promise<{ canceled: boolean }>;
   pause(): number;
   seek(ms: number): number;
-  /** `{branch}` is per-token in Mode A, a documented no-op in Mode B (§5.4). */
+  /** Bare: a pure PLAYBACK multiplier in both modes — it scales how fast the clock walks
+   *  the timeline and leaves `duration` alone (F7). `{branch}` is a Mode A compile input
+   *  (a rate event, which does re-time the schedule) and a documented no-op in Mode B. */
   speed(factor: number, o?: { branch?: string }): number;
+  /** The multiplier a bare `speed()` set; 1 = real declared time. */
+  playbackSpeed(): number;
   step(o?: { token?: string }): number;
   /** First moment `nodeId` finishes — what a `run.play({until})` storyboard step is worth. */
   timeOf(nodeId: string): number;
   /** In-place re-seat (recompile/reseed + silent resync); used by storyboard restore (G2). */
   reset(o?: Record<string, unknown>, time?: number): number;
+  /** Force a recompile against the LIVE spec, returning the new `duration` — Mode A picks
+   *  the edited graph up on the next sample; Mode B has nothing to recompile and hands back
+   *  the current frontier. What a page calls after mutating the graph mid-run. */
+  reload(): number;
   readonly playing: boolean;
   /** Mode A: the compiled run's total ms. Mode B: the frontier (grows). */
   readonly duration: number;
@@ -436,11 +624,20 @@ export interface RunControllerBase {
 }
 
 /** Mode A — compiled/declared token schedule. */
-export type SimRun = RunControllerBase;
+export interface SimRun extends RunControllerBase {
+  /** F3 — mint a token at `nodeId` on the compiled clock (`at` defaults to now),
+   *  recompiling and extending the schedule around it. The seed is a compile input, so it
+   *  survives later recompiles and round-trips through `options()`/`reset()`. Injecting
+   *  into a container seeds every entry child. Returns the instant it was seeded. */
+  inject(nodeId: string, o?: { at?: number }): number;
+}
 
 /** Mode B — event-log/replayed. `t` can never exceed `now()`; `following` tracks it live. */
 export interface LiveRun extends RunControllerBase {
-  start(id: string, o?: { at?: number }): number;
+  /** `{ spawn: true }` says "mint a token here on purpose" — without it, a start on a
+   *  non-root with nothing waiting, nothing crossing towards it and no finished attempt to
+   *  retry warns (`[smv:live]`), and is ignored entirely under `spawnOnStart: false`. */
+  start(id: string, o?: { at?: number; spawn?: boolean }): number;
   finish(id: string, o?: { at?: number; n?: number }): number;
   /** Terminal sibling of `finish`: consumes every current occupant of `id` WITHOUT fanning
    *  tokens out (the branch dies), leaves the node on status `'failed'`, and emits a
@@ -450,6 +647,8 @@ export interface LiveRun extends RunControllerBase {
    *  no-op, exactly as `finish` is. */
   fail(id: string, o?: { at?: number; reason?: string }): number;
   spawn(id: string, n: number, o?: { at?: number }): number;
+  /** Re-seed the log under the same transport identity/listeners: `{ log, now, replay }`. */
+  reset(o?: LiveResetOpts, time?: number): number;
   /** Re-attach the view clock to the frontier immediately (a "jump to live" snap). */
   follow(): number;
   readonly following: boolean;
@@ -464,8 +663,19 @@ export type Run = SimRun | LiveRun;
 // Storyboard (src/storyboard.js's op table, as index.js's applyStep dispatches it)
 // ---------------------------------------------------------------------------
 
+/** Chrome sitting OVER the pane that a fit must keep clear of, in screen px (F15). A bare
+ *  number is all four sides; `0` opts out of the library's own measurement. */
+export interface Inset {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}
+
 /** Where a `camera` op is pointed. First match wins, in declaration order: absolute
- *  `x`/`y` -> `node` -> `nodes` -> `fit` -> relative `zoom`/`by`. */
+ *  `x`/`y` -> `node` -> `nodes` -> `fit` -> relative `zoom`/`by`. A `node`/`nodes` id that
+ *  is a collapsed descendant resolves to the nearest DRAWN ancestor (F16); only an id
+ *  nothing can resolve warns. */
 export interface CameraTarget {
   /** Absolute transform (screen px / scale). `k` alone is a relative zoom-to-scale. */
   x?: number;
@@ -483,6 +693,12 @@ export interface CameraTarget {
   zoom?: number;
   /** Padding around a framed box (default 24). */
   pad?: number;
+  /** Chrome to keep the shot clear of. Defaults to the bars the library itself mounted
+   *  (transport, the preset's total bar, the caption strip); `0` opts out (F15). */
+  inset?: Inset | number;
+  /** Lid on a FITTED scale — never on an explicit `k`. Defaults to 1.5 for a `nodes[]`
+   *  union, so two nodes in a short pane are not an extreme close-up (F17). */
+  maxK?: number;
   /** Move duration in ms (default 600). Reduced motion shrinks it to 1 (G9). */
   dur?: number;
   ease?: EasingName;
@@ -505,8 +721,15 @@ export interface HighlightSelection {
 
 /** M4d/D16 — the per-step custom-property override layer: `{id: {"--smv-*": value}}`,
  *  merged OVER the mount's style function at commit time. `null`/`false` on a key removes
- *  it; only `--smv-*` keys are accepted (D7) and anything else throws. */
-export type PropsOverride = Record<string, Record<string, string | number | false | null>>;
+ *  it; only `--smv-*` keys are accepted (D7) and anything else throws. A whole ENTRY may be
+ *  `null` — under `{merge:true}` (F18) that drops every override for that one id, while the
+ *  rest of the layer stands; in a replacing `props()` call it simply carries no overrides. */
+export type PropsOverride = Record<string, Record<string, string | number | false | null> | null>;
+
+/** `{merge:true}` patches the override layer instead of replacing it (F18). */
+export interface PropsOpts {
+  merge?: boolean;
+}
 
 export interface CaptionOpts {
   place?: "bottom" | "top";
@@ -529,12 +752,23 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "addEdge"; args: [EdgeSpec] }
   | { op: "removeNode"; args: [string] }
   | { op: "removeEdge"; args: [string] }
-  | { op: "update"; args: [string, Record<string, unknown>] }
+  | { op: "update"; args: [string, Record<string, unknown>, UpdateOpts?] }
   | { op: "expand"; args: [string] }
   | { op: "collapse"; args: [string] }
-  | { op: "condense"; args: [string[], NodeSpec] }
+  | { op: "condense"; args: [string[], CondenseNodeSpec] }
   | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }] }
   | { op: "batch"; steps: StoryboardStep[] }
+  /** Every container open / closed in one commit — `g.expandAll()` / `g.collapseAll()`. */
+  | { op: "expandAll"; args?: [] }
+  | { op: "collapseAll"; args?: [] }
+  /** Re-lay the graph out with new layout opts — `g.layout(o)`. */
+  | { op: "layout"; args?: [LayoutOpts?] }
+  /** (Re)compile the run with these opts — `g.run(opts)`. Subscriptions survive it (F6).
+   *  Omit the argument to recompile with the opts the run already has. */
+  | { op: "run"; args?: [(SimRunOpts | LiveRunOpts)?] }
+  /** Re-seat the SAME transport (identity, listeners, live log) back at t = 0 —
+   *  `run.reset(opts, 0)`. Omit the argument to keep the current compile inputs. */
+  | { op: "run.reset"; args?: [(SimRunOpts | LiveRunOpts)?] }
   | { op: "run.play"; until?: string; args?: [{ until?: string }?] }
   | { op: "run.step"; token?: string; args?: [{ token?: string }?] }
   | { op: "run.seek"; ms?: number; args?: [number] }
@@ -543,7 +777,7 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "highlight"; args: [HighlightSelection] }
   | { op: "clearHighlight"; args?: [] }
   | { op: "caption"; args: [string | null, CaptionOpts?] }
-  | { op: "props"; args: [PropsOverride | null] }
+  | { op: "props"; args: [PropsOverride | null, PropsOpts?] }
   | { label: string }
 );
 
@@ -603,9 +837,28 @@ export interface GraphEventMap {
   split: { source: string; targets: string[]; sourceData: NodeSpec };
   /** A node's RUN status changed (run-render.js). Emitted per transition, never per frame;
    *  a run is not a spec mutation, so no `commit` announces it. a11y.js uses it to keep the
-   *  accessible name in step with the live/simulated run. */
-  runstatus: { id: string; status: "pending" | "active" | "done" };
+   *  accessible name in step with the live/simulated run. The status is the engine's own,
+   *  `'failed'` included — a listener switching on it has four cases, not three. */
+  runstatus: { id: string; status: NodeRunState["status"] };
+  /** F36 — the story ended: the storyboard ran out of steps (`"storyboard"`), a page called
+   *  `g.finish(reason)`, or the instance was destroyed (`"destroy"`). Fires at most once,
+   *  alongside `g.finished` resolving. */
+  finish: { reason: string };
+  /** F27 - a clean tap/click on a node, suppressed when the pointer travelled past the tap
+   *  slop (a pan) or a second pointer joined (a pinch). `event` is the raw `pointerup`. */
+  nodeclick: { id: string; event: unknown };
+  /** The same, for an edge. The hit area is the whole edge group - the drawn stroke, its
+   *  label, and the `label: {pill: true}` plate behind it - because a 1.25px stroke is a
+   *  poor thing to aim at (F25/F27). */
+  edgeclick: { id: string; event: unknown };
 }
+
+/** F6 — every run event (`docs/RUN.md` "Event vocabulary") is also mirrored onto the
+ *  instance bus under a `run:` prefix — `g.on("run:finish", …)`, `g.on("run:end", …)` —
+ *  so a listener registered on `g` outlives any number of `g.run(opts)` recompiles. The
+ *  payload is the run event's own payload, passed through untouched — `unknown` here, the
+ *  same as `run.on()`'s, because the run bus carries two open families of events. */
+export type RunMirrorEvent = `run:${string}`;
 
 // ---------------------------------------------------------------------------
 // Opaque low-level handles exposed on `g` for advanced use (export.js reads
@@ -653,6 +906,8 @@ export interface FitOpts {
   pad?: number;
   duration?: number;
   ease?: EasingFn;
+  /** Pane chrome to fit inside of, in screen px (F15). */
+  inset?: Inset | number;
   /** Scale lid. Defaults to 1.5 (the initial-auto-fit rule); pass 4 to frame one node. */
   maxK?: number;
 }
@@ -698,6 +953,46 @@ export interface ViewState {
   view(): unknown;
 }
 
+/** `g.update(id, patch, opts)`. */
+export interface UpdateOpts {
+  /** `patch.data` REPLACES the record's `data` instead of merging into it (`data: {}` or
+   *  `data: undefined` then clears it). Merging is the default either way;
+   *  `data: { key: undefined }` removes a single key without it. */
+  replace?: boolean;
+}
+
+/** The probe `g.validate(fn)` hands its callback: the structural mutation methods, run
+ *  against a throwaway clone, plus the read sugar. Nothing commits, nothing renders, and
+ *  a method that would have thrown records its `GraphError` instead. */
+export interface ValidateProbe {
+  node(id: string): NodeSpec | undefined;
+  edge(id: string): EdgeSpec | undefined;
+  children(id: string): NodeSpec[];
+  spec(): GraphSpec;
+  /** `{after}` mints the same implicit `e:<after>-><id>` edge `g.addNode()` does, so a
+   *  dangling `after` reports `"dangling"` here and the edge is present for later ops. */
+  addNode(node: NodeSpec, opts?: { after?: string }): void;
+  addEdge(edge: EdgeSpec): void;
+  removeNode(id: string): void;
+  removeEdge(id: string): void;
+  update(id: string, patch: Record<string, unknown>, opts?: UpdateOpts): void;
+  condense(ids: Iterable<string>, node: CondenseNodeSpec): void;
+  split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): void;
+  /** View-only — nothing commits, but an unknown id still records `"missing"`, because the
+   *  real `expand()`/`collapse()` throw on one. */
+  expand(id?: string): void;
+  collapse(id?: string): void;
+  expandAll(): void;
+  collapseAll(): void;
+  batch(fn: (probe: ValidateProbe) => void): void;
+}
+
+/** `g.validate()`'s verdict: `ok` is `errors.length === 0`. */
+export interface ValidateResult {
+  ok: boolean;
+  errors: GraphError[];
+}
+
 // ---------------------------------------------------------------------------
 // The mounted instance
 // ---------------------------------------------------------------------------
@@ -717,12 +1012,15 @@ export interface Graph {
    *  not just the payload. Declared ahead of the generic `(type: string, ...)` overload
    *  below so a literal `"*"` resolves here instead of there. */
   on(type: "*", fn: (type: string, payload: unknown) => void): () => void;
+  /** F6 — a mirrored run event (`docs/RUN.md` "Event vocabulary"), e.g. `"run:finish"`. */
+  on(type: RunMirrorEvent, fn: (payload: unknown) => void): () => void;
   on(type: string, fn: (payload: unknown) => void): () => void;
   off<K extends keyof GraphEventMap>(type: K, fn: (payload: GraphEventMap[K]) => void): void;
   /** Same two-argument shape as the `on("*", ...)` overload above — `off()` only needs to
    *  match the function reference, but the type has to line up for callers that keep the
    *  listener in a typed variable. */
   off(type: "*", fn: (type: string, payload: unknown) => void): void;
+  off(type: RunMirrorEvent, fn: (payload: unknown) => void): void;
   off(type: string, fn: (payload: unknown) => void): void;
 
   /** A plain copy, like every plural query method (`nodes()`, `children()`, …) — mutating
@@ -740,7 +1038,22 @@ export interface Graph {
    *  `{canceled, applied}` — see `RemoveNodeResult`. */
   removeNode(id: string): Awaitable<RemoveNodeResult>;
   removeEdge(id: string): Awaitable<MutationResult>;
-  update(id: string, patch: Record<string, unknown>): Awaitable<MutationResult>;
+  /** `patch.data` merges into the record's `data`; `data: { key: undefined }` REMOVES that
+   *  key, and `{ replace: true }` swaps the whole payload. A `collapsed` patch is routed to
+   *  `expand()`/`collapse()` (it is view state, not a rendered spec field): a patch whose
+   *  ONLY key is `collapsed` resolves like they do — `{applied: false}` when the container
+   *  was already in that state — while a patch carrying anything else always resolves
+   *  `{applied: true}`, since the rest of it is committed and rendered either way. A `data`
+   *  left with no keys is dropped, so `node(id).data` reads `undefined` rather than `{}`. */
+  update(id: string, patch: Record<string, unknown>, opts?: UpdateOpts): Awaitable<MutationResult>;
+
+  /** Dry-run the structural guards without committing anything: every op runs against a
+   *  throwaway clone of the store, and every `GraphError` they would have thrown comes back
+   *  in `errors` (an op that fails just does not land in the clone; the ops after it are
+   *  still checked). Takes either a `batch()`-shaped function or an array of
+   *  storyboard-shaped `{op, args}` steps; director/transport steps and `label` markers are
+   *  skipped, an `op` that `storyboard()` would not accept reports `"validate-op"`. */
+  validate(ops: StoryboardStep[] | ((probe: ValidateProbe) => void)): ValidateResult;
 
   /** D5 — children bloom out of the container's previous centre. */
   expand(id: string): Awaitable<MutationResult>;
@@ -749,7 +1062,7 @@ export interface Graph {
   /** D6 — merge N nodes into one over the 3-phase choreography (highlight/converge/reveal).
    *  Resolves with the created/removed ids once the merge actually lands — see
    *  `CondenseSplitResult`. */
-  condense(ids: Iterable<string>, node: NodeSpec): Awaitable<CondenseSplitResult>;
+  condense(ids: Iterable<string>, node: CondenseNodeSpec): Awaitable<CondenseSplitResult>;
   /** D6 inverse — one node becomes N (highlight/diverge/reveal). Same resolution shape as
    *  `condense()`. */
   split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): Awaitable<CondenseSplitResult>;
@@ -771,6 +1084,16 @@ export interface Graph {
 
   /** The transport-facing view of where the story is (also what `.smv-transport` renders from). */
   timeline(): Timeline;
+
+  /** F36 — the "story finished" signal, as ONE promise per instance: it resolves when the
+   *  storyboard runs out of steps (`{reason: "storyboard"}`), when a page calls
+   *  `g.finish()`, or when the instance is destroyed (`{reason: "destroy"}`), so awaiting
+   *  it can never hang. It never rejects and never re-arms. */
+  readonly finished: Promise<{ reason: string }>;
+  /** F36 — mark the story finished by hand: the explicit end for a live-mode or otherwise
+   *  hand-driven page, which has no last storyboard step to reach. Idempotent (the first
+   *  call wins) and it also emits `"finish"` on the instance bus. */
+  finish(reason?: string): Graph;
 
   /** M4/D13 — the scripted camera. The first call hands the viewport to the script, so
    *  relayout stops auto-refitting over composed shots and viewport state joins the G2
@@ -794,11 +1117,14 @@ export interface Graph {
   /** User style functions set `--smv-*` custom properties only (D7). Pass `null` to clear. */
   style(fn: StyleFn | null): Graph;
   /** M4d/D16 — the per-step override layer, merged over `style()`. Replace-not-accumulate
-   *  (this call IS the layer) and snapshotted like emphasis. `null` clears it. */
-  props(map: PropsOverride | null): Graph;
+   *  (this call IS the layer) and snapshotted like emphasis. `null` clears it. F18 —
+   *  `{merge:true}` patches instead: unnamed ids keep their overrides, a `null` value drops
+   *  one key and a `null` entry drops one id. */
+  props(map: PropsOverride | null, opts?: PropsOpts): Graph;
   theme(t: ThemeName): Graph;
   layout(o?: LayoutOpts): Awaitable;
-  fitView(o?: { pad?: number; animate?: boolean; duration?: number }): Graph;
+  /** `inset` defaults to the chrome the library mounted over the pane (F15); `0` opts out. */
+  fitView(o?: { pad?: number; animate?: boolean; duration?: number; inset?: Inset | number }): Graph;
   destroy(): void;
 
   // Query sugar (M2, src/query.js) — spread onto `g`; `node`/`edge` above stay singular.
@@ -813,8 +1139,10 @@ export function mount(el: Element | string, spec?: GraphSpec, opts?: MountOpts):
 
 export const version: string;
 
-/** `opts.preset: 'pipeline'` inline, or `presetPipeline(g)` after the fact. */
-export function presetPipeline(g: Graph): { destroy(): void };
+/** `opts.preset: 'pipeline'` inline, or `presetPipeline(g, opts)` after the fact. Applied
+ *  after mount it decorates what is already on screen, but it cannot retro-fit the node
+ *  measurement it wants - pass `PIPELINE_MEASURE` as `layout.measure` yourself for that. */
+export function presetPipeline(g: Graph, opts?: PipelinePresetOpts): { destroy(): void };
 
 declare const _default: { mount: typeof mount; version: string; presetPipeline: typeof presetPipeline };
 export default _default;

@@ -17,8 +17,13 @@ const metric = join(root, 'build');
 // the usability round (misuse warnings/validation across director/run/live-mode, the
 // aria-live layer, --smv-radius, richer mutation handles) grew it past that, so core
 // moves 40 -> 45KB while the shipped IIFE budget stays at 50KB.
-const CORE_LIMIT = 45 * 1024;
-const IIFE_LIMIT = 50 * 1024;
+// The API-frictions round (docs/API-FRICTIONS.md: retry loops, injected tokens, live joins,
+// edge durations and labels, chrome-aware fit, the measure hook, g.validate, storyboard run
+// ops, container ports) added ~4.8KB gzip to each bundle with the stylesheets already
+// minified in the build; a trim pass found no further slack (the bundle compresses at a
+// uniform ~2.9:1 with no dead code), so core moves 45 -> 50KB and the IIFE 50 -> 55KB.
+const CORE_LIMIT = 50 * 1024;
+const IIFE_LIMIT = 55 * 1024;
 
 const result = spawnSync('node', [join(__dirname, 'build.js')], {
   cwd: root,

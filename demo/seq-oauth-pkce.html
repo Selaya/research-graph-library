@@ -38,6 +38,7 @@
   aside li.now { color: var(--ink); font-weight: 600; }
   aside li.done { color: var(--ink); }
   aside li.done::marker { color: #2f9e6a; }
+  aside li.pick { color: var(--accent); font-weight: 600; }
   ul.watch { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
   ul.watch li { margin: 0 0 4px; }
   footer { margin-top: 20px; color: var(--muted); font-size: 12.5px; }
@@ -54,9 +55,9 @@
   from the identity provider to the app backend — it bounces through the browser, and PKCE's
   <code>code_verifier</code>/<code>code_challenge</code> pair is what stops a stolen code from
   being redeemed by anyone else. Later, the access token quietly expires; the resource API's
-  activation fails outright, and the app backend has to notice that on its own and start a
-  brand-new activation to refresh it — a failed activation cannot hand anything to a
-  successor, so there is no edge from the dead call to the retry.
+  activation fails outright, and the 401 it sends back cannot carry the ball — a failed
+  activation hands nothing to a successor — so the app backend's refresh starts from a token
+  <code>run.inject()</code> mints on its own lifeline at the instant the failure lands.
 </p>
 
 <div class="bar">
@@ -81,10 +82,18 @@
         and the later token refresh.</li>
       <li>55 minutes on, the access token has expired: the resource API's activation fails
         outright (red) and stops there. A failed activation is terminal for its branch — no
-        <code>finish</code> event, no message out — so the retry can't be an edge from it; it's
-        a fresh activation the app backend starts on its own.</li>
+        <code>finish</code> event, no token out along the 401 arrow — so the page listens for
+        that <code>fail</code> and calls <code>run.inject("app.5")</code>, minting the refresh
+        token on the app backend's lifeline at the failure's own instant.</li>
+      <li>The Resource API lifeline goes red on the 401 and clears again when the retried call
+        succeeds: each actor declares <code>statusAgg: "latest"</code>, so one failed call does
+        not paint the column red for the rest of the story.</li>
       <li>The identity provider rotates the refresh token on every use, so the old one is dead
         the moment the new pair is issued.</li>
+      <li>Each message carries its own wire time (<code>edge.data.duration</code>): the
+        back-channel <code>POST /token</code> round trip to the identity provider visibly
+        outlasts a same-region <code>GET /me</code>. Click any activation to pick its row out
+        of the message list (<code>g.on("nodeclick")</code>).</li>
       <li>Scrub the transport bar backwards: structural steps are snapshotted, so the diagram
         folds back up, dead branch and all.</li>
     </ul>
@@ -106,6 +115,10 @@
   var P = AUTO ? 0.42 : 1; // pace multiplier
 
   // ---- actors and the message script -----------------------------------------------
+  // `container: true` makes each actor a lifeline from the start — a header-only box that
+  // reaches the solver as a column, even before its first activation exists.
+  // `statusAgg: "latest"` is the lifeline failure policy: a 401 reddens the column while it
+  // is the actor's most recent outcome, and a later successful call clears it again.
   var ACTORS = [
     { id: "browser", label: "Browser" },
     { id: "app", label: "App backend" },
@@ -115,41 +128,40 @@
 
   // Each entry is one activation: who runs it, what the incoming message says, what the
   // actor does while the ball dwells there, and how long that takes in the real world.
-  // `from` names the activation the message departs FROM (usually the previous entry, but a
-  // few redirects and the 401 fan-out need something other than "previous"). `sameRow` puts
-  // an entry on the same row as another id — the one legitimate use here is the moment the
-  // app backend's call to the resource API fails while the app backend itself, on the very
-  // same call, separately notices that failure: two activations, one shared moment.
+  // `from` names the activation the message departs FROM and `wire` is how long that message
+  // spends in flight (edge.data.duration) — a same-region call and a back-channel round trip
+  // to the identity provider are not the same journey. `sameRow` puts an entry on the same
+  // row as another id, which is how a response arrow (the 401) reads in a sequence diagram.
   var MSGS = [
     { id: "browser.1", actor: "browser", node: "tap “Sign in”",              msg: null,                     dur: "0.2s",  from: null },
-    { id: "app.1",     actor: "app",     node: "generate code_verifier, challenge", msg: "GET /login",       dur: "15ms",  from: "browser.1" },
-    { id: "browser.2", actor: "browser", node: "follow redirect",            msg: "302 → /authorize?challenge", dur: "0.15s", from: "app.1",
+    { id: "app.1",     actor: "app",     node: "generate code_verifier, challenge", msg: "GET /login",       dur: "15ms",  from: "browser.1", wire: "80ms" },
+    { id: "browser.2", actor: "browser", node: "follow redirect",            msg: "302 → /authorize?challenge", dur: "0.15s", from: "app.1", wire: "80ms",
       caption: "Every redirect bounces through the browser — the identity provider and the app backend never talk directly during login." },
-    { id: "idp.1",     actor: "idp",     node: "login form",                 msg: "GET /authorize?challenge", dur: "4s",  from: "browser.2",
+    { id: "idp.1",     actor: "idp",     node: "login form",                 msg: "GET /authorize?challenge", dur: "4s",  from: "browser.2", wire: "120ms",
       caption: "The shopper types a password — a real ~4s wait, modeled as one activation's dwell." },
-    { id: "browser.3", actor: "browser", node: "follow redirect",            msg: "302 → /callback?code",   dur: "0.15s", from: "idp.1" },
-    { id: "app.2",     actor: "app",     node: "read code, verifier",        msg: "GET /callback?code",     dur: "20ms",  from: "browser.3" },
-    { id: "idp.2",     actor: "idp",     node: "verify PKCE, mint tokens",   msg: "POST /token (code, verifier)", dur: "90ms", from: "app.2",
+    { id: "browser.3", actor: "browser", node: "follow redirect",            msg: "302 → /callback?code",   dur: "0.15s", from: "idp.1", wire: "120ms" },
+    { id: "app.2",     actor: "app",     node: "read code, verifier",        msg: "GET /callback?code",     dur: "20ms",  from: "browser.3", wire: "80ms" },
+    { id: "idp.2",     actor: "idp",     node: "verify PKCE, mint tokens",   msg: "POST /token (code, verifier)", dur: "90ms", from: "app.2", wire: "400ms",
       caption: "PKCE's whole point: only the app backend that generated the original code_verifier can turn this code into tokens, even if the code itself leaked." },
-    { id: "app.3",     actor: "app",     node: "set session cookie",         msg: "{access, refresh}",      dur: "10ms",  from: "idp.2" },
-    { id: "browser.4", actor: "browser", node: "render dashboard",           msg: "200 (Set-Cookie)",       dur: "0.3s",  from: "app.3" },
+    { id: "app.3",     actor: "app",     node: "set session cookie",         msg: "{access, refresh}",      dur: "10ms",  from: "idp.2", wire: "400ms" },
+    { id: "browser.4", actor: "browser", node: "render dashboard",           msg: "200 (Set-Cookie)",       dur: "0.3s",  from: "app.3", wire: "80ms" },
 
-    { id: "browser.5", actor: "browser", node: "click dashboard link",       msg: null,                     dur: "0.2s",  from: "browser.4", gap: 1,
+    { id: "browser.5", actor: "browser", node: "click dashboard link",       msg: null,                     dur: "0.2s",  from: "browser.4", gap: 1, wire: "100ms",
       caption: "55 minutes later — the access token has quietly expired, but the session hasn't." },
-    { id: "app.4",     actor: "app",     node: "look up session, call API",  msg: "GET /dashboard",         dur: "12ms",  from: "browser.5" },
-    { id: "api.1",     actor: "api",     node: "check auth token",           msg: "GET /me · Bearer",       dur: "40ms",  from: "app.4",
+    { id: "app.4",     actor: "app",     node: "look up session, call API",  msg: "GET /dashboard",         dur: "12ms",  from: "browser.5", wire: "80ms" },
+    { id: "api.1",     actor: "api",     node: "check auth token",           msg: "GET /me · Bearer",       dur: "40ms",  from: "app.4", wire: "20ms",
       fail: "401 token expired", highlight: { variant: "warn", pulse: true },
-      caption: "A failed activation is terminal for its branch — no finish event, no message out. The retry has to start somewhere else." },
-    { id: "app.5",     actor: "app",     node: "detect 401",                 msg: null,                     dur: "0.4s",  from: "app.4", sameRow: "api.1",
-      caption: "Meanwhile the app backend notices the 401 on its own — a fresh activation, not a continuation of the dead branch above." },
-    { id: "idp.3",     actor: "idp",     node: "rotate refresh token",       msg: "POST /token (refresh_token)", dur: "80ms", from: "app.5",
+      caption: "A failed activation is terminal for its branch — the 401 arrow is drawn, but no token ever crosses it." },
+    { id: "app.5",     actor: "app",     node: "detect 401, refresh",        msg: "401 token expired",      dur: "0.4s",  from: "api.1", sameRow: "api.1", wire: "20ms",
+      caption: "So the refresh rides a token run.inject() mints here, on the app backend's own lifeline, at the instant the failure landed." },
+    { id: "idp.3",     actor: "idp",     node: "rotate refresh token",       msg: "POST /token (refresh_token)", dur: "80ms", from: "app.5", wire: "400ms",
       caption: "The identity provider rotates the refresh token on every use — the old one is dead now too." },
-    { id: "app.6",     actor: "app",     node: "store new tokens",           msg: "{access, refresh}",      dur: "10ms",  from: "idp.3" },
-    { id: "api.2",     actor: "api",     node: "verify Bearer (retry)",      msg: "GET /me · Bearer (retry)", dur: "15ms", from: "app.6",
+    { id: "app.6",     actor: "app",     node: "store new tokens",           msg: "{access, refresh}",      dur: "10ms",  from: "idp.3", wire: "400ms" },
+    { id: "api.2",     actor: "api",     node: "verify Bearer (retry)",      msg: "GET /me · Bearer (retry)", dur: "15ms", from: "app.6", wire: "20ms",
       highlight: { variant: "ok", pulse: true },
-      caption: "Same request, brand-new activation, now with a valid access token." },
-    { id: "app.7",     actor: "app",     node: "forward profile",            msg: "200 {profile}",          dur: "10ms",  from: "api.2" },
-    { id: "browser.6", actor: "browser", node: "render dashboard",           msg: "200 {profile}",          dur: "0.3s",  from: "app.7" },
+      caption: "Same request, brand-new activation, now with a valid access token — and the Resource API lifeline clears." },
+    { id: "app.7",     actor: "app",     node: "forward profile",            msg: "200 {profile}",          dur: "10ms",  from: "api.2", wire: "20ms" },
+    { id: "browser.6", actor: "browser", node: "render dashboard",           msg: "200 {profile}",          dur: "0.3s",  from: "app.7", wire: "80ms" },
   ];
 
   var byId = {};
@@ -165,24 +177,34 @@
       m.row = row++;
     }
     rowOf[m.id] = m.row;
-    seq.place(m.id, m.actor, m.row);
   });
 
+  // Each activation carries its own (column, row) in its spec data; the layout shell hands a
+  // node's `data` straight to the solver, so there is nothing to register out of band.
   function nodeOf(m) {
-    var data = { duration: m.dur };
+    var data = { duration: m.dur, seq: { actor: m.actor, row: m.row } };
     if (m.fail) data.fail = m.fail;
     return { id: m.id, parent: m.actor, label: m.node, data: data };
   }
-  function edgeOf(m) { return { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id, label: m.msg }; }
+  // The message text IS the content here, so it gets a pill-backed upright label and the
+  // wire time it spends in flight.
+  function edgeOf(m) {
+    var e = { id: "m:" + m.from + ">" + m.id, source: m.from, target: m.id };
+    if (m.msg) e.label = { text: m.msg, pill: true };
+    if (m.wire) e.data = { duration: m.wire };
+    return e;
+  }
 
   var SEED = {
-    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    nodes: ACTORS.map(function (a) {
+      return { id: a.id, label: a.label, container: true, statusAgg: "latest" };
+    }).concat([nodeOf(MSGS[0])]),
     edges: [],
   };
 
   // ---- the storyboard: add the next activation, then let the ball travel to it -------
   // Ids that are the SAME-ROW PARTNER of some other entry are folded into that entry's step
-  // instead of getting a standalone one, so the pair's shared batch/camera only runs once.
+  // instead of getting a standalone one, so the call and its response are drawn as one beat.
   var pairedAway = {};
   MSGS.forEach(function (m) { if (m.sameRow) pairedAway[m.sameRow] = true; });
 
@@ -200,9 +222,9 @@
     if (m.id === "idp.3") STEPS.push({ label: "refresh" });
 
     if (m.sameRow) {
-      // A shared moment: two activations spawned from the same call. The failing one (`other`)
-      // plays out first and gets its warn highlight; only then does the second one, the app
-      // backend's own fresh activation, get its turn.
+      // One beat, two activations: the call that fails (`other`) and the response row it
+      // answers on. Both are drawn up front, so the token injected on `other`'s failure has
+      // somewhere to land; only then does the response activation take its turn.
       var other = byId[m.sameRow];
       STEPS.push({
         op: "batch",
@@ -240,14 +262,16 @@
   STEPS.push({ label: "done" });
   STEPS.push({ op: "caption", args: [null] });
   STEPS.push({ op: "highlight", args: [{ nodes: ["browser.6"], variant: "ok", pulse: true }] });
-  STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
-  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -26 }, dur: 200 * P }] });   // clear the transport bar
+  // Caption first, then fit: the fit measures the chrome the library has mounted — transport
+  // bar, caption strip — and frames the whole diagram inside what is left.
   STEPS.push({ op: "caption", args: ["Eighteen activations, three redirects through the browser, one silent token refresh.", { place: "top" }] });
+  STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
   STEPS.push({ op: "wait", ms: 900 * P });
   STEPS.push({ op: "clearHighlight" });
 
+  // Every message declares its own wire time, so there is no global hop to stretch; only the
+  // dwells are paced here, to keep the 4s password entry from swamping a 10ms handoff.
   var RUN_OPTS = {
-    hopMs: 520 * P,                       // the message in flight — the part worth watching
     dwell: function (sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; },
   };
 
@@ -258,11 +282,12 @@
   try {
     g = SparkleMotion.mount("#pipe", SEED, {
       theme: "auto",
-      layout: { dir: "TB", solver: seq.solver, nodesep: 40, ranksep: 26, marginx: 24, marginy: 16, minColWidth: 170 },
+      layout: { dir: "TB", solver: seq.solver, nodesep: 40, ranksep: 26, marginx: 24, marginy: 16,
+                minColWidth: 170, edgeLabelMaxW: 200 },
       animation: { duration: 360 * P, easing: "cubic-out" },
       controls: true,
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",                   // plays itself only when the URL carries ?auto=1
     });
     g.run(RUN_OPTS);
     sb = g.storyboard();
@@ -272,6 +297,7 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
+  window.smv = g;                         // the instance a headless checker looks for
   window.__g = g;
 
   // ---- side panel: the message list lights up as the ball arrives ----------------------
@@ -290,25 +316,42 @@
     li.classList.add("now");
   });
 
+  // The 401 is terminal for its branch: no finish, so nothing crosses the response arrow.
+  // The refresh is a token minted on the app backend's lifeline at that very instant.
+  var injected = false;
+  run.on("fail", function (ev) {
+    if (injected || ev.nodeId !== "api.1") return;
+    injected = true;
+    run.inject("app.5");
+  });
+
+  // Clicking an activation picks its message out of the list.
+  g.on("nodeclick", function (ev) {
+    var li = document.getElementById("li-" + String(ev.id).replace(".", "-"));
+    msgsEl.querySelectorAll("li.pick").forEach(function (x) { x.classList.remove("pick"); });
+    if (li) li.classList.add("pick");
+  });
+
   // ---- controls -------------------------------------------------------------------
-  var playing = false;
-  function finish() {
+  var playing = AUTO;                     // ?auto=1 means mount already started the story
+  // g.finished is the library's own "the script ran out of steps" signal, for the autoplayed
+  // run and the button alike; __smvExit stays for the checker's older hook.
+  g.finished.then(function () {
     playing = false;
     phaseEl.textContent = "story complete — scrub the bar or Restart";
     window.__smvExit = { done: true, errors: errors };
-  }
+  });
+  if (AUTO) phaseEl.textContent = "playing…";
   $("#play").addEventListener("click", function () {
     if (playing) return;
     playing = true;
     phaseEl.textContent = "playing…";
-    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+    Promise.resolve(sb.play()).catch(function (e) { errors.push("play: " + String(e && e.message || e)); });
   });
   $("#step").addEventListener("click", function () {
     Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
   });
   $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
-
-  if (AUTO) $("#play").click();
 })();
 </script>
 </body>

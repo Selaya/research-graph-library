@@ -105,7 +105,19 @@
     <code>partition 1</code> stops committing, tokens pile up on it — <code>×2</code>,
     <code>×5</code>, past <code>×10</code> — while <code>partition 0</code> and
     <code>partition 2</code> stay at zero or one. That badge <em>is</em>
-    <code>state().nodes[id].occupancy</code>.</li>
+    <code>state().nodes[id].occupancy</code>, and the feed itself drives every
+    <code>start</code>/<code>finish</code> off the split live mode reports underneath it:
+    <code>waiting</code> (arrived, nobody working on it) vs <code>active</code> (a
+    consumer picked it up). The run is compiled with
+    <code>spawnOnStart:&nbsp;false</code>, so a <code>start()</code> can never mint a
+    batch out of nothing — only <code>spawn()</code> may.</li>
+  <li><b>Over budget.</b> Each partition consumer declares a <code>600ms</code> poll
+    budget — two beats of headroom over the one beat a healthy commit takes. Live mode
+    never schedules from a duration, but it does judge against it: once
+    partition&nbsp;1's held batch outruns its declared dwell,
+    <code>state().nodes[id].overBudget</code> flips and the renderer dashes the box
+    (<code>data-over-budget</code>) — while its <code>×N</code> badge sits in its own
+    gutter above the box, clear of the duration chip.</li>
   <li><b>Runtime fan-out.</b> <code>run.spawn("topic", 2)</code> drops a produce spike
     straight onto the topic, and <code>run.spawn("cg.p1", 2)</code> models a hot partition
     key — tokens minted by the feed, not by a compiled schedule.</li>
@@ -117,6 +129,12 @@
     a <code>--smv-fill</code> override via <code>g.props()</code> and a caption call it out;
     then one bulk <code>run.finish("cg.p1")</code> flushes the whole backlog downstream at
     once and you can watch the wave travel.</li>
+  <li><b>The AND-join is real, live.</b> <code>risk decision</code> declares no
+    <code>join</code>, so its two in-edges make it an implicit AND-join — and live mode
+    honours it: a fraud verdict that lands before the inventory hold is <em>held</em> (it
+    fills a pip and counts as <code>waiting</code>) until its partner arrives, then the
+    pair merges into one releasable batch. Click any stage to caption its live split —
+    that is <code>g.on("nodeclick")</code>.</li>
   <li><b>Time travel.</b> <code>◀ 6s back</code> is <code>run.seek()</code> — the tiles and
     the graph re-draw the past while the frontier keeps running underneath;
     <code>Follow live</code> is <code>run.follow()</code>. The transport bar under the graph
@@ -124,10 +142,12 @@
 </ul>
 
 <p class="legend">
-  Legend — dashed pips under a node = live occupancy, <code>×N</code> = several batches
-  queued on one node, chip = the stage's declared <code>data.duration</code> (its typical
-  processing latency), two pips under <em>risk decision</em> = the implicit AND-join's two
-  slots, slim bar under the graph = the pipeline preset's total of those declared latencies.
+  Legend — dashed pips under a node = live occupancy, <code>×N</code> in the gutter above
+  the box = several batches queued on one node, chip inside the top-right corner = the
+  stage's declared <code>data.duration</code> (its budget at this feed's pace), a dashed
+  box = a dwell that ran past that duration, two pips under <em>risk decision</em> = the
+  implicit AND-join's two slots, slim bar under the graph = the pipeline preset's totals
+  (declared sum, and the critical path through them).
   The graph stays interactive: Tab into it, arrow between stages,
   Enter/Space toggles the consumer group, ctrl/⌘ + wheel zooms.
 </p>
@@ -155,24 +175,28 @@
   // ---------------------------------------------------------------------------
   // The topology. `topic` and `enrich` declare join:"any" because neither is a barrier —
   // a topic takes whichever producer writes first, and the enricher processes whichever
-  // partition delivered — while `decide` keeps its implicit AND-join over fraud+inventory.
-  // Durations are per-stage processing latencies: in Mode B they only drive the progress
-  // fill and the preset's chips, never the schedule (there isn't one — the log is truth).
+  // partition delivered — while `decide` keeps its implicit AND-join over fraud+inventory,
+  // which live mode honours: an early arrival is HELD until its partner lands.
+  // Durations are per-stage BUDGETS at this feed's pace — how long a stage is expected to
+  // hold a batch, given a 330ms beat. In Mode B they never make a schedule (there isn't
+  // one — the log is truth); they drive the progress fill, the preset's chips and the one
+  // judgement live mode can make: a dwell that outruns its budget sets `overBudget`, which
+  // is exactly what the stalled consumer does and what the healthy ones never do.
   // ---------------------------------------------------------------------------
   var SPEC = {
     nodes: [
-      { id: "api",    label: "orders-api",    data: { duration: "15ms" } },
-      { id: "web",    label: "checkout-web",  data: { duration: "15ms" } },
+      { id: "api",    label: "orders-api",    data: { duration: "1800ms" } },
+      { id: "web",    label: "checkout-web",  data: { duration: "1800ms" } },
       { id: "topic",  label: "topic: orders", join: "any" },
       { id: "cg",     label: "fulfil-svc", collapsed: true },
-      { id: "cg.p0",  parent: "cg", label: "partition 0" },
-      { id: "cg.p1",  parent: "cg", label: "partition 1" },
-      { id: "cg.p2",  parent: "cg", label: "partition 2" },
-      { id: "enrich", label: "enrich", join: "any", data: { duration: "120ms" } },
-      { id: "fraud",  label: "fraud check",    data: { duration: "260ms" } },
-      { id: "inv",    label: "inventory hold", data: { duration: "90ms" } },
-      { id: "decide", label: "risk decision",  data: { duration: "20ms" } },
-      { id: "notify", label: "notify",         data: { duration: "70ms" } },
+      { id: "cg.p0",  parent: "cg", label: "partition 0", data: { duration: "600ms" } },
+      { id: "cg.p1",  parent: "cg", label: "partition 1", data: { duration: "600ms" } },
+      { id: "cg.p2",  parent: "cg", label: "partition 2", data: { duration: "600ms" } },
+      { id: "enrich", label: "enrich", join: "any", data: { duration: "700ms" } },
+      { id: "fraud",  label: "fraud check",    data: { duration: "900ms" } },
+      { id: "inv",    label: "inventory hold", data: { duration: "600ms" } },
+      { id: "decide", label: "risk decision",  data: { duration: "500ms" } },
+      { id: "notify", label: "notify",         data: { duration: "600ms" } },
     ],
     edges: [
       { id: "pa", source: "api",   target: "topic" },
@@ -213,7 +237,10 @@
     });
     // Mode B. hopMs is how long a batch takes to cross an edge on screen — the only
     // timing knob live mode has, because everything else is real elapsed time.
-    run = g.run({ mode: "live", hopMs: 260 });
+    // spawnOnStart:false makes start() strict: it may only pick up something already
+    // waiting (or activate a root), never fabricate a batch. Only spawn() mints tokens.
+    run = g.run({ mode: "live", hopMs: 260, spawnOnStart: false });
+    window.smv = g;              // the documented handle: g.finished / g.finish(reason)
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     setPhase("mount failed");
@@ -223,8 +250,10 @@
 
   // ---------------------------------------------------------------------------
   // The mock producer. One setInterval "beat" plays the part of the socket: it samples the
-  // frontier state once, then appends log entries for the beat. Every finish() is guarded
-  // by that sample, so the feed never fires a zero-occupancy no-op.
+  // frontier state once into `live`, then appends log entries for the beat, decrementing
+  // that sample as it goes. Every start()/finish() is guarded by it, so the feed never
+  // fires a zero-occupancy no-op — and the counts are the run's own `waiting` / `active`,
+  // not a tally the page keeps.
   // ---------------------------------------------------------------------------
 
   var BEAT = 330;
@@ -232,31 +261,35 @@
       ZOOM_AT = 34, REBAL_AT = 38, CLEAR_AT = 44, STOP_AT = 52, MAX_BEAT = 70;
 
   var beat = 0, timer = null, producing = true, phase = "steady", finished = false;
-  var occ = {}, act = {};
-  var stats = { produced: 0, committed: 0, polls: 0, maxLag: 0, burst: 0 };
-  for (var i = 0; i < ALL.length; i++) { occ[ALL[i]] = 0; act[ALL[i]] = 0; }
+  // Per-beat working copy of run.state().nodes: { waiting, active, occupancy, overBudget }.
+  var live = {};
+  var stats = { produced: 0, committed: 0, polls: 0, maxLag: 0, burst: 0, over: 0 };
+  for (var i = 0; i < ALL.length; i++) live[ALL[i]] = { waiting: 0, active: 0, occupancy: 0, over: false };
 
-  /** A source stage: ship the batch it was building, then start the next one. */
+  /** A source stage (a root): ship the batch it was building, then start the next one. */
   function produce(id) {
-    if (occ[id] > 0 && act[id] > 0) { run.finish(id); stats.produced++; occ[id] = 0; act[id] = 0; }
+    var n = live[id];
+    if (n.active > 0) { run.finish(id); stats.produced++; n.active = 0; n.occupancy = 0; }
     run.start(id);
-    act[id] = 1;
+    n.active = 1; n.occupancy = 1;
   }
 
   /** A worker stage: commit everything it is holding (one log entry, any number of
    *  batches — that is what a Kafka commit is), then pick up whatever is queued. */
   function pump(id) {
-    if (occ[id] > 0 && act[id] > 0) {
+    var n = live[id];
+    if (n.active > 0) {
       run.finish(id);
-      if (id.indexOf("cg.") === 0) stats.committed += occ[id];
-      occ[id] = 0; act[id] = 0;
+      if (id.indexOf("cg.") === 0) stats.committed += n.occupancy;
+      n.waiting = 0; n.active = 0; n.occupancy = 0;
     }
-    if (occ[id] > 0 && act[id] === 0) { run.start(id); act[id] = 1; }
+    if (n.waiting > 0) { run.start(id); n.waiting--; n.active = 1; }
   }
 
   /** The stalled consumer: one batch stays 'active' forever, the rest queue behind it. */
   function stall(id) {
-    if (occ[id] > 0 && act[id] === 0) { run.start(id); act[id] = 1; }
+    var n = live[id];
+    if (n.waiting > 0 && n.active === 0) { run.start(id); n.waiting--; n.active = 1; }
   }
 
   function caption(text, o) { g.caption(text, o || {}); }
@@ -283,12 +316,12 @@
       stats.produced += 2;
     } else if (b === ZOOM_AT) {
       g.camera({ nodes: ["topic", "cg", "enrich"], pad: 64, dur: 700 });
-      caption("Consumer lag: " + occ["cg.p1"] + " batches queued on partition 1, the others at " +
-              occ["cg.p0"] + " and " + occ["cg.p2"] + ".");
+      caption("Consumer lag: " + live["cg.p1"].occupancy + " batches queued on partition 1, " +
+              "the others at " + live["cg.p0"].occupancy + " and " + live["cg.p2"].occupancy + ".");
     } else if (b === REBAL_AT) {
       phase = "rebalance";
       setPhase("live · rebalancing");
-      var drained = occ["cg.p1"];
+      var drained = live["cg.p1"].occupancy;
       g.props(null);
       g.highlight({ nodes: ["cg", "cg.p0", "cg.p1", "cg.p2"], variant: "focus", pulse: true });
       caption("Rebalance — a second consumer instance joins the group; partition 1's backlog is " +
@@ -296,7 +329,7 @@
       if (drained > 0) {
         run.finish("cg.p1");                    // bulk commit: the whole queue fans out at once
         stats.committed += drained;
-        occ["cg.p1"] = 0; act["cg.p1"] = 0;
+        live["cg.p1"].waiting = 0; live["cg.p1"].active = 0; live["cg.p1"].occupancy = 0;
       }
       g.camera({ fit: true, pad: 44, dur: 700 });
     } else if (b === CLEAR_AT) {
@@ -321,14 +354,17 @@
       errors.push("stateAt: " + String((err && err.message) || err));
       return;
     }
+    // waiting / active come straight off the run (F11) — the page keeps no tally of its own.
     for (var i = 0; i < ALL.length; i++) {
       var id = ALL[i];
       var n = st.nodes[id];
-      occ[id] = n ? n.occupancy : 0;
-      if (act[id] > occ[id]) act[id] = occ[id];
+      live[id] = n
+        ? { waiting: n.waiting, active: n.active, occupancy: n.occupancy, over: !!n.overBudget }
+        : { waiting: 0, active: 0, occupancy: 0, over: false };
     }
-    var lag = Math.max(occ["cg.p0"], occ["cg.p1"], occ["cg.p2"]);
+    var lag = Math.max(live["cg.p0"].occupancy, live["cg.p1"].occupancy, live["cg.p2"].occupancy);
     if (lag > stats.maxLag) stats.maxLag = lag;
+    if (live["cg.p1"].over) stats.over = 1;
 
     if (!producing && beat > STOP_AT + 2 && st.tokens.length === 0) { finishStory(); return; }
     if (beat > MAX_BEAT) { finishStory(); return; }
@@ -343,9 +379,10 @@
       // The poll cycle: one batch off the log to EVERY assigned partition consumer (the
       // topic's three out-edges ARE the assignment). Falls back to every beat when the
       // topic is running a backlog of its own, which is what a catching-up group does.
-      if (occ.topic > 0 && (beat % 2 === 1 || occ.topic > 1)) {
+      if (live.topic.occupancy > 0 && (beat % 2 === 1 || live.topic.occupancy > 1)) {
         run.finish("topic", { n: 1 });
-        occ.topic--;
+        live.topic.occupancy--;
+        if (live.topic.waiting > 0) live.topic.waiting--; else live.topic.active = 0;
         stats.polls++;
       }
 
@@ -379,8 +416,12 @@
     mLag.textContent = l0 + " · " + l1 + " · " + l2;
     mLag.className = Math.max(l0, l1, l2) > 2 ? "warn" : "";
 
-    mState.textContent = finished ? "stopped" : phase;
-    mState.className = (phase === "lag" && !finished) ? "warn" : "";
+    // overBudget is live mode's one verdict on a declared duration (F13): the dwell ran long.
+    var over = PARTS.filter(function (id) { return st.nodes[id].overBudget; });
+    mState.textContent = finished ? "stopped"
+      : over.length ? phase + " · " + over.length + " over budget"
+      : phase;
+    mState.className = ((phase === "lag" || over.length) && !finished) ? "warn" : "";
   }
   g.ticker.add(sampleFrame);
 
@@ -391,7 +432,8 @@
       "batches written        " + stats.produced + "  (" + stats.burst + " spawn() bursts)\n" +
       "poll cycles             " + stats.polls + "\n" +
       "partition commits      " + stats.committed + "  (every poll hands one batch to each of the 3 consumers)\n" +
-      "peak consumer lag       " + stats.maxLag + " batches on one partition\n" +
+      "peak consumer lag       " + stats.maxLag + " batches on one partition" +
+        (stats.over ? "  (partition 1 flagged overBudget)" : "") + "\n" +
       "live log                " + run.log().length + " events, frontier " + fmt(run.now()) + "\n" +
       "errors                  " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
@@ -405,12 +447,13 @@
     feedBtn.disabled = true;
     g.clearHighlight();
     g.props(null);
-    g.camera({ fit: true, pad: 44, dur: 600 });
+    g.camera({ fit: true, pad: 44, dur: 600 });   // chrome-aware: the transport and total
+                                                 // bars are measured out of the frame
     caption("Feed stopped · " + stats.produced + " batches written, " + stats.committed +
             " partition commits, peak lag " + stats.maxLag + ". The log is still scrubbable.");
     setPhase("feed stopped · " + run.log().length + " events logged");
     writeReport();
-    if (AUTO) autoOutro();
+    if (AUTO) autoOutro(); else g.finish("feed stopped");
   }
 
   /** Headless path: prove time travel, then come back to the frontier and exit. */
@@ -426,12 +469,14 @@
         setTimeout(function () {
           writeReport();
           setPhase(errors.length === 0 ? "done — clean" : "done — see report");
+          g.finish("feed stopped");    // the documented end signal; g.finished resolves
           window.__smvExit = {
             done: true,
             errors: errors,
             checks: {
               produced: stats.produced, committed: stats.committed, polls: stats.polls,
               maxLag: stats.maxLag, logEvents: run.log().length, following: run.following,
+              overBudget: stats.over,
             },
           };
         }, 1200);
@@ -459,6 +504,15 @@
   });
   restartBtn.addEventListener("click", function () {
     window.location.href = window.location.pathname;
+  });
+
+  // Click a stage to read its live occupancy split — no pointerdown archaeology needed.
+  g.on("nodeclick", function (e) {
+    if (finished) return;
+    var n = run.state().nodes[e.id];
+    if (!n) return;
+    caption(e.id + " — " + n.waiting + " waiting, " + n.active + " active" +
+            (n.overBudget ? ", over its declared budget" : "") + ".", { variant: "note" });
   });
 
   timer = setInterval(beatTick, BEAT);

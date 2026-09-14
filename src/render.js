@@ -5,7 +5,7 @@
 // Node size animates via rect width/height, never a group scale (D1).
 
 import { clipEnds, pathString, pointAt } from "./path.js";
-import { truncate, NODE_PAD_X, NODE_MAX_W } from "./measure.js";
+import { truncate, textWidth, NODE_PAD_X, NODE_MAX_W } from "./measure.js";
 import { GraphError } from "./store.js";
 
 const NS = "http://www.w3.org/2000/svg";
@@ -23,10 +23,34 @@ const STACK_OFF = 4;
 const CHEV_RIGHT = "M -2.5 -4 L 1.5 0 L -2.5 4"; // collapsed
 const CHEV_DOWN = "M -4 -2.5 L 0 1.5 L 4 -2.5";  // expanded
 
-// Edge labels: truncated at commit time (D7), positioned per frame at the path midpoint
-// nudged off the line so the halo doesn't sit directly on the stroke.
+// Edge labels: truncated at commit time (D7), positioned per frame along the path nudged
+// off the line so the halo doesn't sit directly on the stroke. The 90px cap is only the
+// DEFAULT now (F26): `layout.edgeLabelMaxW` moves it for the whole drawing, and
+// `label: {maxW}` for one edge. Measured in the label's own 10px font, not the node's.
 const EDGE_LABEL_MAX_W = 90;
 const EDGE_LABEL_OFFSET = 8;
+const EDGE_LABEL_FONT = "500 10px system-ui, -apple-system, 'Segoe UI', sans-serif";
+// F25 — `place` picks the point along the CLIPPED path the label rides.
+const PLACE_T = { start: 0.15, end: 0.85 };
+const PILL_PAD_X = 6;
+const PILL_H = 14;
+
+/** F25 — `edge.label` is a string (today's behaviour) or `{text, place, rotate, pill, maxW}`.
+ *  Returns the committed descriptor (`t` = the fraction along the path), or null. */
+function edgeLabelOf(raw, defMaxW) {
+  const o = raw && typeof raw === "object" ? raw : { text: raw };
+  const text = o.text == null ? "" : String(o.text);
+  if (!text) return null;
+  const pill = o.pill === true;
+  const t = truncate(text, Number.isFinite(o.maxW) ? o.maxW : defMaxW, EDGE_LABEL_FONT);
+  return {
+    text: t,
+    t: PLACE_T[o.place] || 0.5,
+    rotate: o.rotate === true,
+    pill,
+    w: pill ? Math.ceil(textWidth(t, EDGE_LABEL_FONT)) + 2 * PILL_PAD_X : 0,
+  };
+}
 
 // Viewport culling (M3): only worth the per-frame outside-test cost above this element
 // count (nodes.size + edges.size) — below it the check costs more than it saves.
@@ -56,6 +80,8 @@ function edgeFullyOutside(ed, meta, vNodes, rect) {
   for (let i = 0; i < pts.length; i++) if (!pointOutsideRect(pts[i], rect)) return false;
   return true;
 }
+
+const setTransform = (el, v) => (v ? el.setAttribute("transform", v) : el.removeAttribute("transform"));
 
 const r2 = (n) => Math.round((Number.isFinite(n) ? n : 0) * 100) / 100;
 const deg = (rad) => r2((Number.isFinite(rad) ? rad : 0) * 180 / Math.PI);
@@ -198,7 +224,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     g.appendChild(line);
     g.appendChild(arrow);
     edgesG.appendChild(g);
-    e = { g, line, arrow, label: null, culled: false };
+    e = { g, line, arrow, label: null, lab: null, pill: null, culled: false };
     edgeEls.set(id, e);
     applyEdgeStyle(id, e);
     return e;
@@ -213,6 +239,19 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     e.label.setAttribute("aria-hidden", "true");
     e.g.appendChild(e.label);
     return e.label;
+  }
+
+  /** F25 `pill: true` — an opaque backing plate, inserted BEFORE the text so it paints
+   *  behind it. Only edges that ask for one ever grow the extra element. */
+  function ensureEdgePill(e) {
+    if (e.pill) return e.pill;
+    e.pill = make("rect", "smv-edge-pill");
+    e.pill.setAttribute("rx", "7");
+    e.pill.setAttribute("ry", "7");
+    e.pill.setAttribute("height", String(PILL_H));
+    e.pill.setAttribute("aria-hidden", "true");
+    e.g.insertBefore(e.pill, e.label || null);
+    return e.pill;
   }
 
   function setProps(el, props) {
@@ -279,6 +318,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     setData(e.g, "data-mode", d.mode);
     setData(e.g, "data-container", st.container);
     setData(e.g, "data-collapsed", st.collapsed);
+    setData(e.g, "data-empty", st.empty);
     setData(e.g, "data-count", st.count);
     setProps(e.g, st.props);
     if (e.text.textContent !== st.text) e.text.textContent = st.text;
@@ -301,12 +341,16 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     setData(e.g, "data-weight", st.weight);
     setData(e.g, "data-mode", st.mode);
     setProps(e.g, st.props);
+    setData(e.g, "data-pill", st.label && st.label.pill);
     if (st.label) {
       ensureEdgeLabel(e);
-      if (e.label.textContent !== st.label) e.label.textContent = st.label;
-    } else if (e.label) {
-      e.label.remove();
-      e.label = null;
+      if (e.label.textContent !== st.label.text) e.label.textContent = st.label.text;
+      e.lab = st.label;
+      if (st.label.pill) ensureEdgePill(e).setAttribute("width", String(st.label.w));
+      else if (e.pill) { e.pill.remove(); e.pill = null; }
+    } else {
+      if (e.label) { e.label.remove(); e.label = null; }
+      if (e.pill) { e.pill.remove(); e.pill = null; }
     }
   }
 
@@ -322,16 +366,23 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
     const styleFn = like && typeof like.style === "function" ? like.style : null;
     const sizes = (like && like.sizes) || {};
     const over = (like && like.props) || null;
+    const maxLabelW = Number.isFinite(like && like.edgeLabelMaxW) ? like.edgeLabelMaxW : EDGE_LABEL_MAX_W;
 
     for (const [id, n] of nodes) {
-      const w = (sizes[id] && sizes[id].w) || NODE_MAX_W;
+      const sz = sizes[id] || {};
+      const w = sz.w || NODE_MAX_W;
       nodeStyle.set(id, {
         data: n.data,
         container: n.container === true || n.collapsed !== undefined || n.type === "group" ? true : null,
         collapsed: n.collapsed ? true : null,
+        // A container declared before it has any children (F33) — drawn as a header-only
+        // box, dashed, so "no activations yet" reads differently from an empty frame.
+        empty: n.empty === true ? true : null,
         count: n.count > 0 ? n.count : null,
         depth: n.depth || 0,
-        text: truncate(String(n.label ?? id), Math.max(8, w - 2 * NODE_PAD_X)),
+        // F22 — `reserve` is the chrome a preset parked in the node's corners (measure.js);
+        // the label gets what is left, so it can never run under a chip.
+        text: truncate(String(n.label ?? id), Math.max(8, w - 2 * NODE_PAD_X - (sz.reserve || 0))),
         props: mergeProps(styleFn ? checkStyleProps(id, styleFn(n)) : null, over && over.get(id)),
       });
       const e = nodeEls.get(id);
@@ -342,7 +393,7 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
       const weight = ed.weight > 1 ? ed.weight : null;
       // A meta-edge aggregating >=2 source edges drops its label — the weight badge
       // already carries the story, and there's no single label left to show.
-      const label = ed.label && !(ed.meta && weight) ? truncate(String(ed.label), EDGE_LABEL_MAX_W) : null;
+      const label = ed.meta && weight ? null : edgeLabelOf(ed.label, maxLabelW);
       edgeStyle.set(id, {
         reversed: reversed.has(id) || ed.loop ? true : null,
         weight,
@@ -420,12 +471,26 @@ export function createRenderer(rootEl, doc = rootEl && rootEl.ownerDocument) {
       e.line.setAttribute("d", pathString(points));
       e.arrow.setAttribute("transform", `translate(${r2(arrow.x)},${r2(arrow.y)}) rotate(${deg(arrow.angle)})`);
       if (e.label) {
-        // Midpoint of the CLIPPED path, nudged along the local normal so the halo
-        // doesn't sit directly on the stroke; opacity inherits from the group below.
-        const mid = pointAt(points, 0.5);
+        // A point on the CLIPPED path (F25 `place`), nudged along the local normal so the
+        // halo doesn't sit directly on the stroke; opacity inherits from the group below.
+        const lab = e.lab;
+        const mid = pointAt(points, lab.t);
         const nx = -Math.sin(mid.angle), ny = Math.cos(mid.angle);
-        e.label.setAttribute("x", String(r2(mid.x + nx * EDGE_LABEL_OFFSET)));
-        e.label.setAttribute("y", String(r2(mid.y + ny * EDGE_LABEL_OFFSET)));
+        const x = r2(mid.x + nx * EDGE_LABEL_OFFSET), y = r2(mid.y + ny * EDGE_LABEL_OFFSET);
+        e.label.setAttribute("x", String(x));
+        e.label.setAttribute("y", String(y));
+        // Upright by default; `rotate: true` lays it along the line, never upside down.
+        let tr = null;
+        if (lab.rotate) {
+          const a = deg(mid.angle);
+          tr = `rotate(${r2(a > 90 ? a - 180 : a < -90 ? a + 180 : a)},${x},${y})`;
+        }
+        setTransform(e.label, tr);
+        if (e.pill) {
+          e.pill.setAttribute("x", String(r2(x - lab.w / 2)));
+          e.pill.setAttribute("y", String(r2(y - PILL_H / 2)));
+          setTransform(e.pill, tr);
+        }
       }
       e.g.setAttribute("opacity", String(r2(ed.opacity ?? 1)));
     }

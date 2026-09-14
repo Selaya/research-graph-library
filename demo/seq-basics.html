@@ -48,11 +48,14 @@
 <main>
 <h1>Sequence diagram basics <small>— a login round trip, unfolding as the ball travels</small></h1>
 <p class="lede">
-  A sequence diagram drawn with the library's custom-solver seam: each actor is a container
-  that becomes a lifeline column, each activation is a child placed on a
-  <em>(actor, time)</em> grid by <code>demo/sequence-solver.js</code>, and every message is an
-  edge the run token rides — app → gateway → auth → database and back. The diagram grows one
-  activation ahead of the ball, so you read it the way it happens.
+  A sequence diagram drawn with the library's custom-solver seam: each actor is declared
+  <code>container: true</code> and becomes a lifeline column, each activation is a child that
+  carries its own <em>(actor, time)</em> placement in <code>data.seq</code> for
+  <code>demo/sequence-solver.js</code> to read, and every message is an edge the run token
+  rides — app → gateway → auth → database and back. Each edge declares its own
+  <code>data.duration</code>, so the cellular hop to the gateway takes visibly longer than the
+  calls inside the datacentre. The diagram grows one activation ahead of the ball, so you read
+  it the way it happens.
 </p>
 
 <div class="bar">
@@ -70,8 +73,9 @@
     <h3 style="margin-top:14px">What to look for</h3>
     <ul class="watch">
       <li>The ball is one request: it leaves the app, dwells on every activation it reaches, and comes back with the response.</li>
-      <li>Each actor column is a normal container node — the solver just stacks its children by row, so the lifeline grows as activations are added.</li>
-      <li>Message labels ride the edges; activation labels say what the actor does while the ball is there.</li>
+      <li>Each actor is declared <code>container: true</code>, so it draws as a dashed header box before its first activation and grows into a lifeline column as children are added.</li>
+      <li>Message labels ride the edges on their own backing pill; activation labels say what the actor does while the ball is there.</li>
+      <li>Wire time is per edge: the mobile ⇄ gateway hops are long, the calls between gateway, auth and the database are nearly instant.</li>
       <li>The second request is shorter: the gateway verifies the JWT locally and never calls the auth service.</li>
       <li>Scrub the transport bar backwards: structural steps are snapshotted, so the diagram folds back up.</li>
     </ul>
@@ -99,32 +103,49 @@
     { id: "auth", label: "Auth service" },
     { id: "db", label: "User DB" },
   ];
-  // Each entry is one activation: who runs it, what the incoming message says, what the
-  // actor does while the ball dwells there, and how long that takes in the real world.
+  // Each entry is one activation: who runs it, what the incoming message says, how long that
+  // message spends on the wire, what the actor does while the ball dwells there, and how long
+  // that takes in the real world.
   var MSGS = [
     { id: "app.1", actor: "app", node: "tap “Sign in”", msg: null, dur: "0.2s" },
-    { id: "gw.1", actor: "gw", node: "route · rate-limit", msg: "POST /v1/login", dur: "4ms" },
-    { id: "auth.1", actor: "auth", node: "validate payload", msg: "authenticate(user, pw)", dur: "2ms" },
-    { id: "db.1", actor: "db", node: "SELECT user", msg: "query by email", dur: "9ms" },
-    { id: "auth.2", actor: "auth", node: "compare hash · mint JWT", msg: "row", dur: "60ms" },
-    { id: "gw.2", actor: "gw", node: "set cookies", msg: "200 {jwt}", dur: "1ms" },
-    { id: "app.2", actor: "app", node: "store token", msg: "200 OK", dur: "0.1s" },
-    { id: "app.3", actor: "app", node: "open home screen", msg: null, dur: "0.3s", gap: 1 },
-    { id: "gw.3", actor: "gw", node: "verify JWT locally", msg: "GET /v1/me · Bearer", dur: "1ms" },
-    { id: "db.2", actor: "db", node: "SELECT profile", msg: "query by id", dur: "6ms" },
-    { id: "gw.4", actor: "gw", node: "shape response", msg: "row", dur: "1ms" },
-    { id: "app.4", actor: "app", node: "render profile", msg: "200 {profile}", dur: "0.2s" },
+    { id: "gw.1", actor: "gw", node: "route · rate-limit", msg: "POST /v1/login {email, pw}", wire: "80ms", dur: "4ms" },
+    { id: "auth.1", actor: "auth", node: "validate payload", msg: "authenticate(user, pw)", wire: "2ms", dur: "2ms" },
+    { id: "db.1", actor: "db", node: "SELECT user", msg: "SELECT … WHERE email = ?", wire: "1ms", dur: "9ms" },
+    { id: "auth.2", actor: "auth", node: "compare hash · mint JWT", msg: "row: id, pw_hash, roles", wire: "3ms", dur: "60ms" },
+    { id: "gw.2", actor: "gw", node: "set cookies", msg: "200 {jwt, exp: 15m}", wire: "1ms", dur: "1ms" },
+    { id: "app.2", actor: "app", node: "store token", msg: "200 OK · Set-Cookie", wire: "90ms", dur: "0.1s" },
+    { id: "app.3", actor: "app", node: "open home screen", msg: null, wire: "2ms", dur: "0.3s", gap: 1 },
+    { id: "gw.3", actor: "gw", node: "verify JWT locally", msg: "GET /v1/me · Bearer <jwt>", wire: "85ms", dur: "1ms" },
+    { id: "db.2", actor: "db", node: "SELECT profile", msg: "SELECT profile WHERE id = ?", wire: "1ms", dur: "6ms" },
+    { id: "gw.4", actor: "gw", node: "shape response", msg: "row: name, avatar, plan", wire: "2ms", dur: "1ms" },
+    { id: "app.4", actor: "app", node: "render profile", msg: "200 {profile}", wire: "88ms", dur: "0.2s" },
   ];
 
   var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
   var row = 0;
-  MSGS.forEach(function (m) { row += (m.gap || 0); m.row = row++; seq.place(m.id, m.actor, m.row); });
+  MSGS.forEach(function (m) { row += (m.gap || 0); m.row = row++; });
 
-  function nodeOf(m) { return { id: m.id, parent: m.actor, label: m.node, data: { duration: m.dur } }; }
-  function edgeTo(prev, m) { return { id: "m:" + prev.id + ">" + m.id, source: prev.id, target: m.id, label: m.msg }; }
+  // The node carries its own (actor, row) placement in `data.seq`; the shell hands a node's
+  // data to the solver, so nothing has to be registered out of band.
+  function nodeOf(m) {
+    return {
+      id: m.id, parent: m.actor, label: m.node,
+      data: { duration: m.dur, seq: { actor: m.actor, row: m.row } },
+    };
+  }
+  // The message is the primary text of a sequence diagram: upright, on its own pill, and the
+  // wire time is the edge's own declared duration rather than one global hop.
+  function edgeTo(prev, m) {
+    var e = { id: "m:" + prev.id + ">" + m.id, source: prev.id, target: m.id, data: { duration: m.wire } };
+    if (m.msg) e.label = { text: m.msg, pill: true };
+    return e;
+  }
 
   var SEED = {
-    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(MSGS[0])]),
+    // An actor is a container from the start — a header-only lifeline box, dashed until its
+    // first activation lands in it.
+    nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label, container: true }; })
+      .concat([nodeOf(MSGS[0])]),
     edges: [],
   };
 
@@ -137,18 +158,18 @@
       STEPS.push({ op: "caption", args: ["Second request: the gateway trusts the JWT, so auth is skipped.", { place: "top" }] });
     }
     STEPS.push({ op: "batch", steps: [{ op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeTo(prev, m)] }], dur: 260 * P });
-    STEPS.push({ op: "camera", args: [{ nodes: [prev.id, m.id], k: 1, pad: 120, dur: 300 * P }] });
+    STEPS.push({ op: "camera", args: [{ nodes: [prev.id, m.id], maxK: 1, pad: 120, dur: 300 * P }] });
     STEPS.push({ op: "run.play", until: m.id });
   }
   STEPS.push({ label: "done" });
   STEPS.push({ op: "highlight", args: [{ nodes: ["app.4"], variant: "ok", pulse: true }] });
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
-  STEPS.push({ op: "camera", args: [{ by: { dx: 0, dy: -26 }, dur: 200 * P }] });   // clear the transport bar
   STEPS.push({ op: "caption", args: ["Twelve activations, two round trips, one ball.", { place: "top" }] });
   STEPS.push({ op: "wait", ms: 900 * P });
 
+  // Every edge declares its own wire time, so there is no global hop to stretch; `dwell` only
+  // paces what an actor does while the ball is parked on it.
   var RUN_OPTS = {
-    hopMs: 520 * P,                       // the message in flight — the part worth watching
     dwell: function (sec) { return sec == null ? 300 * P : (260 + 340 * Math.min(1, sec / 0.3)) * P; },
   };
 
@@ -159,11 +180,15 @@
   try {
     g = SparkleMotion.mount("#pipe", SEED, {
       theme: "auto",
-      layout: { dir: "TB", solver: seq.solver, nodesep: 36, ranksep: 22, marginx: 24, marginy: 16, minColWidth: 150 },
+      layout: {
+        dir: "TB", solver: seq.solver, nodesep: 36, ranksep: 22, marginx: 24, marginy: 16,
+        minColWidth: 150,
+        edgeLabelMaxW: 180,               // the message is the content here, not a hint on a line
+      },
       animation: { duration: 360 * P, easing: "cubic-out" },
       controls: true,
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",                   // plays itself only when the URL carries ?auto=1
     });
     g.run(RUN_OPTS);
     sb = g.storyboard();
@@ -173,7 +198,7 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
-  window.__g = g;
+  window.smv = g;                         // the instance the checker (and the console) looks for
 
   // ---- side panel: the message list lights up as the ball arrives ----------------------
   MSGS.forEach(function (m) {
@@ -182,8 +207,8 @@
     li.textContent = (m.msg ? m.msg + " → " : "") + ACTORS.filter(function (a) { return a.id === m.actor; })[0].label + ": " + m.node;
     msgsEl.appendChild(li);
   });
-  var run = g.run();
-  run.on("start", function (ev) {
+  // Run events are mirrored on the instance bus, so this outlives any recompile.
+  g.on("run:start", function (ev) {
     var li = document.getElementById("li-" + String(ev.nodeId).replace(".", "-"));
     if (!li) return;
     msgsEl.querySelectorAll("li.now").forEach(function (x) { x.classList.remove("now"); x.classList.add("done"); });
@@ -191,24 +216,24 @@
   });
 
   // ---- controls -------------------------------------------------------------------
-  var playing = false;
-  function finish() {
+  var playing = AUTO;
+  if (AUTO) phaseEl.textContent = "playing…";
+  // The end of the story is the library's own signal, not page-rolled plumbing.
+  g.finished.then(function () {
     playing = false;
     phaseEl.textContent = "story complete — scrub the bar or Restart";
     window.__smvExit = { done: true, errors: errors };
-  }
+  });
   $("#play").addEventListener("click", function () {
     if (playing) return;
     playing = true;
     phaseEl.textContent = "playing…";
-    Promise.resolve(sb.play()).then(finish, function (e) { errors.push("play: " + String(e && e.message || e)); finish(); });
+    Promise.resolve(sb.play()).catch(function (e) { errors.push("play: " + String(e && e.message || e)); });
   });
   $("#step").addEventListener("click", function () {
     Promise.resolve(sb.next()).then(function () { phaseEl.textContent = "at step " + sb.position().index + "/" + STEPS.length; });
   });
   $("#restart").addEventListener("click", function () { window.location.href = window.location.pathname + (AUTO ? "?auto=1" : ""); });
-
-  if (AUTO) $("#play").click();
 })();
 </script>
 </body>

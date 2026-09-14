@@ -135,6 +135,11 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-node[data-container]:not([data-collapsed]) rect.smv-node-stack{display:none}
 .smv-node[data-container]:not([data-collapsed]) text.smv-node-label{text-anchor:start}
 .smv-node[data-container][data-collapsed] rect.smv-node-header{display:none}
+/* A container with no children yet: a header-only box, outlined dashed. Nothing to open,
+   so it drops the disclosure chevron and the pointer cursor that promise a toggle. */
+.smv-node[data-container][data-empty]{cursor:default}
+.smv-node[data-container][data-empty] rect.smv-node-box{stroke-dasharray:4 3}
+.smv-node[data-container][data-empty] path.smv-node-chev{display:none}
 
 /* Condense phase markers (D6). Static state deltas — the sequencing is on our clock (D1). */
 .smv-node[data-condense="src"]{--smv-stroke:var(--smv-condense)}
@@ -157,8 +162,13 @@ svg.smv.smv-grabbing{cursor:grabbing}
   text-anchor:middle; dominant-baseline:central;
   paint-order:stroke fill;
   stroke:var(--smv-bg); stroke-width:3px; stroke-linejoin:round;
-  pointer-events:none;
 }
+/* F27: a 1.25px stroke is a poor click target, so the label (and its pill) are part of the
+   edge's hit area — the obvious thing to aim at in a sequence diagram. */
+/* F25 label.pill: an opaque plate instead of the halo, where the message IS the content. */
+.smv-edge rect.smv-edge-pill{fill:var(--smv-container); stroke:var(--smv-stroke); stroke-width:1}
+.smv-edge[data-pill] text.smv-edge-label{stroke:none; fill:var(--smv-text)}
+
 /* Back edges read as loops, not glitches: muted + dashed, a distinct visual channel (D3). */
 .smv-edge[data-reversed] path.smv-edge-line{stroke-dasharray:4 3; opacity:.7}
 .smv-edge[data-reversed] path.smv-edge-arrow{opacity:.7}
@@ -172,7 +182,7 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-token{fill:var(--smv-accent); stroke:var(--smv-bg); stroke-width:1.5}
 .smv-token[data-frozen]{opacity:.45}
 .smv-ghost{fill:var(--smv-muted)}
-.smv-token-badge{fill:var(--smv-muted); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:end; dominant-baseline:central}
+.smv-token-badge{fill:var(--smv-muted); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:start; dominant-baseline:central}
 .smv-loop-badge{fill:var(--smv-condense-text); font:600 10px system-ui,-apple-system,'Segoe UI',sans-serif; text-anchor:middle; dominant-baseline:central}
 .smv-join-pip{fill:none; stroke:var(--smv-muted); stroke-width:1.2}
 .smv-join-pip[data-filled]{fill:var(--smv-accent); stroke:var(--smv-accent)}
@@ -189,6 +199,9 @@ svg.smv.smv-grabbing{cursor:grabbing}
    heavier boundary is what separates it from 'done' at a glance without relying on hue. */
 .smv-node[data-run="failed"]{--smv-fill:var(--smv-fail); --smv-stroke:var(--smv-fail-stroke)}
 .smv-node[data-run="failed"] rect.smv-node-box{stroke-width:2.25}
+/* A live dwell that outran its declared data.duration: its own channel, so it composes
+   with whatever data-run tint the node already carries (docs/LIVE.md). */
+.smv-node[data-over-budget] rect.smv-node-box{stroke:var(--smv-condense); stroke-dasharray:4 2.5}
 
 /* Director emphasis (D14): discrete state, no transition — a wall clock cannot reproduce
    byte-for-byte under frame capture. --smv-pulse (D17) is written per tick by the
@@ -220,6 +233,17 @@ svg.smv.smv-grabbing{cursor:grabbing}
 .smv-caption[data-variant="note"]{color:var(--smv-muted); font-style:italic}
 .smv-root.smv-has-transport .smv-caption{bottom:46px}
 .smv-root.smv-has-transport .smv-caption[data-place="top"]{bottom:auto}
+
+/* F18 — status composes OVER the role colour instead of losing to it (props/style write
+   --smv-fill inline, outranking the rules above). No override = a colour mixed with itself,
+   so the default is unchanged; --smv-status-mix (100% = "status wins") tunes it. THEMING.md.
+   @supports-guarded: a viewer without color-mix keeps painting --smv-fill. */
+@supports (color:color-mix(in srgb,red 50%,blue)){
+.smv-node rect.smv-node-box{fill:var(--smv-status-fill,var(--smv-fill))}
+.smv-node[data-status="done"],.smv-node[data-run="done"]{--smv-status-fill:color-mix(in srgb,var(--smv-ok) var(--smv-status-mix,70%),var(--smv-fill))}
+.smv-node[data-status="active"],.smv-node[data-run="active"]{--smv-status-fill:color-mix(in srgb,var(--smv-active) var(--smv-status-mix,70%),var(--smv-fill))}
+.smv-node[data-run="failed"]{--smv-status-fill:color-mix(in srgb,var(--smv-fail) var(--smv-status-mix,70%),var(--smv-fill))}
+}
 
 /* D15 — record mode: the affordance transitions above run on the wall clock, so two
    captures of one frame would differ. Kill every one of them. */

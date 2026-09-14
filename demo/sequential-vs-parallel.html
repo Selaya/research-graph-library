@@ -34,7 +34,7 @@
   h1 small { font-weight: 500; color: var(--muted); font-size: 13px; letter-spacing: 0; }
   p.lede { margin: 0; color: var(--muted); max-width: 104ch; }
 
-  /* The headline comparison — every number below is computed from run.sim().duration. */
+  /* The headline comparison — every number below is computed from run.sim().declared. */
   .verdict {
     display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
     margin: 13px 0 0; padding: 11px 16px;
@@ -178,12 +178,14 @@
     <li><b>Lockstep.</b> Both <code>run.play()</code> calls start on the same beat and both
       clocks tick in declared minutes, so "the right one finished first" is readable off the
       two transport bars, not just the captions.</li>
-    <li><b>The total bar disagrees with the headline — on purpose.</b> The pipeline preset's
-      bar along the bottom of each pane sums <em>declared work</em>, and it reads 3h 20m on
-      both sides until beat 3: re-wiring never removes work, only automation does (the right
-      bar drops to 1.8h once the gate lands). The big numbers up top are
-      <code>run.sim().duration</code> — the compiled schedule's <em>wall clock</em>, i.e. the
-      critical path.</li>
+    <li><b>The total bar names both totals.</b> The pipeline preset runs with
+      <code>total: "both"</code>, so the bar along the bottom of each pane reads
+      <code>sum … · critical …</code>: the left chain has one number (3h 20m — in a straight
+      pipeline the two agree, so the bar stays bare), while the right one sums the same
+      3h 20m of <em>declared work</em> next to a much shorter critical path. Re-wiring never
+      removes work, only automation does (the right sum drops to 1.8h once the gate lands).
+      The big numbers up top are <code>run.sim().declared</code> — the compiled schedule's
+      <em>wall clock</em>, the same critical path the bar names.</li>
     <li><b>The critical path is the point.</b> Beat 2 highlights it: on the left it is all
       seven steps; on the right it is <code>Build → Rel. notes → Sign-off → Deploy</code> —
       the two ✋ manual steps dominate, and adding more parallel branches would not shave a
@@ -194,7 +196,10 @@
       replay lands the right-hand run at 1h 05m.</li>
     <li><b>Honest clocks.</b> Both runs compile with <code>hopMs: 0</code> and a linear
       <code>dwell</code>, so every millisecond on the timeline is declared step time and
-      nothing else. Scrub either transport bar when the story ends.</li>
+      nothing else. Pacing is a separate dial — a bare <code>playbackSpeed</code> /
+      <code>speed(f)</code> multiplies playback only, so the headline never moves when you
+      change speed. Scrub either transport bar when the story ends, or click any step for
+      its declared duration (<code>g.on("nodeclick")</code>).</li>
   </ul>
 
   <table class="steps">
@@ -230,8 +235,6 @@
   // only the WIRING differs, which is the whole argument the page makes.
   // ---------------------------------------------------------------------------
 
-  var W = 170, H = 40;
-
   var STEPS = [
     { id: "build",   label: "Build",       full: "Build & package",       duration: "20m", mode: "automated" },
     { id: "unit",    label: "Unit tests",  full: "Unit test suite",       duration: "15m", mode: "automated" },
@@ -242,8 +245,11 @@
     { id: "deploy",  label: "Deploy",      full: "Deploy to production",  duration: "15m", mode: "automated" },
   ];
 
+  var STEP_BY_ID = {};
+  STEPS.forEach(function (s) { STEP_BY_ID[s.id] = s; });
+
   function nodeSpec(s, extra) {
-    var n = { id: s.id, label: s.label, w: W, h: H, data: { duration: s.duration, mode: s.mode } };
+    var n = { id: s.id, label: s.label, data: { duration: s.duration, mode: s.mode } };
     if (extra) for (var k in extra) n[k] = extra[k];
     return n;
   }
@@ -279,19 +285,23 @@
   var ALL_EDGES = SEQ.edges.map(function (e) { return e.id; });
 
   var MERGED = {
-    id: "autogate", label: "Auto gate", w: W, h: H,
+    id: "autogate", label: "Auto gate",
     data: { duration: "6m", mode: "automated" },
   };
 
   // ---------------------------------------------------------------------------
-  // The clock. One declared MINUTE of the release maps to MS_PER_MIN of animation, and
-  // edge hops cost nothing (hopMs: 0) — so run.sim().duration IS the critical path,
+  // The clock. One declared MINUTE of the release maps to MS_PER_MIN of timeline, and
+  // edge hops cost nothing (hopMs: 0) — so run.sim().declared IS the critical path,
   // exactly, and the headline numbers are a division rather than a guess.
+  //
+  // Pacing is a separate dial: `playbackSpeed` is a pure playback multiplier, so the
+  // headless pass can rush the story without shrinking a single declared number.
   // ---------------------------------------------------------------------------
 
-  var MS_PER_MIN = AUTO ? 26 : 62;
+  var MS_PER_MIN = 62;
   var RUN_OPTS = {
     hopMs: 0,
+    playbackSpeed: AUTO ? 2.4 : 1,
     dwell: function (sec) {
       return Number.isFinite(sec) && sec >= 0 ? (sec / 60) * MS_PER_MIN : MS_PER_MIN;
     },
@@ -356,7 +366,9 @@
       layout: layout,
       animation: { duration: 380, easing: "cubic-out" },
       controls: true,
-      preset: "pipeline",
+      // `total: "both"` labels the bar's two readings — declared work summed, and the
+      // critical path beside it — so the bottom bar and the headline can't be confused.
+      preset: { name: "pipeline", total: "both" },
     });
     var side = {
       g: g,
@@ -377,6 +389,14 @@
       side.donesEl.textContent = done + "/" + nodeIds.length;
       side.clock.textContent = fmtClock(minutesOf(run.time())) + " / " + fmtClock(minutesOf(run.duration));
     });
+    // Click a step for its declared duration — no pointerdown bookkeeping needed.
+    g.on("nodeclick", function (ev) {
+      if (running) return;                // the story owns the caption while it plays
+      var s = STEP_BY_ID[ev.id] || (ev.id === MERGED.id ? MERGED : null);
+      if (!s) return;
+      var label = s.full || s.label;
+      cap(side, label + " — " + (s.duration || (s.data && s.data.duration)) + " declared.");
+    });
     return side;
   }
 
@@ -393,12 +413,17 @@
     return;
   }
 
+  // Both instances on the page, for the console and for the library's finished convention
+  // (`smv.finished`); __smvExit below stays because it also carries this page's error list.
+  window.smv = L.g;
+  window.smvRight = R.g;
+
   var checks = {};
 
   /** The headline, straight off each compiled schedule. */
   function paintVerdict() {
-    var seq = minutesOf(L.run.sim().duration);
-    var par = minutesOf(R.run.sim().duration);
+    var seq = minutesOf(L.run.sim().declared);
+    var par = minutesOf(R.run.sim().declared);
     vSeq.textContent = fmtClock(seq);
     vPar.textContent = fmtClock(par);
     if (seq > 0 && par > 0) {
@@ -409,13 +434,10 @@
     return { seq: seq, par: par };
   }
 
-  // The transport bar (34px), the preset's total bar (22px) and the caption strip all
-  // overlay the bottom of each pane, and fitView() centres on the WHOLE pane — so every fit
-  // is followed by a small camera nudge that lifts the drawing clear of that chrome.
-  var BAR_LIFT = 34;
+  // fitView() already frames inside the pane MINUS the chrome the library mounts over it
+  // (transport bar, the preset's total bar, the caption strip), so no lift nudge is needed.
   function fitSide(side, dur) {
-    side.g.fitView({ pad: 50, animate: true, duration: dur });
-    side.g.camera({ by: { dy: -BAR_LIFT }, dur: dur == null ? 420 : dur });
+    side.g.fitView({ pad: 28, animate: true, duration: dur });
   }
   function fitBoth(dur) { fitSide(L, dur); fitSide(R, dur); }
 
@@ -452,7 +474,7 @@
     beat(0, "beat 1 · both runs playing");
     L.flagEl.textContent = R.flagEl.textContent = "running";
     L.flagEl.className = R.flagEl.className = "";
-    cap(L, "One chain: " + fmtClock(minutesOf(L.run.sim().duration)) + " of waiting.");
+    cap(L, "One chain: " + fmtClock(minutesOf(L.run.sim().declared)) + " of waiting.");
     cap(R, "Four steps start together.");
 
     var pL = L.run.play();
@@ -494,7 +516,7 @@
     L.flagEl.textContent = R.flagEl.textContent = "replaying";
     L.flagEl.className = R.flagEl.className = "";
     L.finishedAt = R.finishedAt = null;
-    cap(L, "Same graph, same " + fmtClock(minutesOf(L.run.sim().duration)) + ".");
+    cap(L, "Same graph, same " + fmtClock(minutesOf(L.run.sim().declared)) + ".");
     cap(R, "Replay: a 6m gate, not 1h 40m.");
     phaseEl.textContent = "beat 3 · replaying both runs";
 
@@ -520,14 +542,22 @@
     cap(R, null);
     fitBoth();
     checks.final = v;
-    checks.totalBarsAgree = totalBarText("#left") + " | " + totalBarText("#right");
+    checks.totalBars = totalBarText("#left") + " | " + totalBarText("#right");
     writeReport();
     running = false;
+    // The library's own "story finished" signal, for anything watching either instance.
+    L.g.finish("story");
+    R.g.finish("story");
   }
 
+  // The bar's three spans: "sum" [====] "3h 20m" "· critical 1h 05m".
   function totalBarText(sel) {
     var el = document.querySelector(sel + " .smv-totalbar-label");
-    return el ? el.textContent : "(none)";
+    if (!el) return "(none)";
+    var key = document.querySelector(sel + " .smv-totalbar-key");
+    var alt = document.querySelector(sel + " .smv-totalbar-alt");
+    return ((key && key.textContent ? key.textContent + " " : "") + el.textContent +
+      (alt && alt.textContent ? " · " + alt.textContent : "")).trim();
   }
 
   function writeReport() {
@@ -539,7 +569,8 @@
         " (sequential run was at " + fmtClock(checks.parallelFinish.otherAt) + ")" : "—") + "\n" +
       "replay finished at        " + (checks.replayFinish ? fmtClock(checks.replayFinish.at) : "—") + "\n" +
       "condense                  " + JSON.stringify(checks.condense) + "\n" +
-      "preset total bars (work)  " + checks.totalBarsAgree + "\n" +
+      "preset total bars         " + (checks.totalBars || "—") + "\n" +
+      "playback multiplier       " + L.run.playbackSpeed() + "× (declared timeline unmoved)\n" +
       "errors                    " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
   }
 

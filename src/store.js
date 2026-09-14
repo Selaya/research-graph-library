@@ -9,10 +9,11 @@ export class GraphError extends Error {
 }
 
 const NODE_FIELDS = [
-  "id", "label", "parent", "data", "collapsed", "join", "type",
-  "iterate", "children", "durationAgg", "w", "h", "groups",
+  "id", "label", "parent", "data", "collapsed", "container", "join", "type",
+  "iterate", "children", "durationAgg", "statusAgg", "w", "h", "groups",
+  "entry", "exit",   // container ports the run engine attaches incident edges to (F9)
 ];
-const EDGE_FIELDS = ["id", "source", "target", "loop", "maxIterations", "label", "data", "weight"];
+const EDGE_FIELDS = ["id", "source", "target", "loop", "maxIterations", "label", "data", "weight", "onFail"];
 
 function pick(obj, fields) {
   const out = {};
@@ -152,7 +153,7 @@ export class Store {
     this.rev++;
   }
 
-  update(id, patch) {
+  update(id, patch, opts = {}) {
     const n = this.nodes.get(id);
     const e = this.edges.get(id);
     const t = n || e;
@@ -180,10 +181,20 @@ export class Store {
         }
       }
     }
+    // pick() drops a top-level `undefined`, so spell the whole-payload clear out here:
+    // `update(id, { data: undefined }, { replace: true })` removes `data` like `data: {}`.
+    if (opts.replace && patch && patch.data === undefined && "data" in patch) delete t.data;
     for (const [k, v] of Object.entries(p)) {
       if (k === "id") continue;
-      if (k === "data") t.data = { ...t.data, ...v };
-      else t[k] = v;
+      if (k !== "data") { t[k] = v; continue; }
+      // `data` merges by default, which means a key can be changed but never removed.
+      // An explicit `undefined` is that removal (`data: { fail: undefined }`), and
+      // `{ replace: true }` swaps the whole payload instead of merging into it. Keys are
+      // dropped rather than left as `undefined`, so spec() still round-trips through JSON.
+      const next = opts.replace ? { ...v } : { ...t.data, ...v };
+      for (const dk of Object.keys(next)) if (next[dk] === undefined) delete next[dk];
+      if (Object.keys(next).length) t.data = next;
+      else delete t.data;
     }
     this.rev++;
     return t;
@@ -208,8 +219,18 @@ export class Store {
       throw new GraphError("non-convex", `condense set [${ids.join(", ")}] is not convex: a path leaves the set and re-enters`);
     }
     // The merged node inherits the common parent of the nodes as *named* (a swallowed
-    // child's parent is inside the set and would only ever read as "mixed").
-    const parents = new Set([...S].map((id) => this.nodes.get(id).parent));
+    // child's parent is inside the set and would only ever read as "mixed"). A named source
+    // can ALSO be swallowed — `condense(["box", "c1"])`, the natural shape of a UI selection
+    // that picked a container and one of its own children — so the test is the parent, not
+    // how the source got into the set: a parent that is itself disappearing says nothing
+    // about where the merged node goes, and counting it would read as mixed and evict the
+    // merge from the grandparent it belongs in.
+    const parents = new Set();
+    for (const id of S) {
+      const p = this.nodes.get(id).parent;
+      if (p !== undefined && closure.has(p)) continue;
+      parents.add(p);
+    }
     const parent = parents.size === 1 ? [...parents][0] : undefined;
 
     const doomedEdges = [];
@@ -221,7 +242,7 @@ export class Store {
       if (sIn && tIn) continue; // internal edge disappears
       const src = sIn ? newNode.id : e.source;
       const tgt = tIn ? newNode.id : e.target;
-      const key = `${src} ${tgt}`;
+      const key = `${src}\0${tgt}`;
       const prev = redirected.get(key);
       if (prev) prev.weight += e.weight || 1;
       else redirected.set(key, { proto: e, src, tgt, weight: e.weight || 1 });
@@ -229,7 +250,16 @@ export class Store {
     // Everything below here mutates. Check the adds' preconditions FIRST — a throw between
     // the deletes and the adds would leave the store permanently half-condensed (the
     // caller's promise rejects, but the graph is already gone).
-    const mergedSpec = { parent, ...newNode };
+    // `parent: null` on the merged spec means "inherit the common parent", the same as
+    // omitting it — a caller building the spec from a form or a diff has no way to say
+    // "absent" other than null, and treating it as an id made it a dangling reference.
+    const named = { ...newNode };
+    if (named.parent === null) delete named.parent;
+    if (parents.size > 1 && named.parent === undefined) {
+      console.warn(`[smv:condense] sources of "${newNode.id}" have different parents; ` +
+        "the merged node lands at the top level — give the new node spec an explicit `parent` to place it.");
+    }
+    const mergedSpec = { parent, ...named };
     if (mergedSpec.id == null || mergedSpec.id === "") throw new GraphError("node-id", "every node needs a non-empty id");
     if (mergedSpec.parent !== undefined && (!this.nodes.has(mergedSpec.parent) || closure.has(mergedSpec.parent))) {
       throw new GraphError("dangling", `node "${mergedSpec.id}" parent "${mergedSpec.parent}" does not exist`);
@@ -409,17 +439,20 @@ export function containmentClosure(store, ids) {
   return closure;
 }
 
-/** Convexity check (G4): no path from inside S may leave S and come back. ~DFS from outside-successors of S. */
+/** Convexity check (G4): no path from inside S may leave S and come back. ~DFS from outside-successors of S.
+ *  `loop: true` edges are skipped: a back edge re-enters the set instead of being a path
+ *  *through* it, so a retry loop around a set of steps does not make that set non-convex. */
 export function isConvex(store, S) {
   const out = new Map(); // adjacency
   for (const e of store.edges.values()) {
+    if (e.loop) continue;
     if (!out.has(e.source)) out.set(e.source, []);
     out.get(e.source).push(e.target);
   }
   // Start from every node outside S reachable directly from S; if any walk re-enters S, not convex.
   const starts = [];
   for (const e of store.edges.values()) {
-    if (S.has(e.source) && !S.has(e.target)) starts.push(e.target);
+    if (!e.loop && S.has(e.source) && !S.has(e.target)) starts.push(e.target);
   }
   const seen = new Set();
   const stack = [...starts];

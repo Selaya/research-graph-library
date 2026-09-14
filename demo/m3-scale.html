@@ -136,12 +136,24 @@
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
-    window.__smvM3Scale = { done: true, errors: errors, checks: {} };
+    signalDone();
     return;
   }
-  window.__g3 = g; // exposed for the e2e driver, mirroring window.__g in demo/m2.html
+  // F36 — the library's story-finished convention: the instance lives on `window.smv`
+  // and the page marks its own end with `g.finish()` (there is no storyboard here to run
+  // out of steps), so `g.finished` resolves for any unattended driver.
+  window.smv = g;
+  window.__g3 = g; // also under the e2e driver's own name, mirroring window.__g in demo/m2.html
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /** End of the story: publish the measurements, mirror the page's error list onto the
+   *  `__smvExit` hook the checker reads for it, and resolve `g.finished`. */
+  function signalDone() {
+    window.__smvM3Scale = { done: true, errors: errors, checks: checks || {} };
+    window.__smvExit = { done: true, errors: errors };
+    if (g) g.finish("scale-exit");
+  }
 
   /** Every rendered group under the mount root that carries an identity (node or edge). */
   function allGroups() {
@@ -277,7 +289,7 @@
 
     checks.nan = scanNaN();
 
-    window.__smvM3Scale = { done: true, errors: errors, checks: checks };
+    signalDone();
     phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
     reportEl.textContent =
       "nodes/edges/groups     " + checks.totalNodes + " / " + checks.totalEdges + " / " + checks.totalGroups + "\n" +
@@ -301,7 +313,7 @@
   if (AUTO) {
     runExit().catch(function (err) {
       errors.push("auto: " + String((err && err.message) || err));
-      window.__smvM3Scale = { done: true, errors: errors, checks: checks };
+      signalDone();
     });
   }
 })();

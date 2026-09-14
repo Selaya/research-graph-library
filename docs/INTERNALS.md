@@ -20,8 +20,18 @@ decorates from `stateAt(t)` inside the same rAF loop, never mutates the graph.
 - `src/store.js` — `Store` (validated spec, mutations, `condense`, `snapshot/restore`),
   `GraphError(code, msg)`, `isConvex`.
 - `src/cycles.js` — `breakCycles(nodes, edges, pinned:Set)→Set<edgeId>`, `isAcyclic`.
-- `src/measure.js` — `textWidth`, `truncate`, `sizeNode(node)→{w,h}` (deterministic
-  estimator under Node), constants `NODE_H`, etc.
+- `src/measure.js` — `textWidth`, `truncate`, `sizeNode(node, measure?, ctx?)→{w,h,reserve}`
+  (deterministic estimator under Node, scaled by the font's px size), constants `NODE_H`,
+  etc. `measure` is `opts.layout.measure` = `{extraWidth, extraHeight}`, each a number or
+  `(node, ctx)=>number`, where `ctx = {nodes: Map<id,specNode>, cache}` is the whole node
+  set (a hook whose chrome depends on other nodes — a durationAgg rollup chip — needs it).
+  `extraWidth` widens the derived box **inside** the `NODE_MAX_W` clamp (a measured node
+  still never exceeds 220px; past that the label gives way) AND comes back as `reserve`,
+  which render.js subtracts from the label's room, so reserved chrome is never label room.
+  A node that declares both `w` and `h` opts out entirely (`reserve: 0`); one that declares
+  only `w` keeps that width and still gets the reserve. `viewstate.view().sizes[id]` carries
+  `{w, h, reserve}`; `createViewState(store, measureOf)` takes a live getter for it so
+  `g.layout({measure})` re-measures without rebuilding the view state.
 - `src/layout.js` — **frozen seam (D2)**:
   `layout(view, opts) → { nodes:{id:{x,y,w,h}}, edges:{id:{points,reversed?}}, bounds:{x,y,w,h}, reversedEdgeIds:Set }`.
   `view = {nodes:[{id,w,h,parent?}], edges:[{id,source,target,loop?,maxIterations?}]}`.
@@ -254,7 +264,17 @@ compileRun(spec, opts) → sim
 ```
 
 - `spec` = a `store.spec()` snapshot. `opts = { iterations?: {[edgeId]: n} (≤ maxIterations),
-  rates?: [{t, scope: nodeId|'*', factor}], hopMs=300, dwell?: (sec|null, ctx) => ms }`.
+  rates?: [{t, scope: nodeId|'*', factor}], hopMs=300, dwell?: (sec|null, ctx) => ms,
+  entries?: [{id, at}] }`. `entries` are extra seed tokens (`run.inject`, F3); a node's own
+  `data.entry: true` / `data.startAt` declare the same thing in the spec (F3/F4). An edge's
+  `data.duration` is its hop time, paced by the node formula, `hopMs` otherwise (F8); a
+  container's `entry: [ids]`/`exit: [ids]` expand one spec edge into several engine edges
+  that keep its `id` and carry a unique `key` for cycle bookkeeping (F9) — a loop's
+  consumed-iterations bookkeeping stays keyed by `id`, so one arc into a multi-entry
+  container spends its budget once, not once per entry child. `data.fail` may be
+  `{reason, retries, recover}` and a `loop` edge may be `onFail: true`, which makes 'failed'
+  terminal only once the retry budget is spent (F1); the per-node attempt counter lives on
+  the token and is inherited by the children `fanOut` mints, so the budget is the branch's.
 - Default pacing: `dwellMs = 300 + 1200 * (sec / maxSecInGraph)`, 600 when the node has
   no `data.duration`. Rates: a token entering node X multiplies its inherited rate by
   every applicable rate event; rate divides dwell AND hop times for that token's branch
@@ -263,7 +283,9 @@ compileRun(spec, opts) → sim
 - Semantics: source nodes (no in-edges, loop edges excluded) start with one token at t=0.
   A node completes → spawns one child token per non-loop out-edge (implicit fan-out).
   `join: "all"|"any"|{count:k}` on a node: dwell starts when the policy fires
-  (expected = # non-loop in-edges); later arrivals emit `drop` (ghost-fade). Loop edge
+  (expected = # non-loop in-edges); later arrivals emit `drop` (ghost-fade) — except a retry
+  replaying through it (F1): a fired join never re-arms, so it lets exactly one retry token
+  per attempt back through, uncounted. Loop edge
   `loop:true` A→B: token finishing A with iterations remaining traverses the arc ONCE
   visually (iteration 1), then per further iteration a compressed in-place tick
   (250ms/iter, no re-fly — D4) emitting `loop` {edgeId, iteration, max}; after the final
@@ -302,14 +324,32 @@ compileRun(spec, opts) → sim
 - `createStoryboard(host, steps)` where `host = { apply(step) → {promise?|run?},
   snapshot() → any, restore(snap) → promise, }`; steps = the JSON op array (§5.5), ops:
   `addNode|addEdge|removeNode|removeEdge|update|expand|collapse|condense|batch|
+   expandAll|collapseAll|layout|run (args = g.run opts)|run.reset|
    run.play (args or {until})|run.step|run.seek|wait {ms}`; `label` entries are
-  zero-duration markers.
+  zero-duration markers. `run`/`run.reset`/`layout` also check at build time that their
+  one argument, if present, is an options object (F5).
 - Snapshot BEFORE each step (G2); `sb.seek(indexOrLabel)`: restore that snapshot →
   host.restore animates the diff from current visual state; then optionally replay to an
   intra-step run time. `sb.play/pause/next/prev/seek/labels/position/on`.
-- index.js: `opts.storyboard` array + `opts.autoplay`; host implementation lives in
-  index.js (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed],
-  runTime, runOpts}).
+- index.js: `opts.storyboard` array + `opts.autoplay` (`true`, or `'auto'` = play only when
+  the page URL carries `?auto=1`, F36); host implementation lives in index.js
+  (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed], runTime, runOpts,
+  runCompiled, layout: {...layoutOpts}} — the `layout` op mutates the instance-wide options
+  in place, so they are state a step moves and a backward seek has to put back; the `run` op
+  does the same to the compile inputs, and `runCompiled` keeps "no run yet" distinct from "a
+  run with no opts" so a restore does not leave a LATER compile's inputs behind for the next
+  implicit `ensureRun()`).
+  `g.finished` is one deferred per instance, resolved by the storyboard's `done` event,
+  `g.finish(reason)` or `destroy()` — the "story finished" signal check-demos waits on.
+  The two snippets the checker evaluates in the page (which hook is on offer, and the latch
+  that turns `g.finished` into a pollable flag) live in `scripts/finish-signal.mjs`, so they
+  are unit-tested without a browser (`test/finish-signal.test.js`).
+- `createRun()` keeps a `runSubs` set of every `run.on(type, fn)` a CALLER registered and
+  re-seats it on the fresh transport a `g.run(opts)` recompile builds (F6), keeping the
+  live undo on the sub so the unsubscriber `on()` returned still works after a recompile; the run layer's
+  own subscriptions (run-render's, the transport-bar notify hop) use the raw pre-wrap
+  `on()` and are rebuilt per compile. That same hop mirrors every run event onto the
+  instance bus as `run:<type>`.
 - `src/transport.js`: `createTransport(rootEl, controller)` — play/pause, step back/fwd,
   scrubber (input range over the storyboard's cumulative timeline; within a run.play
   step maps to run.seek), speed select (0.5/1/2/4), current label readout.
@@ -354,7 +394,24 @@ end re-condenses; no NaN anywhere.
   `seekTimeline` pause before moving the head.
 - `store.js`: exports `containmentClosure(store, ids)`; condense convexity + edge
   redirection judge the closure (children of condensed containers), and the synchronous
-  guard in `index.js`/`condense-anim.js` asks the same question.
+  guard in `index.js`/`condense-anim.js` asks the same question. `isConvex()` skips
+  `loop: true` edges (a back edge re-enters the set, it is not a path through it);
+  `condense()` reads `parent: null` on the merged spec as "inherit", and warns when the
+  sources' parents differ and no parent was named. `update(id, patch, {replace})`:
+  `data` merges, an `undefined` value deletes that key, `replace` swaps the payload, and
+  an emptied `data` is dropped entirely so spec() still round-trips through JSON.
+- `index.js`: `g.validate(ops|fn)` dry-runs the structural ops against
+  `new Store(store.snapshot())` and returns `{ok, errors}` — guarded wrappers collect the
+  `GraphError`s instead of throwing, nothing commits, no relayout. The op whitelist is
+  storyboard.js's own `STORYBOARD_OPS`; the `expand`/`collapse` probes are view-only but
+  still record `missing` for an unknown id, like the real methods throw. A `collapsed`
+  patch to `g.update()` is routed to `expand()`/`collapse()` for the view half only — the
+  commit still runs when the route changed nothing, so the rest of the patch renders;
+  `viewstate.expand()/collapse()` own the `pendingCollapse` bookkeeping for a container
+  whose children have not arrived yet.
+- `run.js`: the container failure rollup is per-container policy `statusAgg`
+  (`'earliest-fail'` default | `'latest'` | `'none'`), read off each container's own leaf
+  descendants; `'latest'` keeps an ascending `[{t, fail}]` mark list sampled in `stateAt`.
 - Storyboard `host.snapshot()` carries `reversals: [...pinnedReversals]`; restore
   re-seats them (G2 fidelity: pins are part of the state a step moves).
 - `run.js` runs `breakCycles` over its (container-remapped) edges: untagged back edges
@@ -410,11 +467,31 @@ liveBoundaries(events) → number[]                // sorted distinct event time
   `data.duration` parses (`parseDuration` from run.js); else 0 (status pulse carries it).
   Progress = 1 on finish.
 - Joins (`join:` policy): arrivals counted exactly as Mode A — including saturating at
-  `needed` (Mode A drops post-fire arrivals, so `arrived` never exceeds `needed`); but an explicit `start(id)`
-  ALWAYS activates — the real log outranks the declared policy. `joins` map reported the
-  same way. Loop edges (`loop: true`) never auto-fan-out; a repeated `start` of an
-  already-done node re-activates it (that IS the live loop iteration) and increments
-  `loops[edgeId].iteration` for its loop in-edge if one exists.
+  `needed` (Mode A drops post-fire arrivals, so `arrived` never exceeds `needed`) — and
+  MERGED: an arrival at a fan-in is `held` (it occupies the node, nothing is released) until
+  `needed` of them have landed, at which point the group becomes ONE releasable occupant, so
+  a bare `finish` there mints one downstream token and not one per arrival (F10). Unlike
+  Mode A the join re-arms — each further group releases another token, which a long-running
+  fan-in needs. An explicit `start(id)` ALWAYS activates — the real log outranks the declared
+  policy, so it picks up a held arrival too — and `spawn()` injects outright (never held,
+  never counted). A `finish`/`fail` on a join that has NOT fired consumes the arrivals it is
+  holding as one piece of work: one token downstream for the held group, plus one per
+  released/active occupant. `joins` map reported the same way. Loop edges (`loop: true`) never
+  auto-fan-out; a repeated `start` of an already-done node re-activates it (that IS the live
+  loop iteration) and increments `loops[edgeId].iteration` for its loop in-edge if one exists.
+- `opts.minHopMs` (F14, default 0, clamped to `hopMs`): the shortest crossing a hop may be
+  squashed to when a `start()` claims it mid-flight — the claimed start is pushed out to
+  `hopStart + minHopMs` so a log whose `start` shares the upstream `finish`'s timestamp (a
+  real trace) still draws the crossing instead of teleporting the token. A `finish`/`fail`
+  stamped INSIDE that window is re-queued to the landing instant (real spans are routinely
+  shorter than the minimum hop), so a node is never painted done while its token is still
+  drawn on the wire; the dwell collapses instead.
+- `nodes[id]` carries three live-only keys beyond Mode A's: `waiting`/`active` (the occupancy
+  split, `waiting + active === occupancy`; a held join arrival counts as waiting) and
+  `overBudget` — the live dwell outran the declared `data.duration`, which in Mode B is an
+  expectation and never a schedule (F13). It survives the `finish` that closed the over-long
+  dwell and a fresh `start` on an EMPTY node clears it (a concurrent start cannot erase a
+  verdict another dwell earned); run-render writes it as `data-over-budget`.
 - Deterministic: same (spec, events, t) → same state. No wall clock inside; the caller
   owns time.
 
@@ -428,9 +505,23 @@ and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unch
   span of a log it was seeded with, so seeded events are reachable at all), and
   advances with the shared ticker unconditionally (live time flows even while paused/
   scrubbed). `run.now() → frontier ms`.
-- `run.start(id, {at}?)`, `run.finish(id, {at}?|{at,n}?)`, `run.spawn(id, n, {at}?)`
+- `run.start(id, {at, spawn}?)`, `run.finish(id, {at}?|{at,n}?)`, `run.spawn(id, n, {at}?)`
   append to the log stamped at `at ?? frontier` (clamped to ≤ frontier). Emits the same-
   named event.
+- `start()` guard (F11): on a NON-root with no `waiting` occupant, no token crossing towards
+  it and no `'done'`/`'failed'` attempt to retry, the call would mint a token out of nothing
+  — it warns `[smv:live]` and names `{ spawn: true }`, which declares the mint deliberate.
+  `opts.spawnOnStart: false` turns the warned-about start into a no-op (nothing is logged);
+  the default stays `true` (backward compatible). The guard is gated behind a cheap
+  per-node arrival counter (upstream `finish`/`spawn` credit it, `start`/`finish`/`fail`
+  drain it), so the streaming shape `finish(A); start(B)` never pays for a replay; the
+  counter only ever SUPPRESSES the exact check, so no warning it would not have made can
+  appear. "Root" is the engine's own notion (`liveFedTargets`, exported by `src/run-live.js`
+  so the two cannot drift): loop edges, self-edges **and the back edges `breakCycles` cuts**
+  do not feed their target, so a graph drawn as an untagged cycle still has a root the run
+  can be seeded on. `finish()`/`fail()`'s zero-occupancy warning counts a crossing towards the
+  node as occupied when `minHopMs` is set, since the engine defers such a call rather than
+  dropping it.
 - View time `t`: by default **follows** the frontier (`run.following === true`).
   `seek(ms)` clamps to `[0, frontier]` and detaches (time-travel replay); `play()`
   advances `t` at 1× (× global speed) and clamps at the frontier — you can NEVER scrub or
@@ -444,7 +535,11 @@ and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unch
   only replay playback (frontier is real time); per-branch is a no-op (documented).
   `run.log() → [...events]` (copy). `reset(opts, time)` re-seeds log from `opts.log`, and
   `options()` CARRIES that log — the pair is the storyboard snapshot/restore round trip
-  (G2), which must not delete a live run's history.
+  (G2), which must not delete a live run's history. `reset` also takes `{ now }` (F12) — an
+  explicit frontier epoch, so later `{ at }` stamps from a server clock are not clamped back
+  onto the seeded log's span (`options()` carries it too) — and `{ replay: true }`, which
+  re-emits every seeded entry through the handle's emitter in log order, each payload marked
+  `replay: true`.
 - `play({until})` waits on the node's status in BOTH modes. In live mode the view clock is
   glued to the frontier by default, so `until` is consulted before the frontier — otherwise
   every `play({until})` from the normal following state resolves on the spot.
@@ -502,12 +597,21 @@ makeQuery(store) → { nodes(filter?), edges(filter?), children(id), descendants
 ## `src/render.js` + `src/styles.js` + `src/viewstate.js` — edge labels, collapseAll (render-extras agent)
 
 - **Edge labels:** `edge.label` renders as `<text class="smv-edge-label">` inside the
-  edge group, positioned per frame at `pointAt(clippedPoints, 0.5)` with a small
+  edge group, positioned per frame at `pointAt(clippedPoints, t)` with a small
   perpendicular offset; content/truncation set at styleCommit only (D7). Labels do NOT
   affect layout (documented simplification — record in DEVIATIONS if judged material).
   Meta-edges: when a collapsed boundary edge aggregates ≥2 labeled edges the label drops
   (weight badge already carries the story). CSS: `.smv-edge-label` muted, 10px, paint-order
   stroke halo for readability, in styles.js.
+- **Rich edge labels (F25/F26):** `edge.label` may instead be
+  `{text, place:'mid'|'start'|'end', rotate, pill, maxW}`. styleCommit normalizes it to
+  `{text, t, rotate, pill, w}` (`t` = the path fraction: .15/.5/.85) and caches it on the
+  element record as `e.lab`, so `frame()` reads no Map. `rotate` writes a
+  `rotate(deg,x,y)` transform normalized into ±90° (never upside down); `pill` adds a
+  `<rect class="smv-edge-pill">` inserted BEFORE the text (paints behind), sized from the
+  text measured in the label's own 10px font, and flags the group `data-pill` so CSS drops
+  the halo. Truncation cap: per-edge `maxW`, else `styleCommit({edgeLabelMaxW})` from
+  `opts.layout.edgeLabelMaxW`, else 90px.
 - **`vs.containers()`** → array of container ids in containment-depth order (parents
   first). `vs.expandAll()` / `vs.collapseAll()` mutate the set only and return the ids
   that changed (index.js drives the single relayout).
@@ -625,14 +729,17 @@ export/a11y-table via `../src/`) + `test/e2e-m2.mjs` (playwright-core, chromium 
 - **no regression**: zero console errors; `npm test`, `npm run size`, e2e-m0, e2e-m1 all
   green.
 
-## `src/interact.js` — tap-to-toggle (post-review M2 addition)
+## `src/interact.js` — tap-to-toggle + click events (post-review M2 addition; F27)
 
-`attachTapToggle(g, {svg}) → {destroy}` — pointerdown resolves the `.smv-node[data-id]`
-under the finger (before the viewport's setPointerCapture retargets the gesture);
-pointerup toggles the container through public `g.expand/collapse` ONLY when the pointer
-stayed within a 6px slop and no second pointer joined (pinch). Wired by index.js unless
-`opts.interaction.tapToggle === false`; containers get `cursor: pointer`. Ships in the
-IIFE.
+`attachTapToggle(g, {svg, toggle=true, emit}) → {destroy}` — pointerdown resolves the
+enclosing `.smv-node[data-id]` or `.smv-edge[data-id]` under the finger (before the
+viewport's setPointerCapture retargets the gesture); pointerup publishes
+`emit('nodeclick'|'edgeclick', {id, event})` and then toggles the container through public
+`g.expand/collapse` ONLY when the pointer stayed within a 6px slop and no second pointer
+joined (pinch) — one guard, both behaviours. index.js wires `emit` to the instance bus, so
+`g.on('nodeclick', …)` is the public surface; `opts.interaction.tapToggle === false` drops
+the toggle and `opts.interaction.click === false` drops the events (either alone still
+attaches the listeners). Containers get `cursor: pointer`. Ships in the IIFE.
 
 ---
 
@@ -782,6 +889,22 @@ Everything else in the shell (breakCycles
 + pinning, back-edge/self-loop arcs, `padContainers`, bounds) is UNCHANGED. The dagre
 import is REMOVED from this file.
 
+**What the solver sees (F32/F33).** Input nodes are `{id, w, h, parent?, container?, data?}`.
+`data` is the view node's own spec data, or `opts.hint(node)`'s return when `hint` is a
+function (return `undefined` to pass nothing) — the channel a placement-driven solver reads
+per-node hints from, instead of an out-of-band map the page must fill before every
+`addNode`. `container: true` marks any container, including one a spec declared with
+`container: true` before anything parents to it (viewstate.js ORs `kids.has(id)` with the
+flag and marks the childless case `empty`, which render.js turns into `data-empty`). Both
+keys are additive: a solver that reads neither is unaffected, and every custom key on the
+opts still reaches the solver untouched by the spread.
+
+**An omitted container rect (F35).** `layout()` collects the ids the solver returned no rect
+for and hands them to `padContainers`, which then computes those containers from the
+children's bbox + `containerPad` ALONE. Unioning with the `{x:0,y:0}` placeholder would drag
+the container (and the drawing's bounds) towards the origin; a solver that places children
+and leaves containers to the shell is a supported way to write one.
+
 ## `src/adapters/dagre.js` — optional ESM adapter (integration agent)
 
 Exports `dagreSolver(input, opts)` (same solver contract, delegating to
@@ -859,9 +982,9 @@ Same `internals`-taking contract as condense-anim.js: no renderer import, no glo
 document, runs against a fake host in tests.
 
 ```js
-resolveCameraTarget(opts, layoutResult, size, current) → {x, y, k}   // PURE
+resolveCameraTarget(opts, layoutResult, size, current, resolveId?) → {x, y, k}   // PURE
 createDirector(internals) → d
-  internals = { root, lastLayout(), emphasize(id, value), dim(id, value), captions }
+  internals = { root, lastLayout(), emphasize(id, value), dim(id, value), captions, resolveId }
 d.highlight(sel), d.clearHighlight(), d.caption(text, opts) , d.captionText()
 d.reassert()                       // apply(force): rewrite every data-emph/data-dim
 d.snapshot() → {emphasis, caption} / d.restore(snap), d.destroy()
@@ -879,6 +1002,16 @@ d.snapshot() → {emphasis, caption} / d.restore(snap), d.destroy()
   `setTo` clamps `k` but copies x/y verbatim, so an unclamped fit would centre the shot at
   a scale the viewport never applies and land it off-screen by the clamp ratio. FIT_MAX_K
   is structurally absent from the camera path.
+- **M5 (F15/F16/F17).** A box target is fitted and centred in `paneBox(size, pad, inset)`
+  (viewport.js, shared with `fit()`): `opts.inset ?? size.inset`, so index.js can pass the
+  MEASURED chrome through `size` while a target's own `inset` still wins (`0` opts out).
+  `maxK` lids a FITTED `k` only — an explicit `k` is a scale request — and index.js
+  supplies `maxK: 1.5` for a `nodes[]` union (`NODES_MAX_K`), which is why the pure
+  function itself stays unopinionated. `resolveId(id)` maps an id the layout did not draw
+  to the ancestor standing in for it (index.js passes `vs.visibleAncestor`); only an id
+  that resolves to nothing drawn still warns. `highlight()` resolves `sel.nodes` the same
+  way through `internals.resolveId` — edges are left alone (a hidden edge is a meta-edge,
+  a different id, not an ancestor).
 - Emphasis: `Map<id, variant>` + dim `Set`, replace-not-accumulate (D14). `apply()` diffs
   desired vs a `written` shadow (Map + Set) and writes only what differs;
   `apply(force)` clears the shadow first — that is `reassert()`, for elements the
@@ -892,7 +1025,10 @@ d.snapshot() → {emphasis, caption} / d.restore(snap), d.destroy()
 ## `src/viewport.js` additions
 
 ```js
-vp.fit(bounds, {pad=24, duration=0, ease, maxK=FIT_MAX_K}) → Promise<{canceled}>
+vp.fit(bounds, {pad=24, duration=0, ease, maxK=FIT_MAX_K, inset}) → Promise<{canceled}>
+paneInsets(root, svgEl) → {top,right,bottom,left}     // PURE-ish: reads client rects only
+paneBox(size, pad, inset) → {cx, cy, w, h}            // PURE
+normInset(number | {top,right,bottom,left}) → {top,right,bottom,left}
 vp.fit(bounds, pad, animate)              // M0 spelling still works (object-vs-scalar sniff)
 vp.moveTo({x?,y?,k?}, {duration=0, ease}={}) → { promise, cancel }
 vp.setInteractive(bool)                   // attach/detach ALL pointer+wheel listeners
@@ -908,18 +1044,47 @@ vp.target                                 // getter: where a live tween is headi
 - `tick()` uses the tween's own `ease` (default still cubicOut). `fit`'s `maxK` overrides
   the FIT_MAX_K=1.5 auto-fit lid (`MAX_K`/`FIT_MAX_K` now exported). No
   `prefersReducedMotion()` in this file — index.js owns `reduced` and passes the duration.
+- **M5 (F15).** `paneInsets()` measures the chrome the library itself mounts over the pane
+  (`.smv-transport`, `.smv-totalbar`, `.smv-caption`): each BAR is assigned to the pane edge
+  it hugs (top or bottom — every bar the library mounts is horizontal, and a taller element
+  is a host overlay), deepest intrusion per side wins, anything covering half the pane is a
+  host panel and is ignored, top/bottom each capped at 40%. Left/right are only ever an
+  `inset` the caller passes.
+  All zeros without `getBoundingClientRect`, so every fake-DOM test fits as before. `fit()`
+  and `resolveCameraTarget()` both frame through `paneBox()`, so they agree by construction.
 
 ## `src/render.js` + `src/styles.js` + `src/storyboard.js`
 
 - `r.emphasize(id, value)` / `r.dim(id, value)` — lookup in nodeEls then edgeEls, write
   `data-emph` / `data-dim` on the group. NOT folded into `mark()`: `data-condense` is the
   condense choreography's channel and a highlight outliving a merge must not fight it.
+- CSS (M5/F18): status colour also writes `--smv-status-fill`, a `color-mix` of its token
+  over whatever `--smv-fill` resolved to, and the box paints
+  `var(--smv-status-fill, var(--smv-fill))`. Because the status rules also set `--smv-fill`,
+  an un-overridden node mixes a colour with itself (no visual change); an inline props/style
+  fill composes with the tint instead of hiding it. Guarded by `@supports color-mix` so an
+  old viewer keeps the plain fill.
 - CSS: `[data-emph]` variants (focus/warn/ok/mute) via a `--smv-emph` indirection over the
   existing color vars; `.smv-node[data-dim],.smv-edge[data-dim]{opacity:.28}` (scoped, so
   it can't leak onto host markup — the opacity property beats the per-frame presentation
   attribute); `.smv-caption` with `data-place`/`data-variant` and a `.smv-has-transport`
   bottom offset mirroring `.smv-totalbar`; the `[data-smv-record] *` transition/animation
   kill-switch (D15). No transitions on any of it (D14).
+  - **Lesson (API-FRICTIONS.md F20, fixed):** the transport-aware bottom offset
+    (`.smv-has-transport .smv-caption{bottom:46px}`) used to outrank
+    `.smv-caption[data-place="top"]{bottom:auto}` by specificity, so a top-placed caption
+    under `controls: true` kept both `top` and `bottom` set and stretched over the whole
+    pane. The fix is a *more* specific transport-aware rule per placement
+    (`.smv-root.smv-has-transport .smv-caption[data-place="top"]{bottom:auto}` — one
+    attribute selector above the offset rule, which is why it wins), guarded by
+    `test/caption-place.test.js`. The general lesson: the caption strip, the transport bar
+    and the total-duration bar (`.smv-totalbar`) each position themselves independently
+    against the pane, with no single source of truth for how much chrome is stacked at top
+    or bottom — the same gap `fitView()`/`camera({ fit })` hit not accounting for that
+    chrome (F15). A single "pane chrome" layout — one place that knows the stacked heights
+    at each edge and hands them out to captions, `fitView`, and anything else that needs to
+    avoid them — would prevent the next collision instead of another rule fixed one
+    property pair at a time.
 - storyboard.js: `"camera" | "highlight" | "clearHighlight" | "caption"` join OPS and
   NAMED — method-shaped, so applyStep's default branch dispatches them.
 
@@ -935,6 +1100,12 @@ vp.target                                 // getter: where a live tween is headi
   Deliberately not routed through `viewport.fit()` — see the FIT_MAX_K note above.
 - `g.highlight(sel)` / `g.clearHighlight()` / `g.caption(text, o?)` — thin delegates to
   the director; return `g`.
+- **M5 (F15/F17/F18):** `chromeInset()` = `paneInsets(root, renderer.svg)`, read by
+  `fitView`, `camera` and relayout's auto-refit (and the one mount-time fit, which now runs
+  AFTER the transport mounts so there is chrome to measure). `g.camera` injects
+  `maxK: NODES_MAX_K` for a `nodes[]` target that names none, and passes
+  `vs.visibleAncestor` as the resolver. `g.props(map, opts)` forwards `{merge:true}` to the
+  director, which patches the override map instead of replacing it.
 - `g.cues() → [{kind:"label"|"caption", at, label?, text?, index}]` — absolute ms offsets
   off the same `durOf()` table the scrubber reads (D12); truthful under `captions:false`.
 - **`durOf(step)`** replaces NOMINAL_STEP_MS: `step.dur` wins; else label 0, wait its ms,

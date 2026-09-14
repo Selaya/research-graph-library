@@ -26,8 +26,11 @@ import {
   type Timeline,
   type CameraTarget,
   type HighlightSelection,
+  type PropsOverride,
   type Cue,
   type LayoutResult,
+  type ValidateProbe,
+  type ValidateResult,
   type LayoutSolver,
   type SolverInput,
   type SolverResult,
@@ -40,7 +43,7 @@ import { dagreSolver, dagreLayout } from "./adapters-dagre.js";
 const spec: GraphSpec = {
   nodes: [
     { id: "ingest", label: "Ingest", data: { duration: "45m" } },
-    { id: "clean", label: "Clean data", collapsed: true, durationAgg: "sum" },
+    { id: "clean", label: "Clean data", collapsed: true, durationAgg: "sum", statusAgg: "latest" },
     { id: "clean.dedupe", parent: "clean", label: "Dedupe" },
     { id: "build", label: "Build", join: "all" },
     { id: "deploy", label: "Deploy" },
@@ -75,6 +78,23 @@ addP.cancel();
 
 const upd: Awaitable<MutationResult> = g.update("check", { data: { status: "done" } });
 void upd;
+// `data: {key: undefined}` unsets a key; `{replace: true}` swaps the payload; a `collapsed`
+// patch routes to expand()/collapse().
+g.update("check", { data: { status: undefined } });
+g.update("check", { data: { status: "done" } }, { replace: true });
+g.update("clean", { collapsed: true });
+
+// validate(ops | fn) — the same guards, against a throwaway clone, nothing committed.
+const verdict: ValidateResult = g.validate([
+  { op: "addNode", args: [{ id: "check2" }] },
+  { op: "batch", steps: [{ op: "removeNode", args: ["check2"] }] },
+]);
+if (!verdict.ok) { const codes: GraphErrorCode[] = verdict.errors.map((e) => e.code); void codes; }
+const verdict2: ValidateResult = g.validate((probe: ValidateProbe) => {
+  probe.addNode({ id: "check3" });
+  probe.condense(["check3"], { id: "merged", parent: null });
+});
+void verdict2;
 // removeNode() resolves the full removed-ids cascade on top of {canceled, applied}.
 const rm: Awaitable<RemoveNodeResult> = g.removeNode("check");
 rm.then((r) => { const nodeIds: string[] = r.ids.nodes; const edgeIds: string[] = r.ids.edges; void [nodeIds, edgeIds]; });
@@ -104,12 +124,15 @@ const splitAwaitable: Awaitable<CondenseSplitResult> = g.split("build", {
 });
 splitAwaitable.then((r) => { if (r.applied && r.ids) { const created: string[] = r.ids.created; void created; } });
 
-const condenseAwaitable: Awaitable<CondenseSplitResult> = g.condense(["build.compile", "build.link"], { id: "build" });
+// `parent: null` on the merged spec = "inherit the sources' common parent".
+const condenseAwaitable: Awaitable<CondenseSplitResult> = g.condense(["build.compile", "build.link"], { id: "build", parent: null });
 void condenseAwaitable;
 
 g.style((n: NodeSpec) => (n.data && n.data.status === "done" ? { "--smv-fill": "#e8f6ec" } : null));
 g.theme("dark");
 g.fitView({ pad: 24, animate: true });
+g.fitView({ inset: { bottom: 56 } });           // F15 — keep clear of the pane's own chrome
+g.fitView({ inset: 0 });                        // …or opt out of the measurement entirely
 g.layout({ dir: "TB" });
 
 // ---- M3: the layout solver seam + the optional dagre adapter --------------------------
@@ -184,6 +207,10 @@ void runA.sim().stateAt(0).done;
 // bare g.run() returns whatever transport already exists (typed as the union).
 const bare: Run = g.run();
 void bare.duration;
+// Documented on the handle in RUN.md, so it is on the shared surface: Mode A recompiles
+// against the live spec, Mode B hands back the frontier.
+const reloadedA: number = runA.reload();
+void reloadedA;
 
 // ---- run: Mode B (live) ------------------------------------------------------------------
 const runB: LiveRun = g.run({ mode: "live" });
@@ -204,6 +231,8 @@ if (runState && runState.status === "failed") void runState.progress;
 const failEntry: LiveEvent = { t: 10, type: "fail", id: "ingest", reason: "timeout" };
 void failEntry;
 void runB.sim().events.filter((e) => e.type === "fail");
+const reloadedB: number = runB.reload();
+void reloadedB;
 const following: boolean = runB.following;
 const nowMs: number = runB.now();
 const log = runB.log();
@@ -218,6 +247,12 @@ const steps: StoryboardStep[] = [
   { op: "condense", args: [["build.compile", "build.link"], { id: "build" }] },
   { op: "run.play", until: "deploy" },
   { op: "batch", steps: [{ op: "run.step" }, { op: "run.seek", ms: 0 }] },
+  // F5 — the run-shaped and structural ops.
+  { op: "run", args: [{ iterations: { retry: 2 }, hopMs: 120 }] },
+  { op: "run.reset" },
+  { op: "expandAll" },
+  { op: "collapseAll" },
+  { op: "layout", args: [{ dir: "TB" }] },
 ];
 const sb = g.storyboard(steps);
 sb.play();
@@ -239,6 +274,13 @@ g.camera({ fit: true, pad: 24, dur: 800 });
 g.camera({ x: 120, y: -40, k: 1.25, dur: 500 });
 g.camera({ by: { dx: -200, dy: 0 }, dur: 400 });
 g.camera({ zoom: 1.6 });
+g.camera({ nodes: ["ingest", "build"], maxK: 2.5 });        // F17 — the fit lid (default 1.5)
+g.camera({ fit: true, inset: { bottom: 56, top: 12 } });    // F15 — explicit pane chrome
+g.props({ ingest: { "--smv-fill": "#7c5cff" } }, { merge: true });  // F18 — patch the layer
+// F18 — a `null` VALUE drops one key, a `null` ENTRY drops every override for one id.
+g.props({ ingest: { "--smv-fill": null }, build: null }, { merge: true });
+const dropOne: PropsOverride = { clean: null };
+g.props(dropOne, { merge: true });
 
 const spotlight: HighlightSelection = { nodes: ["build"], edges: ["e3"], variant: "focus", dim: true };
 g.highlight(spotlight).clearHighlight();
@@ -249,6 +291,8 @@ const directed: StoryboardStep[] = [
   { op: "camera", args: [{ node: "clean", dur: 700 }], dur: 700 },
   { op: "highlight", args: [{ nodes: ["clean"], dim: true }] },
   { op: "caption", args: ["Cleaning the data", { place: "bottom" }] },
+  { op: "props", args: [{ clean: { "--smv-fill": "#7c5cff" } }, { merge: true }] },
+  { op: "props", args: [{ clean: null }, { merge: true }] },
   { op: "wait", ms: 800 },
   { op: "clearHighlight" },
   { op: "expand", args: ["clean"], dur: 900 },
@@ -272,6 +316,30 @@ g.renderer.dim("build", null);
 
 const recordOpts: MountOpts = { ticker: "manual", motion: "full", captions: false, autoplay: true };
 void recordOpts;
+
+// ---- F36: the "story finished" convention ---------------------------------------------
+const autoOpts: MountOpts = { autoplay: "auto" };
+void autoOpts;
+g.finished.then((r) => r.reason);
+g.finish().finish("live-done");
+g.on("finish", (e) => e.reason);
+// The run-status channel carries the engine's own union, so an exhaustive listener has
+// FOUR cases: `'failed'` is emitted by both engines (data.fail / LiveRun.fail).
+g.on("runstatus", (e) => {
+  switch (e.status) {
+    case "pending":
+    case "active":
+    case "done":
+    case "failed":
+      return;
+    default: {
+      const exhaustive: never = e.status;
+      return exhaustive;
+    }
+  }
+});
+// F6 — run events mirrored onto the instance bus outlive a g.run(opts) recompile.
+g.on("run:finish", (payload) => void payload);
 
 // ---- destroy --------------------------------------------------------------------------
 g.destroy();
@@ -304,6 +372,33 @@ try {
   const structCode: GraphErrorCode = smvErr.code;
   void structCode;
 }
+
+// ---- F21-F27: preset options, node measurement, rich edge labels, click events --------
+const rich: EdgeSpec = {
+  id: "e9", source: "ingest", target: "build",
+  label: { text: "hands the batch to", place: "start", rotate: true, pill: true, maxW: 220 },
+};
+void rich;
+
+const decorated: Graph = mount("#pipe", spec, {
+  preset: { name: "pipeline", total: "critical" },
+  interaction: { tapToggle: false, click: true },
+  layout: {
+    edgeLabelMaxW: 200,
+    measure: { extraWidth: (n: NodeSpec) => (n.data ? 40 : 0), extraHeight: 8 },
+  },
+});
+decorated.on("nodeclick", ({ id, event }) => { void id; void event; });
+const offEdgeClick = decorated.on("edgeclick", ({ id }) => { void id; });
+offEdgeClick();
+void presetPipeline(decorated, { total: "both" }).destroy;
+
+// @ts-expect-error — the total-duration bar has three modes, and 'mean' is not one.
+presetPipeline(decorated, { total: "mean" });
+
+// @ts-expect-error — an edge label object must carry its text.
+const noText: EdgeSpec = { id: "e10", source: "ingest", target: "build", label: { place: "mid" } };
+void noText;
 
 // ---- deliberately wrong usages: these MUST fail to compile -----------------------------
 // @ts-expect-error — split requires a container-free node's `parts.nodes` to be non-empty

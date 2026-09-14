@@ -80,6 +80,8 @@
   <span>view clock <b id="m-view">0.0s</b></span>
   <span>logged events <b id="m-log">0</b></span>
   <span>tokens in flight <b id="m-tok">0</b></span>
+  <span>active · waiting <b id="m-occ">0 · 0</b></span>
+  <span>over budget <b id="m-over">0</b></span>
   <span>spans replayed <b id="m-span">0/14</b></span>
 </div>
 
@@ -94,12 +96,20 @@
     <dl class="attrs" id="ins-attrs"></dl>
     <h3 style="margin-top:16px">What to look for</h3>
     <ul class="watch">
-      <li>Click any activation — including a <em>resume</em> — to read the span behind it; the inspector
-        bar shows where that span sits inside the 1 322 ms request.</li>
+      <li>Click any activation — or the message arrow that delivered it — to read the span behind it:
+        <code>g.on("nodeclick")</code> / <code>g.on("edgeclick")</code>. The inspector bar shows where that
+        span sits inside the 1 322 ms request.</li>
+      <li>Every lifeline is declared <code>container: true</code>, so a service is a dashed, header-only
+        column from the first frame and fills in as its activations arrive.</li>
       <li>Rows are trace order. <code>reserveStock</code> and <code>GET /v2/quote</code> share a row because
         orders-svc fanned out to both at once — one <code>finish()</code>, two tokens.</li>
       <li>pricing-svc answers <code>500</code>: <code>run.fail()</code> consumes that token and fans out
-        nothing, so the branch simply dies mid-diagram.</li>
+        nothing, so the branch simply dies mid-diagram. It also blew the 60 ms p99 budget the span
+        declares as <code>data.duration</code>, so the box picks up the dashed
+        <code>data-over-budget</code> boundary and the meter counts it.</li>
+      <li>A parent's dispatch instant <em>is</em> its child's start instant in a real trace — every hop
+        would be zero-length. <code>minHopMs</code> holds the crossing open so the ball is visibly on the
+        wire; the timestamps are the raw span stamps, untouched.</li>
       <li>orders-svc handles it with a fallback span — an explicit <code>start()</code>, the only thing that
         gets a token back after a failure. It is a leaf: nothing leaves it.</li>
       <li>Each postgres statement is a nested span on the same lifeline, so the ball stays in that column
@@ -125,8 +135,9 @@
   var AUTO = /(^|[?&])auto=1(&|$)/.test(window.location.search);
   var P = AUTO ? 1 : 1.5;           // pace multiplier — auto keeps the whole story near 20s
   var S = 8 * P;                     // time compression: 1 trace ms -> S replay ms
-  var HOP = 320 * P;                 // a message in flight, carved into the replay clock
-  var LEAD = 260 * P;                // the diagram grows this long before the ball departs
+  var HOP = 320 * P;                 // how long a message takes to cross
+  var MIN_HOP = 210 * P;             // the shortest crossing the engine may squash a hop to
+  var LEAD = 560 * P;                // the diagram grows this long before the ball departs
   var INTRO = 700 * P;
 
   // ---- the trace ---------------------------------------------------------------------
@@ -156,7 +167,7 @@
       attrs: { "authz.scheme": "cookie", "authz.subject": "cus_8Q31ZtA", "authz.scopes": "orders:write",
                "authz.token_age": "14 min", "cache.hit": "true" } },
     { id: "sp5", parentSpanId: "sp2", service: "ord", name: "createOrder", startMs: 176, endMs: 1252, status: 201,
-      node: "create order", req: "createOrder", res: "201 {order}", resume: "shape 201 · etag",
+      node: "create order", req: "createOrder(cart, ik_7c1b93)", res: "201 {order: ord_8f21c}", resume: "shape 201 · etag",
       note: "gateway → orders-svc. The activation is the span's own work, up to the moment it calls out.",
       attrs: { "rpc.system": "grpc", "rpc.method": "Orders/Create", "order.id": "ord_8f21c",
                "order.total_usd": "128.40", "idempotency.key": "ik_7c1b93", "peer.service": "api-gateway" } },
@@ -165,22 +176,23 @@
       attrs: { "cart.items": "3", "cart.sku_count": "3", "validation.rules": "11",
                "validation.result": "pass", "order.currency": "USD" } },
     { id: "sp7", parentSpanId: "sp5", service: "inv", name: "reserveStock", startMs: 262, endMs: 468, status: 200,
-      node: "reserve stock", req: "reserve(3)", res: "200 reserved", resume: "stock held",
+      node: "reserve stock", req: "reserve(3 · eu-west-1)", res: "200 reserved · res_91d4", resume: "stock held",
       note: "orders-svc fans out: inventory and pricing are called together — one finish(), two tokens, one row.",
       attrs: { "rpc.method": "Inventory/Reserve", "http.status_code": "200", "inventory.reserved": "3",
                "inventory.reservation_id": "res_91d4", "inventory.warehouse": "eu-west-1" } },
     { id: "sp8", parentSpanId: "sp5", service: "pri", name: "GET /v2/quote", startMs: 268, endMs: 396, status: 500, par: true,
-      node: "quote cart", req: "quote(cart)", res: "500 upstream_timeout",
+      node: "quote cart", req: "quote(cart)", res: "500 upstream_timeout · 120ms",
       note: "pricing-svc answers 500. run.fail() consumes that token and fans out nothing — the branch dies here.",
       attrs: { "http.method": "GET", "http.route": "/v2/quote", "http.status_code": "500",
-               "error.type": "UpstreamTimeout", "pricing.engine": "rules-v2", "net.timeout_ms": "120" } },
+               "error.type": "UpstreamTimeout", "pricing.engine": "rules-v2", "net.timeout_ms": "120",
+               "sla.p99_ms": "60" } },
     { id: "sp9", parentSpanId: "sp5", service: "ord", name: "pricing.fallback", startMs: 424, endMs: 486, status: 200,
-      node: "fallback · price book", handles: "sp8", req: "500 fallback",
+      node: "fallback · price book", handles: "sp8", req: "500 → price-book fallback",
       note: "orders-svc handles it: a fallback span, started explicitly — the only way a token comes back after fail().",
       attrs: { "fallback.source": "price-book@2026-09-05", "fallback.reason": "upstream_5xx",
                "pricing.total_usd": "128.40", "pricing.stale_by": "6 h", "circuit.state": "open" } },
     { id: "sp10", parentSpanId: "sp5", service: "pg", name: "tx createOrder", startMs: 512, endMs: 958, status: 200,
-      node: "open tx", req: "BEGIN", res: "ok · 4 rows", resume: "order persisted",
+      node: "open tx", req: "BEGIN ISOLATION LEVEL READ COMMITTED", res: "ok · 4 rows", resume: "order persisted",
       note: "The reservation comes back, and orders-svc opens the write transaction.",
       attrs: { "db.system": "postgresql", "db.name": "orders", "db.statement": "BEGIN ISOLATION LEVEL READ COMMITTED",
                "db.connection_pool": "8/20", "net.peer.name": "pg-primary.eu-west-1" } },
@@ -227,7 +239,10 @@
     if (o.par && prevAct) o.row = prevAct.row; else o.row = ++row;
     acts.push(o); prevAct = o;
     if (o.from) {
-      var e = { id: "m." + o.id, source: o.from.id, target: o.id, label: o.msg, token: o.token !== false };
+      // The message text IS the content of a sequence diagram: upright, on its own plate, and
+      // capped wide enough that a real header or a 500 reason survives intact.
+      var e = { id: "m." + o.id, source: o.from.id, target: o.id, token: o.token !== false,
+                label: o.msg ? { text: o.msg, place: "mid", pill: true, maxW: 220 } : undefined };
       edges.push(e); o.from.outs.push(o);
       if (e.token) o.from.tokenOuts++;
     }
@@ -258,35 +273,42 @@
   });
 
   // ---- the replay clock ----------------------------------------------------------------
-  // replay = INTRO + traceMs * S, plus one HOP inserted at every dispatch so the message is
-  // actually visible in flight instead of teleporting.
+  // replay = INTRO + traceMs * S, and nothing else: a parent's dispatch instant IS the
+  // child's start instant in a real trace, and `minHopMs` (docs/LIVE.md "Timestamps with no
+  // hop") keeps that crossing visible instead of teleporting the token.
   var OPS = [];
   acts.forEach(function (a) {
-    OPS.push({ t: a.finishRaw, pri: 0, a: a, kind: a.fail ? "fail" : "finish", dispatch: !a.fail && a.tokenOuts > 0 });
+    OPS.push({ t: a.finishRaw, pri: 0, a: a, kind: a.fail ? "fail" : "finish" });
     OPS.push({ t: a.startRaw, pri: 1, a: a, kind: "start" });
   });
   OPS.sort(function (x, y) { return x.t - y.t || x.pri - y.pri; });
-  var off = 0;
   OPS.forEach(function (o) {
-    o.rep = INTRO + o.t * S + off;
+    o.rep = INTRO + o.t * S;
     if (o.kind === "start") o.a.startRep = o.rep; else o.a.endRep = o.rep;
-    if (o.dispatch) off += HOP;
   });
   var END_REP = OPS[OPS.length - 1].rep;
   var FAIL_REP = acts.filter(function (a) { return a.fail; })[0].endRep;
 
   // ---- spec + layout -------------------------------------------------------------------
   var seq = SequenceLayout.create({ actors: ACTORS.map(function (a) { return a.id; }) });
-  // A lifeline with no activations yet is not a container, so the solver would park it in its
-  // spare column and warn. Placing the actor id in its own column is the no-op fix: the moment
-  // it has a child it IS a container and the solver skips placement lookup for it entirely.
-  ACTORS.forEach(function (a) { seq.place(a.id, a.id, 0); });
-  acts.forEach(function (a) { seq.place(a.id, a.actor, a.row); });
+  // Every node carries its own (actor, row) in `data.seq`, which the layout seam hands the
+  // solver — no out-of-band placement registry to keep in step with the graph.
+  // What the span was ALLOWED to take, on the replay clock: the service's declared p99 when
+  // the span carries one, otherwise its own measured work with headroom. A live dwell that runs
+  // past it sets state().nodes[id].overBudget and marks the node data-over-budget.
+  function budgetSec(a) {
+    var sla = a.span.attrs["sla.p99_ms"];
+    var ms = sla ? parseFloat(sla) * S : (a.endRep - a.startRep) * 1.3 + 240 * P;
+    return Math.max(0.12, ms / 1000);
+  }
   function nodeOf(a) {
     return { id: a.id, parent: a.actor, label: a.label, h: 28,   // flatter than the 36px default
-             data: { duration: Math.max(60, a.endRep - a.startRep) / 1000 } };
+             data: { duration: budgetSec(a), seq: { actor: a.actor, row: a.row } } };
   }
-  var SEED = { nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label }; }).concat([nodeOf(acts[0])]), edges: [] };
+  // `container: true` — a lifeline is a lifeline from the first frame, drawn as a header-only
+  // dashed box and reaching the solver with its own column, before any activation lands in it.
+  var SEED = { nodes: ACTORS.map(function (a) { return { id: a.id, label: a.label, container: true }; })
+                 .concat([nodeOf(acts[0])]), edges: [] };
 
   // ---- mount ----------------------------------------------------------------------------
   var $ = function (s) { return document.querySelector(s); };
@@ -295,12 +317,17 @@
   try {
     g = SparkleMotion.mount("#pipe", SEED, {
       theme: "auto",
-      layout: { dir: "TB", solver: seq.solver, nodesep: 24, ranksep: 10, marginx: 20, marginy: 12, minColWidth: 120 },
+      layout: { dir: "TB", solver: seq.solver, nodesep: 24, ranksep: 10, marginx: 20, marginy: 12,
+                minColWidth: 120, edgeLabelMaxW: 220 },   // the message, not a hint on a line
       animation: { duration: 280 * P, easing: "cubic-out" },
       controls: true,
-      interaction: { tapToggle: false },     // a collapsed lifeline would wreck the diagram
+      // tapToggle off — a collapsed lifeline would wreck the diagram — but the click events stay.
+      interaction: { tapToggle: false },
     });
-    run = g.run({ mode: "live", hopMs: HOP });   // Mode B: no compiled schedule, no storyboard
+    // Mode B: no compiled schedule, no storyboard. `minHopMs` is what keeps a trace readable:
+    // a parent's finish and its child's start carry the SAME stamp, and without a minimum the
+    // crossing would collapse to zero length.
+    run = g.run({ mode: "live", hopMs: HOP, minHopMs: MIN_HOP });
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed: " + err.message;
@@ -308,6 +335,7 @@
     return;
   }
   window.__g = g;
+  window.smv = g;                        // the documented handle: `await window.smv.finished`
 
   // ---- the span inspector ----------------------------------------------------------------
   var insTitle = $("#ins-title"), insSub = $("#ins-sub"), insBar = $("#ins-bar"),
@@ -357,24 +385,13 @@
     if (ACTORS.some(function (x) { return x.id === id; })) { showActor(id); g.clearHighlight(); }
   }
 
-  // The viewport takes pointer capture on pointerdown, so the node under the cursor has to
-  // be resolved there — every later event in the gesture is retargeted to the <svg>.
-  var pipeEl = $("#pipe"), tapDown = null;
-  function nodeIdFrom(t) { var el = t && t.closest ? t.closest(".smv-node") : null; return el ? el.getAttribute("data-id") : null; }
-  pipeEl.addEventListener("pointerdown", function (ev) {
-    tapDown = { id: nodeIdFrom(ev.target), x: ev.clientX || 0, y: ev.clientY || 0 };
-  });
-  pipeEl.addEventListener("pointerup", function (ev) {
-    var d = tapDown; tapDown = null;
-    if (!d || !d.id) return;
-    var dx = (ev.clientX || 0) - d.x, dy = (ev.clientY || 0) - d.y;
-    if (dx * dx + dy * dy > 36) return;      // travelled: that was a pan, not a tap
-    selectNode(d.id);
-  });
-  pipeEl.addEventListener("pointercancel", function () { tapDown = null; });
-  pipeEl.addEventListener("keydown", function (ev) {
-    if (ev.key !== "Enter") return;
-    var id = nodeIdFrom(ev.target); if (id) selectNode(id);
+  // A clean tap (and Enter/Space on a focused node) publishes `nodeclick`; a pan or a pinch
+  // never does. An edge is clickable too — stroke and label both — so the message opens the
+  // span it delivered.
+  g.on("nodeclick", function (ev) { selectNode(ev.id); });
+  g.on("edgeclick", function (ev) {
+    var e = edges.filter(function (x) { return x.id === ev.id; })[0];
+    if (e) selectNode(e.target);
   });
 
   // ---- the scripted timeline (live mode has no storyboard) --------------------------------
@@ -383,7 +400,7 @@
   acts.forEach(function (a, idx) {
     var inE = edges.filter(function (e) { return e.target === a.id; })[0];
     var prev = a.from;
-    at(a.startRep - HOP - LEAD, function () {                 // grow the diagram ahead of the ball
+    at(a.startRep - LEAD, function () {                       // grow the diagram ahead of the ball
       g.batch(function () {
         if (idx > 0) g.addNode(nodeOf(a));
         if (inE) g.addEdge({ id: inE.id, source: inE.source, target: inE.target, label: inE.label });
@@ -391,7 +408,9 @@
       g.camera({ nodes: prev ? [prev.id, a.id] : [a.id], k: 1, pad: prev ? 120 : 200, dur: 340 * P });
       if (a.note && !a.fail) g.caption(a.note, { place: "bottom" });
     });
-    at(a.startRep, function (now) { run.start(a.id, { at: now }); });
+    // `token: false` (a span that HANDLES another, like the 500's fallback) has no token
+    // coming up its wire, so its start() deliberately mints one: say so with { spawn: true }.
+    at(a.startRep, function (now) { run.start(a.id, { at: now, spawn: a.token === false }); });
     at(a.endRep, function (now) {
       if (!a.fail) { run.finish(a.id, { at: now }); return; }
       run.fail(a.id, { at: now, reason: a.span.attrs["error.type"] + " · " + a.span.attrs["http.route"] });
@@ -405,7 +424,8 @@
 
   // ---- transport, meters, wiring -----------------------------------------------------------
   var t0 = 0, playing = false, cur = 0, replayed = 0, storyDone = false;
-  var mNow = $("#m-now"), mView = $("#m-view"), mLog = $("#m-log"), mTok = $("#m-tok"), mSpan = $("#m-span");
+  var mNow = $("#m-now"), mView = $("#m-view"), mLog = $("#m-log"), mTok = $("#m-tok"), mSpan = $("#m-span"),
+      mOcc = $("#m-occ"), mOver = $("#m-over");
   var playBtn = $("#play"), jumpBtn = $("#jump"), liveBtn = $("#live");
   function fmt(ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; }
 
@@ -430,6 +450,15 @@
     mView.textContent = fmt(run.time() - t0) + (run.following ? "" : " · scrubbed");
     mLog.textContent = String(run.log().length);
     mTok.textContent = String(st.tokens.length);
+    // Live state splits occupancy: `waiting` is a landed arrival nothing has started yet,
+    // `active` is work in progress, `overBudget` is a dwell past its declared duration.
+    var act = 0, wait = 0, over = 0;
+    Object.keys(st.nodes).forEach(function (id) {
+      var n = st.nodes[id];
+      act += n.active || 0; wait += n.waiting || 0; if (n.overBudget) over++;
+    });
+    mOcc.textContent = act + " · " + wait;
+    mOver.textContent = String(over);
     mSpan.textContent = replayed + "/" + SPANS.length;
     liveBtn.disabled = run.following;
     jumpBtn.disabled = !(playing || storyDone) || run.now() - t0 < FAIL_REP;
@@ -457,15 +486,16 @@
       " logged events — one 500, one fallback, 201 Created.", { place: "bottom" });
     phaseEl.textContent = "trace complete — click any activation for its span";
     showSpan(SPANS[0], acts[0]);
-    // Camera moves cancel-and-retarget, so the nudge has to wait for the fit to land.
-    return Promise.resolve(g.camera({ fit: true, pad: 30, dur: 560 * P }))
-      .then(function () { return g.camera({ by: { dx: 0, dy: -22 }, dur: 240 * P }); });
+    // fit() frames inside the pane MINUS the chrome the library mounted over it (transport bar,
+    // caption strip), so the last rank lands clear of both with no nudge of our own.
+    return g.camera({ fit: true, pad: 30, dur: 560 * P });
   }
   function outro() {
     storyDone = true;
     if (!AUTO) {
       backToLive();
       playBtn.disabled = true;
+      g.finish("trace");
       return;
     }
     sleep(500).then(jumpToFail).then(function () { return sleep(2400); })
@@ -474,6 +504,7 @@
         g.caption(null);                       // nothing over the last rows in the final frame
         phaseEl.textContent = "trace complete · " + SPANS.length + " spans · " + acts.length +
           " activations · " + run.log().length + " logged events · one 500, one fallback";
+        g.finish("trace");                     // a live page marks its own end (g.finished resolves)
         window.__smvExit = { done: true, errors: errors, checks: {
           spans: SPANS.length, activations: acts.length, messages: edges.length,
           events: run.log().length, failed: run.log().filter(function (e) { return e.type === "fail"; }).length,

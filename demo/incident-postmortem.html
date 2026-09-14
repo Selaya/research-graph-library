@@ -148,20 +148,25 @@
   <li><b>Triage</b> starts collapsed and expands into three parallel investigations; two of them
     dead-end, and the deploy diff is the leg that actually finds the culprit.</li>
   <li><b>Customer comms</b> gets a <code>run.spawn(id, 2)</code> on top of its arriving token —
-    an <code>×3</code> occupancy badge for three notifications in flight.</li>
+    an <code>×3</code> occupancy badge for three notifications in flight, split into
+    <code>waiting</code> / <code>active</code> by <code>run.state()</code>.</li>
   <li>At T+00:44 <code>run.fail("rollback")</code> fires: the step turns red, nothing fans out,
     the branch dies. The retry is just <code>run.start()</code> again — which is what ticks the
     self-loop's <code>iter 1/3</code> badge.</li>
+  <li><b>All clear</b> is a real live-mode <code>join</code>: the cache and the queue arrivals are
+    HELD on the node and released as one token when both have landed, so the step fires once.</li>
   <li>Afterwards the view clock <code>seek()</code>s back to that instant while the frontier keeps
     running underneath (watch the two clocks diverge), then <code>follow()</code> snaps to live.
     Drag the scrubber under the graph to do it yourself.</li>
+  <li>Click any node to ring the first feed line that touched it (<code>g.on("nodeclick")</code>).</li>
 </ul>
 
 <p class="legend">
   Legend — chip = how long the step really took (<code>durationAgg:"max"</code> rolls the triage box up),
   ⚡ automated / ✋ human, ● active · ✓ done, dashed pips under <em>All clear</em> = the 2-way
   AND-join, <code>×N</code> = tokens sharing a node, dashed self-arc on the rollback =
-  <code>loop:true, maxIterations:3</code>, slim bar at the bottom = total incident time.
+  <code>loop:true, maxIterations:3</code>, slim bar at the bottom = the preset's
+  <code>total:"both"</code> — every step's declared time summed, and the critical path beside it.
 </p>
 
 <div id="report"></div>
@@ -195,22 +200,26 @@
   // preset's chips and the total bar read as a postmortem table, not as estimates.
   // `triage` is the only container: durationAgg "max" because its three legs ran in
   // parallel. The self-loop on `rollback` is the retry edge (maxIterations is mandatory).
+  // Widths are measured: the pipeline preset reserves the duration chip and the mode glyph
+  // in the node's own padding, so a label never runs under them and no page sets `w`.
+  // `allclear` has two non-loop in-edges, which is an implicit 2-way AND-join — live mode
+  // honours it, so the cache and queue arrivals are held and released as one token.
   // ---------------------------------------------------------------------------
   var SPEC = {
     nodes: [
-      { id: "alert",   label: "5xx alert fires", w: 186, data: { duration: "4m",  mode: "automated" } },
-      { id: "page",    label: "Page on-call",    w: 176, data: { duration: "6m",  mode: "automated" } },
+      { id: "alert",   label: "5xx alert fires", data: { duration: "4m",  mode: "automated" } },
+      { id: "page",    label: "Page on-call",    data: { duration: "6m",  mode: "automated" } },
       { id: "triage",  label: "Triage", collapsed: true, durationAgg: "max", data: { mode: "manual" } },
-      { id: "triage.dash",    parent: "triage", label: "Dashboards",  w: 168, data: { duration: "13m", mode: "manual" } },
-      { id: "triage.logs",    parent: "triage", label: "Error logs",  w: 162, data: { duration: "9m",  mode: "manual" } },
-      { id: "triage.deploys", parent: "triage", label: "Deploy diff", w: 162, data: { duration: "13m", mode: "manual" } },
-      { id: "culprit",  label: "Culprit: deploy #4821", w: 236, data: { duration: "5m",  mode: "manual" } },
-      { id: "rollback", label: "Roll back to #4820",    w: 240, data: { duration: "20m", mode: "automated" } },
-      { id: "comms",    label: "Customer comms",        w: 208, data: { duration: "7m",  mode: "manual" } },
-      { id: "verify",   label: "Verify 5xx rate",       w: 192, data: { duration: "12m", mode: "automated" } },
-      { id: "cache",    label: "Warm rate cache",       w: 202, data: { duration: "9m",  mode: "automated" } },
-      { id: "queue",    label: "Drain DLQ",             w: 162, data: { duration: "13m", mode: "automated" } },
-      { id: "allclear", label: "All clear",             w: 156, data: { duration: "3m",  mode: "manual" } },
+      { id: "triage.dash",    parent: "triage", label: "Dashboards",  data: { duration: "13m", mode: "manual" } },
+      { id: "triage.logs",    parent: "triage", label: "Error logs",  data: { duration: "9m",  mode: "manual" } },
+      { id: "triage.deploys", parent: "triage", label: "Deploy diff", data: { duration: "13m", mode: "manual" } },
+      { id: "culprit",  label: "Culprit: deploy #4821", data: { duration: "5m",  mode: "manual" } },
+      { id: "rollback", label: "Roll back to #4820",    data: { duration: "20m", mode: "automated" } },
+      { id: "comms",    label: "Customer comms",        data: { duration: "7m",  mode: "manual" } },
+      { id: "verify",   label: "Verify 5xx rate",       data: { duration: "12m", mode: "automated" } },
+      { id: "cache",    label: "Warm rate cache",       data: { duration: "9m",  mode: "automated" } },
+      { id: "queue",    label: "Drain DLQ",             data: { duration: "13m", mode: "automated" } },
+      { id: "allclear", label: "All clear",             data: { duration: "3m",  mode: "manual" } },
     ],
     edges: [
       { id: "e-ap", source: "alert", target: "page" },
@@ -239,12 +248,13 @@
   try {
     g = SparkleMotion.mount("#pipe", SPEC, {
       theme: "auto",
-      layout: { dir: "TB", nodesep: 52, ranksep: 28, marginx: 16, marginy: 16 },
+      layout: { dir: "TB", nodesep: 72, ranksep: 28, marginx: 16, marginy: 16 },
       animation: { duration: 380, easing: "cubic-out" },
       controls: true,      // the transport bar doubles as the live-mode scrubber
       preset: "pipeline",
     });
     run = g.run({ mode: "live", hopMs: HOP_MS });
+    window.smv = g;      // the documented handle: `g.finished` resolves when the story ends
     window.__g = g;
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
@@ -254,67 +264,23 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Director helpers. Camera/highlight misuse never throws — it console.warns `[smv:…]`,
-  // which is exactly what the demo smoke check fails on. A collapsed container's children
-  // are not in the layout result at all, so every id is filtered against what is actually
-  // drawn before it is handed to the director.
+  // Director helpers. `camera({fit:true})` frames inside the pane MINUS the chrome the
+  // library mounted over it — the transport bar, the preset's total bar and the caption
+  // strip — so the bottom rank is never parked under the narration. A target that is
+  // currently a collapsed descendant resolves to the container standing in for it.
   // ---------------------------------------------------------------------------
-  function lay() { var r = g.layoutResult(); return r || { nodes: {}, edges: {} }; }
-  function keep(ids, bag) {
-    var out = [];
-    for (var i = 0; i < (ids || []).length; i++) if (bag && bag[ids[i]]) out.push(ids[i]);
-    return out;
-  }
-  /** camera({fit:true}) pads symmetrically, which parks the bottom rank under the caption
-   *  overlay (and under the transport bar). The absolute {x,y,k} form takes an explicit
-   *  top/bottom gutter instead, so the whole graph is always readable beside the narration. */
-  function frameGraph(dur) {
-    var b = (lay() || {}).bounds, host = document.querySelector("#pipe");
-    if (!b || !host || !(b.w > 0) || !(b.h > 0)) { g.camera({ fit: true, pad: 28, dur: dur }); return; }
-    var W = host.clientWidth, H = host.clientHeight, TOP = 22, BOT = 96, SIDE = 30;
-    var k = Math.min((W - 2 * SIDE) / b.w, (H - TOP - BOT) / b.h);
-    if (!(k > 0) || !isFinite(k)) k = 1;
-    g.camera({ x: W / 2 - (b.x + b.w / 2) * k, y: TOP - b.y * k, k: k, dur: dur });
-  }
-
-  function camera(o) {
-    if (o && o.gutter) { frameGraph(o.dur); return; }
-    var res = lay(), t = {}, k;
-    for (k in o) if (Object.prototype.hasOwnProperty.call(o, k)) t[k] = o[k];
-    if (t.node != null && !(res.nodes || {})[t.node]) { delete t.node; t.fit = true; }
-    if (t.nodes) {
-      t.nodes = keep(t.nodes, res.nodes);
-      if (!t.nodes.length) { delete t.nodes; t.fit = true; }
-    }
-    try { g.camera(t); } catch (e) { errors.push("camera: " + String(e && e.message)); }
-  }
-  function highlight(sel) {
-    var res = lay();
-    var o = { nodes: keep(sel.nodes, res.nodes), edges: keep(sel.edges, res.edges) };
-    if (sel.variant) o.variant = sel.variant;
-    if (sel.pulse) o.pulse = true;
-    if (sel.dim) o.dim = true;
-    if (!o.nodes.length && !o.edges.length) return;
-    g.highlight(o);
-  }
   function caption(text, o) { g.caption(text, o || { place: "bottom" }); }
-
-  function expandTriage() {
-    try {
-      var h = g.expand("triage");
-      if (h && typeof h.then === "function") h.then(function () {}, function () {});
-    } catch (e) { errors.push("expand: " + String(e && e.message)); }
-  }
+  function expandTriage() { g.expand("triage"); }
 
   // ---------------------------------------------------------------------------
   // The log. `m` is incident minutes; `fire` is the live-mode call that line caused.
-  // Ordered, monotonic, and every finish() is preceded by a start() on the same node, so
-  // no primitive ever hits the zero-occupancy path.
+  // Ordered, monotonic, and every start() either follows an arrival or is a root/retry, so
+  // no primitive hits the zero-occupancy path or the `[smv:live]` phantom-start guard.
   // ---------------------------------------------------------------------------
   var EVENTS = [
     { m: 0, src: "datadog", text: "monitor [payments-api · 5xx rate] → ALERT — 5.9% over a 2m window (threshold 5.0%)",
       fire: function (r) { r.start("alert"); },
-      cam: { gutter: true, dur: 500 },
+      cam: { fit: true, pad: 28, dur: 500 },
       cap: "T+00:00 — Datadog's 5xx monitor fires. Every beat from here is a real log line." },
     { m: 2, src: "datadog", text: "severity auto-set SEV-2 · service payments-api · region us-east-1" },
     { m: 4, src: "pagerduty", text: "incident #4471 opened from monitor 1832",
@@ -369,7 +335,7 @@
       cap: "Restarting a failed step IS the retry — that is what ticks the loop edge to 1/3." },
     { m: 54, src: "spinnaker", text: "rollback complete — 12/12 pods healthy on v4820", kind: "ok",
       fire: function (r) { r.finish("rollback"); g.clearHighlight(); },
-      cam: { gutter: true, dur: 650 } },
+      cam: { fit: true, pad: 28, dur: 650 } },
     { m: 55, src: "datadog", text: "5xx rate 5.9% → 0.7% and falling; p99 1.2s",
       fire: function (r) { r.start("verify"); } },
     { m: 67, src: "datadog", text: "5xx rate 0.08%, p99 262ms — error-budget burn stopped", kind: "ok",
@@ -390,7 +356,7 @@
     { m: 87, src: "slack", text: "#inc-4471  SEV-2 #4471 resolved — 87m, customer impact 14:02–14:56Z", kind: "ok",
       fire: function (r) { r.finish("allclear"); },
       hl: { nodes: ["allclear"], variant: "ok" },
-      cam: { gutter: true, dur: 650 } },
+      cam: { fit: true, pad: 28, dur: 650 } },
     { m: 88, src: "slack", text: "#inc-4471  postmortem scheduled Thu 10:00 — action item: pool-size guardrail in CI" },
   ];
 
@@ -422,7 +388,9 @@
   }
 
   /** Dim every line logged after `ms`; optionally ring the one at `markIdx`. */
+  var scrubAt = null;
   function scrubFeed(ms, markIdx) {
+    scrubAt = ms;
     for (var i = 0; i < lis.length; i++) {
       var li = lis[i];
       if (li.className.indexOf("on") === -1) continue;
@@ -438,7 +406,8 @@
   // Readouts, sampled on the shared ticker — the same clock the run and the scene are on.
   // ---------------------------------------------------------------------------
   var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
-  var obs = { failReason: null, failAt: null, loopIter: 0, commsPeak: 0, joinFired: false };
+  var obs = { failReason: null, failAt: null, loopIter: 0, commsPeak: 0, commsActive: 0,
+              joinWaiting: 0, joinFired: false };
 
   function sampleFrame() {
     if (!run) return;
@@ -460,8 +429,15 @@
       mRollback.className = rb.status === "failed" ? "bad" : rb.status === "done" ? "good" : "";
       if (lp && lp.iteration > obs.loopIter) obs.loopIter = lp.iteration;
     }
+    // Live mode splits occupancy into `waiting` (a token parked on the node, including an
+    // arrival a join is still holding) and `active` (a dwell that start() opened).
     var cm = st.nodes.comms;
-    if (cm && cm.occupancy > obs.commsPeak) obs.commsPeak = cm.occupancy;
+    if (cm) {
+      if (cm.occupancy > obs.commsPeak) obs.commsPeak = cm.occupancy;
+      if (cm.active > obs.commsActive) obs.commsActive = cm.active;
+    }
+    var ac = st.nodes.allclear;
+    if (ac && ac.waiting > obs.joinWaiting) obs.joinWaiting = ac.waiting;
     var j = st.joins.allclear;
     if (j && j.fired) obs.joinFired = true;
   }
@@ -481,15 +457,41 @@
 
   var started = false, replayDone = false, t0 = 0, cursor = 0, lastStamp = null;
 
+  // Which feed line first touched each node — filled as the log plays, read by the
+  // nodeclick handler below. `rec` forwards to the live run and notes the id on the way.
+  var touchedBy = {};
+  function rec(idx) {
+    function note(id) { if (touchedBy[id] == null) touchedBy[id] = idx; }
+    return {
+      start:  function (id, o) { note(id); return run.start(id, o); },
+      finish: function (id, o) { note(id); return run.finish(id, o); },
+      fail:   function (id, o) { note(id); return run.fail(id, o); },
+      spawn:  function (id, n) { note(id); return run.spawn(id, n); },
+    };
+  }
+
+  /** F27 — a real click event on the node, past the pan/pinch slop. */
+  g.on("nodeclick", function (e) {
+    var id = e && e.id, idx = id == null ? null : touchedBy[id];
+    if (idx == null && id != null) {
+      for (var k in touchedBy) {
+        if (k.indexOf(id + ".") === 0 && (idx == null || touchedBy[k] < idx)) idx = touchedBy[k];
+      }
+    }
+    if (idx == null) { phaseEl.textContent = id + " — no log line yet"; return; }
+    scrubFeed(scrubAt, idx);
+    phaseEl.textContent = id + " → " + tPlus(EVENTS[idx].m) + " · " + EVENTS[idx].src;
+  });
+
   function fireEvent(ev, idx) {
     var stamp = run.now();
     if (ev.fire) {
-      try { ev.fire(run); } catch (e) { errors.push("event " + idx + ": " + String(e && e.message)); }
+      try { ev.fire(rec(idx)); } catch (e) { errors.push("event " + idx + ": " + String(e && e.message)); }
     }
     revealLine(idx, stamp);
     if (idx === EVENTS.length - 1) lastStamp = stamp;
-    if (ev.cam) camera(ev.cam);
-    if (ev.hl) highlight(ev.hl);
+    if (ev.cam) g.camera(ev.cam);
+    if (ev.hl) g.highlight(ev.hl);
     if (ev.cap) caption(ev.cap);
     if (idx === FAIL_IDX) { rewindBtn.disabled = false; }
     phaseEl.textContent = tPlus(ev.m) + " · " + ev.src;
@@ -525,8 +527,8 @@
     liveBtn.disabled = false;
     var landed = run.seek(t + 40);
     scrubFeed(t + 40, FAIL_IDX);
-    highlight({ nodes: ["rollback"], edges: ["retry"], variant: "warn", pulse: true, dim: true });
-    camera({ node: "rollback", k: 1.35, pad: 60, dur: 700 });
+    g.highlight({ nodes: ["rollback"], edges: ["retry"], variant: "warn", pulse: true, dim: true });
+    g.camera({ node: "rollback", k: 1.35, pad: 60, dur: 700 });
     caption("run.seek(" + Math.round(t) + ") — back at T+00:44. The rollback is red again and " +
             "everything after it is unhappened; the frontier keeps running underneath.",
             { place: "bottom" });
@@ -539,7 +541,7 @@
     g.clearHighlight();
     scrubFeed(null, null);
     logEl.scrollTop = logEl.scrollHeight;
-    camera({ gutter: true, dur: 650 });
+    g.camera({ fit: true, pad: 28, dur: 650 });
     caption("run.follow() — the view clock snaps back to the frontier. Incident closed.",
             { place: "bottom", variant: "note" });
     phaseEl.textContent = "following live";
@@ -556,8 +558,8 @@
       "log lines replayed        " + checks.lines + " over " + tPlus(EVENTS[EVENTS.length - 1].m) + "\n" +
       "rollback fail reason      " + checks.failReason + "\n" +
       "retry loop iterations     " + checks.loopIter + " of max 3\n" +
-      "comms peak occupancy      x" + checks.commsPeak + "  (1 arrival + run.spawn(comms, 2))\n" +
-      "all-clear AND-join fired  " + checks.joinFired + "\n" +
+      "comms peak occupancy      x" + checks.commsPeak + "  (1 arrival + run.spawn(comms, 2)), peak active " + checks.commsActive + "\n" +
+      "all-clear AND-join        fired " + checks.joinFired + ", peak held/waiting " + checks.joinWaiting + "\n" +
       "seek back to the fail     view " + fmt(checks.seekView) + " while the frontier was " + fmt(checks.seekFrontier) + "\n" +
       "following after follow()  " + checks.followingAfter + "\n" +
       "errors                    " + (errors.length ? JSON.stringify(errors, null, 2) : "none");
@@ -587,6 +589,8 @@
       failReason: obs.failReason,
       loopIter: obs.loopIter,
       commsPeak: obs.commsPeak,
+      commsActive: obs.commsActive,
+      joinWaiting: obs.joinWaiting,
       joinFired: obs.joinFired,
     };
 
@@ -608,16 +612,21 @@
     caption("SEV-2 #4471 — detected T+00:00, mitigated T+00:54, closed T+01:27.", { place: "bottom" });
     phaseEl.textContent = errors.length === 0 ? "done — clean" : "done — see report";
     writeReport(checks);
+    // A live-mode page has no storyboard to run out of, so it says so itself:
+    // g.finish() settles g.finished, which is what a headless check awaits.
     window.__smvExit = { done: true, errors: errors, checks: checks };
+    g.finish("incident closed");
   }
 
   story().catch(function (err) {
     errors.push("story: " + String((err && err.message) || err));
     phaseEl.textContent = "done — error";
     writeReport({ lines: cursor, failReason: obs.failReason, loopIter: obs.loopIter,
-                  commsPeak: obs.commsPeak, joinFired: obs.joinFired, seekView: 0,
+                  commsPeak: obs.commsPeak, commsActive: obs.commsActive,
+                  joinWaiting: obs.joinWaiting, joinFired: obs.joinFired, seekView: 0,
                   seekFrontier: 0, followingAfter: run && run.following });
     window.__smvExit = { done: true, errors: errors };
+    g.finish("story error");
   });
 })();
 </script>

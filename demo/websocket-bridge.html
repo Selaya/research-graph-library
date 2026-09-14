@@ -100,7 +100,8 @@
     <code>g.run({mode:"live"})</code> as <code>run.start/finish/fail/spawn</code>, exactly like
     the wiring example in <code>docs/LIVE.md</code>. Halfway through the deploy the socket is
     reset; the build keeps going without us; the client reconnects, asks for everything it
-    missed, re-seeds the run with <code>run.reset({log})</code> and fast-forwards back to live.
+    missed, re-seeds the run with <code>run.reset({log, now, replay})</code> and fast-forwards
+    back to live.
   </p>
 </header>
 
@@ -125,6 +126,7 @@
   <div class="tile"><i>socket</i><span id="m-sock">closed</span></div>
   <div class="tile"><i>event log</i><span id="m-log">0 <em>events</em></span></div>
   <div class="tile"><i>retry loop</i><span id="m-loop">iter 0/3</span></div>
+  <div class="tile"><i>region join</i><span id="m-join">0/3 arrived <em>· idle</em></span></div>
 </div>
 
 <div class="cols">
@@ -141,9 +143,12 @@
       <li><b>The socket dies during <code>DB migrate</code>.</b> The graph freezes on its last
         known state (warn highlight, everything else dimmed) while the server keeps building.</li>
       <li><b>Resume, then catch up.</b> The client sends <code>{"type":"resume","since":…}</code>,
-        the server replays the frames it missed, <code>run.reset({log})</code> re-seeds the
-        <em>same</em> run object, and <code>speed(8)</code>&nbsp;+&nbsp;<code>play()</code>
-        fast-forwards the view back to the frontier.</li>
+        the server replays the frames it missed,
+        <code>run.reset({log, now, replay:true})</code> re-seeds the <em>same</em> run object
+        — <code>now</code> is the honest frontier epoch, <code>replay</code> re-emits the
+        seeded frames so <code>run.on("fail")</code> narrates the failure we were offline
+        for — and <code>speed(8)</code>&nbsp;+&nbsp;<code>play()</code> fast-forwards the
+        view back to the frontier.</li>
       <li><b>A failure the log carries.</b> <code>Smoke test</code> fails with
         <code>reason: "readiness probe: 503 …"</code> — the branch simply stops; nothing fans
         out to <code>Promote to prod</code>.</li>
@@ -152,6 +157,10 @@
         watch the badge go <code>1/3</code>.</li>
       <li><b>Runtime fan-out.</b> <code>spawn("warm", 3)</code> puts four tokens on
         <em>Warm CDN cache</em> (one per PoP) — the <code>×4</code> occupancy badge.</li>
+      <li><b>A live join.</b> The three regions fan back into <em>Release complete</em>.
+        Live mode counts arrivals against the implicit AND-join: the pips fill
+        <code>1/3 → 3/3</code> and release <em>one</em> token, not three. Click any node to
+        scrub to its instant (<code>g.on("nodeclick")</code>).</li>
       <li><b>Two clocks.</b> Scrub backward and the view detaches from the frontier; live time
         keeps flowing underneath and you can never scrub past it. <em>Follow live</em> snaps
         back.</li>
@@ -207,6 +216,7 @@
       { id: "us-east",  label: "us-east-1",          data: { duration: "35s" } },
       { id: "eu-west",  label: "eu-west-1",          data: { duration: "35s" } },
       { id: "ap-south", label: "ap-south-1",         data: { duration: "35s" } },
+      { id: "release",  label: "Release complete",   data: { duration: "20s" } },
     ],
     edges: [
       { id: "e1",  source: "checkout", target: "deps" },
@@ -220,6 +230,12 @@
       { id: "e9",  source: "promote",  target: "us-east" },
       { id: "e10", source: "promote",  target: "eu-west" },
       { id: "e11", source: "promote",  target: "ap-south" },
+      // The three regions fan back in. Live mode honours `join` (docs/LIVE.md, "Joins"):
+      // no join declared + three non-loop in-edges = an AND-join, so the three arrivals
+      // are held (the pips fill 1/3 -> 3/3) and released as ONE token.
+      { id: "e12", source: "us-east",  target: "release" },
+      { id: "e13", source: "eu-west",  target: "release" },
+      { id: "e14", source: "ap-south", target: "release" },
       // A loop edge MUST declare maxIterations > 0. Restarting its target is the live
       // iteration (docs/LIVE.md, "Retrying a failed node").
       { id: "retry", source: "smoke", target: "canary", loop: true, maxIterations: 3 },
@@ -260,10 +276,12 @@
     { d: 18700, type: "finish", id: "eu-west" },
     { d: 18800, type: "finish", id: "us-east" },
     { d: 18900, type: "finish", id: "ap-south" },
+    { d: 19400, type: "start",  id: "release" },         // the join released one token
+    { d: 20000, type: "finish", id: "release" },
   ];
   // The socket is reset at DROP_AT and the endpoint refuses connections until BACK_AT, so the
   // first reconnect attempt bounces and the client backs off — the gap the resume has to heal.
-  var DROP_AT = 7500, BACK_AT = 10900, END_AT = 19500;
+  var DROP_AT = 7500, BACK_AT = 10900, END_AT = 20600;
 
   // MockSocket — a stand-in for `new WebSocket(url)`. Same surface the docs/LIVE.md wiring
   // touches: readyState + the four on* handlers + send()/close(). The second argument is the
@@ -355,7 +373,8 @@
   var $ = function (sel) { return document.querySelector(sel); };
   var phaseEl = $("#phase"), logEl = $("#log"), reportEl = $("#report");
   var scrubEl = $("#scrub"), scrubLabel = $("#scrublabel");
-  var mClock = $("#m-clock"), mSock = $("#m-sock"), mLog = $("#m-log"), mLoop = $("#m-loop");
+  var mClock = $("#m-clock"), mSock = $("#m-sock"), mLog = $("#m-log"), mLoop = $("#m-loop"),
+      mJoin = $("#m-join");
   var btnConnect = $("#connect"), btnDrop = $("#dropBtn"), btnFail = $("#toFail"),
       btnStep = $("#stepBtn"), btnFollow = $("#followBtn");
 
@@ -373,6 +392,8 @@
     window.__smvExit = { done: true, errors: errors };
     return;
   }
+
+  window.smv = g;          // what npm run check-demos looks for, next to g.finished
 
   var fmt = function (msv) { return (Math.max(0, msv || 0) / 1000).toFixed(1) + "s"; };
   var sleep = function (t) { return new Promise(function (r) { setTimeout(r, t); }); };
@@ -424,11 +445,26 @@
   var failSeen = false, storyEnded = false, closedForGood = false, attempt = 0;
 
   function wireRun() {
-    // g.run(anyOpts) tears down whatever transport is attached and builds a fresh one, so
-    // this is also what pins the frontier's zero to "the instant the stream opened".
+    // This is what pins the frontier's zero to "the instant the stream opened". Everything
+    // subscribed here survives reset() — same transport identity, same listeners.
     var r = g.run({ mode: "live", hopMs: HOP });
     r.on("fail", function (ev) {
-      logLine("err", "✗", ev.id + " failed" + (ev.reason ? " — " + ev.reason : ""));
+      logLine("err", "✗", ev.id + " failed" + (ev.reason ? " — " + ev.reason : "") +
+        (ev.replay ? "  (replayed from the server's log)" : ""));
+      if (ev.id !== "smoke") return;
+      failSeen = true;
+      g.caption(ev.replay
+        ? "Replayed: Smoke test failed while we were offline — nothing reached Promote"
+        : "Smoke test failed — the branch stops here, nothing reaches Promote", { place: "top" });
+      g.highlight({ nodes: ["smoke"], edges: ["retry"], variant: "warn", pulse: true });
+      g.camera({ nodes: ["migrate", "canary", "smoke", "promote"], dur: 700 });
+      refreshButtons();
+    });
+    r.on("finish", function (ev) {
+      if (ev.id !== "smoke" || !failSeen || ev.replay) return;
+      g.caption("Green on the retry — the loop edge counted the restart", { place: "top" });
+      g.highlight({ nodes: ["canary", "smoke"], variant: "ok" });
+      g.camera({ fit: true, dur: 700 });
     });
     return r;
   }
@@ -445,7 +481,7 @@
   function applyFrame(m) {
     var at = m.t - t0;
     if (m.type === "start") run.start(m.id, { at: at });
-    else if (m.type === "finish") run.finish(m.id, { at: at, n: m.n });
+    else if (m.type === "finish") run.finish(m.id, { at: at });
     else if (m.type === "fail") run.fail(m.id, { at: at, reason: m.reason });
     else if (m.type === "spawn") run.spawn(m.id, m.n, { at: at });
   }
@@ -471,14 +507,17 @@
     stats.resets++;
     // Saved history + the frames we were away for = the server's log, verbatim. reset()
     // re-seats the SAME run object (same identity, same listeners) on it, then the view
-    // starts detached at 0 and plays forward to the frontier.
+    // starts detached at 0 and plays forward to the frontier. `now` is the explicit epoch,
+    // so the frontier is where this session actually got to rather than the seeded span —
+    // later {at} stamps land where they happened instead of clamping behind it. `replay`
+    // pushes every seeded entry back through run.on(...), so the failure we were offline
+    // for narrates itself out of restored history.
     var restored = savedLog.concat(burst);
-    run.reset({ mode: "live", log: restored });
-    buffered = 0;
     g.clearHighlight();
-    logLine("ok", "⟳", "run.reset({ log }) — " + restored.length + " events seeded (" +
-      count + " replayed), catching up at " + CATCHUP + "×");
-    g.caption(count + " missed events replayed — fast-forwarding to live", { place: "top" });
+    run.reset({ mode: "live", log: restored, now: Date.now() - t0, replay: true });
+    buffered = 0;
+    logLine("ok", "⟳", "run.reset({ log, now, replay }) — " + restored.length +
+      " events seeded (" + count + " replayed and re-emitted), catching up at " + CATCHUP + "×");
     run.speed(CATCHUP);
     run.play().then(function () {
       run.speed(1);
@@ -539,31 +578,20 @@
   function onStoryEnd() {
     if (storyEnded) return;
     storyEnded = true;
-    g.caption("Build #4127 green in three regions — 1 retry, 1 reconnect", { place: "top" });
-    g.highlight({ nodes: ["us-east", "eu-west", "ap-south"], variant: "ok" });
+    g.caption("Build #4127 green in three regions, joined into one release — 1 retry, 1 reconnect", { place: "top" });
+    g.highlight({ nodes: ["us-east", "eu-west", "ap-south", "release"], variant: "ok" });
     refreshButtons();
     writeReport();
   }
 
-  // The rendered run status is the honest hook for beats that land during a REPLAY: a
-  // reset()-seeded failure never re-fires run.on('fail'), but the node still visibly flips.
-  g.on("runstatus", function (ev) {
-    if (!ev || ev.id !== "smoke") return;
-    if (ev.status === "failed") {
-      if (!failSeen) {
-        failSeen = true;
-        // A lean-in, not a close-up: an explicit k keeps the upstream half of the
-        // pipeline in frame instead of fitting three nodes to a short pane.
-        g.camera({ nodes: ["migrate", "canary", "smoke", "promote"], k: 1.3, dur: 700 });
-      }
-      g.caption("Smoke test failed — the branch stops here, nothing reaches Promote", { place: "top" });
-      g.highlight({ nodes: ["smoke"], edges: ["retry"], variant: "warn", pulse: true });
-      refreshButtons();
-    } else if (ev.status === "done" && failSeen) {
-      g.caption("Green on the retry — the loop edge counted the restart", { place: "top" });
-      g.highlight({ nodes: ["canary", "smoke"], variant: "ok" });
-      g.camera({ fit: true, dur: 700 });
-    }
+  // Click any node to time-travel to its instant (g.on('nodeclick'); Enter/Space on a
+  // focused node publishes the same event).
+  g.on("nodeclick", function (ev) {
+    if (!run || !ev) return;
+    var t = run.timeOf(ev.id);
+    if (t == null || !isFinite(t)) { logLine("note", "·", "nothing logged for " + ev.id + " yet"); return; }
+    run.seek(Math.min(t + ms(140), run.now()));
+    logLine("note", "⏱", "nodeclick " + ev.id + " — seek(" + fmt(run.time()) + "), following = " + run.following);
   });
 
   // ---- controls + per-frame readouts ------------------------------------------
@@ -613,6 +641,14 @@
     mLoop.textContent = lp ? "iter " + lp.iteration + "/" + lp.max : "iter 0/3";
     mLoop.setAttribute("class", lp && lp.iteration > 0 ? "warm" : "");
 
+    // waiting vs active is the live split state() now reports; joins.release counts arrivals.
+    var jn = st.joins && st.joins.release, rel = st.nodes && st.nodes.release;
+    mJoin.textContent = (jn ? jn.arrived + "/" + jn.needed : "0/3") + " arrived";
+    var em3 = document.createElement("em");
+    em3.textContent = rel ? " · " + rel.waiting + " waiting, " + rel.active + " active" : " · idle";
+    mJoin.appendChild(em3);
+    mJoin.setAttribute("class", jn && jn.fired ? "good" : jn && jn.arrived ? "warm" : "");
+
     scrubLabel.textContent = "view " + fmt(view) + " / live " + fmt(now);
     if (!scrubbing) scrubEl.value = String(now > 0 ? Math.round((view / now) * 1000) : 0);
   }
@@ -639,6 +675,9 @@
   // ---- ?auto=1: the whole story with no clicks, ending on the time-travel beat --
   function exit() {
     writeReport();
+    // The documented end-of-story signal for a hand-driven live page (README, g.finished);
+    // __smvExit stays because it is also this page's error channel.
+    g.finish("build-stream-closed");
     window.__smvExit = { done: true, errors: errors };
   }
 
@@ -651,7 +690,7 @@
 
     // Time travel: the log is the whole state, so the failed instant is still right there.
     g.caption("Scrubbing back to the failure — the log still holds it", { place: "top" });
-    g.camera({ nodes: ["migrate", "canary", "smoke", "promote"], k: 1.3, dur: 600 });
+    g.camera({ nodes: ["migrate", "canary", "smoke", "promote"], dur: 600 });
     run.seek(run.timeOf("smoke") + ms(140));
     logLine("note", "⏱", "seek(" + fmt(run.time()) + ") — following = " + run.following +
       ", frontier still at " + fmt(run.now()));
@@ -659,7 +698,7 @@
 
     run.follow();
     g.caption("follow() — back to the frontier, green in three regions", { place: "top" });
-    g.highlight({ nodes: ["us-east", "eu-west", "ap-south"], variant: "ok" });
+    g.highlight({ nodes: ["us-east", "eu-west", "ap-south", "release"], variant: "ok" });
     logLine("ok", "⏱", "follow() — following = " + run.following);
     await g.camera({ fit: true, dur: 600 });
     await sleep(ms(500));

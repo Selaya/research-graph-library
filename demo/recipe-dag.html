@@ -83,9 +83,11 @@
     <em>Make ragù</em> (a collapsed sub-assembly with a summed duration chip), <em>béchamel</em>,
     <em>pasta</em>, <em>cheese</em>, and the <em>oven</em> are independent — they only meet at
     <em>assemble</em> (<code>join:"all"</code>), then <em>bake</em>, then <em>rest</em>.
-    Watch the total-duration bar as the graph goes from one long line, to a parallel DAG, to a
-    jarred-sauce shortcut (<code>g.condense</code>, odometer and all), to assembly itself
-    splitting into its real layers (<code>g.split</code>).
+    Watch the total-duration bar — it names both totals it could mean, the summed work and
+    the critical path (<code>preset: { name:"pipeline", total:"both" }</code>) — as the graph
+    goes from one long line, to a parallel DAG, to a jarred-sauce shortcut
+    (<code>g.condense</code>, odometer and all), to assembly itself splitting into its real
+    layers (<code>g.split</code>).
   </p>
 </header>
 
@@ -104,13 +106,16 @@
   <div class="tile"><i>ragù chip</i><span id="m-ragu">2h</span></div>
   <div class="tile"><i>assemble · join</i><span id="m-join">0/1</span></div>
   <div class="tile"><i>nodes on screen</i><span id="m-nodes">0</span></div>
+  <div class="tile"><i>total bar</i><span id="m-total">—</span></div>
 </div>
 
 <p class="legend">
   Legend — chip = duration (<code>durationAgg:'sum'</code> rolls the collapsed ragù
   sub-assembly up), pips under <em>Assemble</em> = join slots, slim bar under the graph =
-  total recipe duration (watch it change as the graph does), odometer = the chip flip when
-  <code>condense</code> lands.
+  the two recipe totals, labelled: <em>sum</em> (every step's declared work added up) and
+  <em>critical</em> (the longest chain through the DAG — the time you actually wait).
+  Relaying the graph in parallel leaves the sum alone and collapses the critical path.
+  Odometer = the chip flip when <code>condense</code> lands.
 </p>
 
 <div id="report"></div>
@@ -191,6 +196,9 @@
 
   var RUN_OPTS = {
     hopMs: 180,
+    // A pure playback multiplier (unattended runs play brisk): the compiled totals the page
+    // reports do not move with it.
+    playbackSpeed: AUTO ? 1.8 : 1,
     dwell: function (sec, ctx) {
       if (sec == null) return 360;
       var f = Math.log1p(sec) / Math.log1p(Math.max(ctx.maxSec, 1));
@@ -203,31 +211,33 @@
   function playUntil(id) { return { op: "run.play", args: [{ until: id }] }; }
 
   var STEPS = [
-    { label: "the recipe card" },
+    // The compile is a storyboard op, so the whole arc — including the run's own pacing —
+    // lives in the declared timeline the scrubber and `g.cues()` read.
+    { op: "run", args: [RUN_OPTS], label: "the recipe card" },
     cap("Follow the card top to bottom, one step after the last — the whole afternoon in a single line."),
     playUntil("assemble"),
-    cap("That slim bar under the graph is the naive total: everything waits on everything before it.", { place: "bottom" }),
+    cap("One line, so both totals agree and the bar shows a single number — the whole afternoon.", { place: "bottom" }),
 
     { label: "cooks in parallel" },
-    { op: "run.seek", ms: 0 },
+    { op: "run.reset" },
     { op: "batch", steps: CHAIN_EDGES.map(function (id) { return { op: "removeEdge", args: [id] }; }).concat(
         PARALLEL_EDGES.map(function (e) { return { op: "addEdge", args: [e] }; })) },
     cam({ fit: true }),
     cap("Really, only assembly needs everything else finished. Ragù, béchamel, pasta, cheese, and the oven can all happen at once."),
     playUntil("assemble"),
-    cap("Same bar, though — a 2-hour simmer is still the long pole no relayout fixes.", { place: "bottom" }),
+    cap("Now the bar splits in two: the same summed work, a shorter critical path — but the 2-hour simmer is still the long pole no relayout fixes.", { place: "bottom" }),
 
     { label: "or a shortcut" },
-    { op: "run.seek", ms: 0 },
+    { op: "run.reset" },
     cam({ node: "ragu", k: 1.7, pad: 60 }),
     { op: "condense", args: [["ragu"], RAGU_JARRED] },
     cap("Or skip the simmer — a good jarred sauce lands in 2 minutes, not 2 hours."),
     cam({ fit: true }),
     playUntil("assemble"),
-    cap("Watch the bar: béchamel's 15 minutes is the new long pole. Everything else finishes early.", { place: "bottom" }),
+    cap("Watch the critical half of the bar: béchamel's 15 minutes is the new long pole. Everything else finishes early.", { place: "bottom" }),
 
     { label: "layer as you go" },
-    { op: "run.seek", ms: 0 },
+    { op: "run.reset" },
     cam({ node: "assemble", k: 1.8, pad: 50 }),
     { op: "split", args: ["assemble", { nodes: LAYERS, edges: LAYER_EDGES }] },
     cap("And assembly isn't one step either — sauce and noodles, then béchamel and cheese, then repeat and top."),
@@ -245,6 +255,7 @@
   var phaseEl = $("#phase"), railEl = $("#rail"), reportEl = $("#report");
   var playBtn = $("#play"), resetBtn = $("#reset");
   var mTime = $("#m-time"), mRagu = $("#m-ragu"), mJoin = $("#m-join"), mNodes = $("#m-nodes");
+  var mTotal = $("#m-total");
 
   var g;
   try {
@@ -253,11 +264,11 @@
       layout: { dir: "LR", nodesep: 24, ranksep: 48 },
       animation: { duration: 380, easing: "cubic-out" },
       controls: true,
-      preset: "pipeline",
+      preset: { name: "pipeline", total: "both" },
       storyboard: STEPS,
-      autoplay: false,
+      autoplay: "auto",
     });
-    g.run(RUN_OPTS); // compile up front so the transport bar has a timeline from step 0
+    window.smv = g; // the documented "story finished" convention: await g.finished
   } catch (err) {
     errors.push("mount: " + String((err && err.message) || err));
     phaseEl.textContent = "mount failed";
@@ -316,6 +327,15 @@
 
   var fmt = function (ms) { return (Math.max(0, ms) / 1000).toFixed(1) + "s"; };
 
+  var totalBarText = function () {
+    var pick = function (sel) {
+      var el = document.querySelector("#pipe " + sel);
+      return (el && el.textContent) || "";
+    };
+    return (pick(".smv-totalbar-key") + " " + pick(".smv-totalbar-label") + " " +
+            pick(".smv-totalbar-alt")).replace(/\s+/g, " ").trim();
+  };
+
   function sampleFrame() {
     var run = g.run();
     if (!run) return;
@@ -327,42 +347,30 @@
     var j = jId ? st.joins[jId] : null;
     mJoin.textContent = j ? j.arrived + "/" + j.needed + (j.fired ? " ✓" : "") : "0/1";
     mNodes.textContent = String(nodeEls().length);
+    mTotal.textContent = totalBarText() || "—";
   }
   g.ticker.add(sampleFrame);
 
   var checks = {};
-  var storyDone = false;
+
+  // The compiled duration is the critical path — the declared timeline, unaffected by the
+  // playback multiplier above.
+  function criticalMs() { return g.run().sim().declared; }
 
   sb.on("step", function (ev) {
     paintRail();
-    g.fitView({ animate: true });
     var label = sb.position().label;
-    if (label === "cooks in parallel" && obs.firstDuration == null) obs.firstDuration = g.run().duration;
-    if (label === "or a shortcut" && obs.parallelDuration == null) obs.parallelDuration = g.run().duration;
-    if (label === "layer as you go" && obs.condensedDuration == null) obs.condensedDuration = g.run().duration;
+    if (label === "cooks in parallel" && obs.firstDuration == null) obs.firstDuration = criticalMs();
+    if (label === "or a shortcut" && obs.parallelDuration == null) obs.parallelDuration = criticalMs();
+    if (label === "layer as you go" && obs.condensedDuration == null) obs.condensedDuration = criticalMs();
     phaseEl.textContent = "step " + ev.index + " · " + (label || "");
   });
   sb.on("seek", paintRail);
-  sb.on("done", function () { storyDone = true; paintRail(); phaseEl.textContent = "story complete"; });
+  sb.on("done", function () { paintRail(); phaseEl.textContent = "story complete"; });
 
   // ---------------------------------------------------------------------------
 
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function waitFor(fn, ms) {
-    var t0 = Date.now();
-    return new Promise(function (resolve, reject) {
-      (function poll() {
-        if (fn()) return resolve(true);
-        if (Date.now() - t0 > (ms || 30000)) return reject(new Error("timeout waiting for condition"));
-        setTimeout(poll, 30);
-      })();
-    });
-  }
-
-  function transportPlay() {
-    var btn = document.querySelector('#pipe .smv-transport-btn[data-act="play"]');
-    if (btn) btn.click(); else sb.play();
-  }
 
   var started = false;
   function start() {
@@ -370,7 +378,7 @@
     started = true;
     playBtn.disabled = true;
     phaseEl.textContent = "playing…";
-    transportPlay();
+    sb.play();
   }
 
   playBtn.addEventListener("click", start);
@@ -378,9 +386,10 @@
 
   function writeReport() {
     reportEl.textContent =
-      "naive (serial) duration     " + JSON.stringify(obs.firstDuration) + "ms\n" +
-      "parallel duration           " + JSON.stringify(obs.parallelDuration) + "ms\n" +
+      "naive (serial) critical path " + JSON.stringify(obs.firstDuration) + "ms\n" +
+      "parallel critical path      " + JSON.stringify(obs.parallelDuration) + "ms\n" +
       "after condense (jarred)     " + JSON.stringify(obs.condensedDuration) + "ms\n" +
+      "total bar (sum · critical)  " + (totalBarText() || "—") + "\n" +
       "final nodes on screen       " + nodeEls().length + "\n" +
       "ragù chip now               " + chipOf("ragu.jarred") + "\n" +
       "NaN in DOM                  " + (checks.nan && checks.nan.length ? JSON.stringify(checks.nan) : "none") + "\n" +
@@ -388,10 +397,11 @@
   }
 
   async function auto() {
-    if (AUTO) g.run().speed(1.8);
-    await sleep(200);
-    start();
-    await waitFor(function () { return storyDone; }, 40000);
+    // autoplay:'auto' already started the story because the URL carries ?auto=1.
+    started = true;
+    playBtn.disabled = true;
+    phaseEl.textContent = "playing…";
+    await g.finished;
     await sleep(400);
     checks.nan = scanNaN();
     writeReport();
