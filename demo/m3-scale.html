@@ -188,7 +188,7 @@
    *  the wall-clock gap between rAF callbacks (that gap is dominated by vsync, ~16.7ms at
    *  60Hz regardless of how cheap the work is, and would make every page "cost" the same).
    *  This is the number the compositor-offload decision rule (INTERNALS
-   *  "M3 exit") means by "median frame <= 8ms". Returns {median, mean, max,
+   *  "Culling") means by "median frame <= 8ms". Returns {median, mean, max,
    *  count} in ms. */
   function measurePan(ms) {
     return new Promise(function (resolve) {
@@ -264,7 +264,7 @@
     // more convincing demonstration than "everything vanished", and matches the shape the
     // culling agent measured: 280/399 then 364/399, never 0 or all).
     // No synthetic pointermove: the viewport re-arms culling itself on every transform
-    // change, programmatic ones included (INTERNALS "Culling" contract).
+    // change, programmatic ones included (INTERNALS "Culling").
     g.viewport.zoomBy(3, { x: 0, y: 0 });
     await sleep(100);
 

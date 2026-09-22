@@ -1,6 +1,6 @@
 // Regenerates test/golden/*.json from the current layout() output.
 // Run explicitly: `node test/golden/update.js` — only when a layout change is intended
-// (INTERNALS §Tests). Never run automatically from the test suite.
+// (INTERNALS "Layout gates"). Never run automatically from the test suite.
 //
 // M3: the goldens were regenerated once when layout.js swapped dagre for the in-house
 // engine (src/engine.js). Coordinates AND point counts differ from the dagre era by
@@ -35,7 +35,7 @@ function write(name, view) {
   if (bar !== undefined && golden.crossings > bar) {
     console.error(
       `refusing to write ${name}.json: ${golden.crossings} crossings exceeds the ` +
-        `dagre-era bar of ${bar} (INTERNALS §Gates — fix the engine, not the bar).`
+        `dagre-era bar of ${bar} (INTERNALS "Layout gates" — fix the engine, not the bar).`
     );
     process.exit(1);
   }

@@ -118,7 +118,7 @@ async function build() {
 }
 
 /**
- * No dagre in any default bundle (INTERNALS §Gates / plan §8 M3 budget). Module
+ * No dagre in any default bundle (INTERNALS "Build, size and tests"). Module
  * specifiers and dagre's inlined graphlib are banned from every output; the two minified
  * bundles additionally may not contain the string at all (their comments are stripped, so
  * a hit there can only be code). The unminified ESM keeps source comments, some of which

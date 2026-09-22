@@ -7,7 +7,7 @@ renderer (§3). Screen-recording a live tab (§4) is still the fastest way to a 
 it is just not reproducible. §5 is the matching still image, and §6 fits the script's holds
 to a voice-over you have already recorded.
 
-Module contracts: INTERNALS.md (M4).
+Module contracts: [INTERNALS.md](INTERNALS.md) ("Storyboard and timeline", "Director", "CLIs").
 
 ## 1. Writing a director script
 

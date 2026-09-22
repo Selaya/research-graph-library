@@ -338,7 +338,7 @@ function assignPrefs(g) {
  * the same scale. They did not: the prevOrder branch counts rank-major across the whole
  * drawing while the DFS branch counts visit order, and a dummy's midpoint therefore fell
  * in a completely different slot depending on which branch ran. That is what stopped
- * `order` from being a fixed point (INTERNALS §M3) on any graph with a multi-rank edge.
+ * `order` from being a fixed point (INTERNALS "engineSolve") on any graph with a multi-rank edge.
  */
 function normalizePrefs(g) {
   const byRank = new Map();

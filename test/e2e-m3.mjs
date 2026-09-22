@@ -3,8 +3,8 @@
 // Serves the repo over http (file:// breaks module/script loading rules), drives
 // demo/pipeline.html?auto=1 (UNCHANGED from M1 — the in-house engine swap is a layout.js
 // solver-seam change, not a demo change) and asserts the §6 narrative still plays end to
-// end on the in-house engine, plus the M3-specific gates from INTERNALS.md's "M3 exit"
-// section: no dagre in the built IIFE, the size budget passes at 50KB, structural visual
+// end on the in-house engine, plus the M3-specific gates listed under INTERNALS.md's
+// "End-to-end scripts" and "Culling": no dagre in the built IIFE, the size budget passes at 50KB, structural visual
 // parity (left-to-right stage order, containers contain their children, no overlaps, no
 // NaN), and a 300-node synthetic graph (demo/m3-scale.html) mounts with viewport culling
 // active — nothing culled at the initial fit, plenty culled once zoomed into a corner —

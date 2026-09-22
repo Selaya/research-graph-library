@@ -48,7 +48,7 @@ test("layout(selfloop) matches golden snapshot", () => {
   assert.deepEqual(toComparable(result), expected);
 });
 
-// M3 gate (INTERNALS §Gates): "parity" with dagre is structural + crossing
+// M3 gate (INTERNALS "Layout gates"): "parity" with dagre is structural + crossing
 // non-regression, NOT coordinate identity. Every golden fixture must draw with at most
 // the crossings dagre drew it with as of M2 (DAGRE_CROSSINGS, hard-coded), and the
 // regenerated golden must not have drifted above its own recorded count either.
