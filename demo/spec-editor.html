@@ -232,7 +232,7 @@
         { op: "caption", args: ["Nightly orders ETL. “Clean” is a container — its chip is a durationAgg sum.", { place: "bottom" }] },
         { op: "wait", ms: 900 },
         { label: "drill in" },
-        { op: "expand", args: ["clean"], dur: 650 },
+        { op: "expand", args: ["clean", { camera: { pad: 34 } }], dur: 650 },
         { op: "highlight", args: [{ nodes: ["clean.dedupe", "clean.validate"], variant: "focus", dim: true }] },
         { op: "wait", ms: 900 },
         { label: "run" },
@@ -241,8 +241,7 @@
         { op: "run.play" },
         { label: "done" },
         { op: "caption", args: [null] },
-        { op: "collapse", args: ["clean"], dur: 600 },
-        { op: "camera", args: [{ fit: true, pad: 34, dur: 600 }] }
+        { op: "collapse", args: ["clean", { camera: { fit: true, pad: 34 } }], dur: 600 }
       ]
     },
     {

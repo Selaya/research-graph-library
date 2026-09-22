@@ -164,7 +164,7 @@ g.condense(["a", "b"], { id: "merged" }).cancel();
 g.addNode(node, { after })  g.addEdge(edge)  g.removeNode(id)  g.removeEdge(id)
 g.update(id, patch, opts)   g.batch(fn)      g.style(fn)       g.theme(t)
 g.validate(ops | fn)        // dry-run the structural guards; { ok, errors: [GraphError] }
-g.expand(id)   g.collapse(id)   g.expandAll()   g.collapseAll()
+g.expand(id, { camera })   g.collapse(id, { camera })   g.expandAll({ camera })   g.collapseAll({ camera })
 g.condense([ids], newNode)   g.split(id, { nodes, edges })
 g.run(opts)    g.storyboard(steps)   g.timeline()   g.finished   g.finish()
 g.camera(target)   g.highlight(sel)   g.clearHighlight()   g.caption(text, o)   g.cues()
@@ -365,6 +365,29 @@ back to 0). `run.play` is priced off the compiled transport, and only one compil
 at a time — a script that recompiles *between* two `run.play` steps gets a cue sheet that
 changes as it plays, so keep one compile per script when the numbers have to be exact
 (`docs/RUN.md`, "Driving a run from a storyboard").
+
+**Framing an expansion.** Don't chase it with the camera. The reflex — `camera({node})`,
+then `expand(id)`, then a second `camera` to fit what spilled past the pane — is three
+tweens where one was wanted, and it reads as a zoom-in / overflow / zoom-out stutter.
+Give the toggle the shot instead:
+
+```js
+await g.expand("clean", { camera: true });            // frame the OPENED box, one motion
+await g.collapse("clean", { camera: { fit: true } }); // …or the whole graph, closed
+g.expandAll({ camera: true });                        // fit everything, opened
+```
+
+`camera` on `expand` / `collapse` / `expandAll` / `collapseAll` (and on
+`update(id, { collapsed }, opts)`) takes the same target object as `g.camera()`, but it is
+resolved against the layout the toggle *produces* and flies on the toggle's own clock — a
+storyboard step's `dur`, or the mount's `animation.duration` — so the pull-back and the
+bloom are one movement. `true` frames the toggled container itself (`fit: true` for the
+`-All` ops); an object that names no box (`{ pad: 60 }`) frames it with those options; a
+fitted scale is lidded at 1.5 like a `nodes` union, so a lone closed box is never a
+close-up (`k` / `maxK` still win). Taking the shot takes the camera exactly as
+`g.camera()` does, and a toggle that turns out to be a no-op still flies it, resolving
+`applied: false` — so an assistant re-issuing "show me this open" gets the same frame twice
+instead of a warning. In a storyboard: `{ "op": "expand", "args": ["clean", { "camera": true }] }`.
 
 Camera moves ride the shared clock and cancel-and-retarget like everything else; the
 first one in a script takes the viewport (auto-refit stops, the camera joins the scrub

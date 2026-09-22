@@ -229,8 +229,9 @@
     { label: "run" },
     { op: "run.play", until: "gate" },
     { label: "inspect matrix" },
-    { op: "expand", args: ["matrix"], dur: 700 },
-    { op: "camera", args: [{ node: "matrix.windows20", pad: 70, dur: 650 }] },
+    // F37 — open the matrix and land on the failing leg in the same tween, instead of
+    // expanding into an overflow and then flying the camera to the leg.
+    { op: "expand", args: ["matrix", { camera: { node: "matrix.windows20", pad: 70 } }], dur: 700 },
     { op: "highlight", args: [{ nodes: ["matrix.windows20"], edges: ["m-out:matrix.windows20"], variant: "warn", pulse: true }] },
     { op: "caption", args: ["windows/node20: EPERM on a symlink, re-run twice, still red. Gate needs all 6 legs — it never fires.", { place: "bottom" }] },
     { op: "wait", ms: 1600 },

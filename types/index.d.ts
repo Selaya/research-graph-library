@@ -753,14 +753,15 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "removeNode"; args: [string] }
   | { op: "removeEdge"; args: [string] }
   | { op: "update"; args: [string, Record<string, unknown>, UpdateOpts?] }
-  | { op: "expand"; args: [string] }
-  | { op: "collapse"; args: [string] }
+  | { op: "expand"; args: [string, ToggleOpts?] }
+  | { op: "collapse"; args: [string, ToggleOpts?] }
   | { op: "condense"; args: [string[], CondenseNodeSpec] }
   | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }] }
   | { op: "batch"; steps: StoryboardStep[] }
-  /** Every container open / closed in one commit — `g.expandAll()` / `g.collapseAll()`. */
-  | { op: "expandAll"; args?: [] }
-  | { op: "collapseAll"; args?: [] }
+  /** Every container open / closed in one commit — `g.expandAll()` / `g.collapseAll()`.
+   *  `[{ camera: true }]` fits the result in the same tween (F37). */
+  | { op: "expandAll"; args?: [ToggleOpts?] }
+  | { op: "collapseAll"; args?: [ToggleOpts?] }
   /** Re-lay the graph out with new layout opts — `g.layout(o)`. */
   | { op: "layout"; args?: [LayoutOpts?] }
   /** (Re)compile the run with these opts — `g.run(opts)`. Subscriptions survive it (F6).
@@ -959,6 +960,33 @@ export interface UpdateOpts {
    *  `data: undefined` then clears it). Merging is the default either way;
    *  `data: { key: undefined }` removes a single key without it. */
   replace?: boolean;
+  /** Read only when the patch carries `collapsed` (which routes to `expand()`/`collapse()`):
+   *  the same shot option those take — see `ToggleOpts`. */
+  camera?: boolean | CameraTarget;
+}
+
+/** F37 — the options `expand()`, `collapse()`, `expandAll()` and `collapseAll()` take.
+ *
+ *  `camera` composes a shot AGAINST THE LAYOUT THE TOGGLE PRODUCES and flies it on the
+ *  toggle's own clock (its `dur`, the mount's `animation.duration`, or a storyboard step's
+ *  `dur`), so the pull-back and the bloom are one motion. This replaces the pattern
+ *  `camera({node}) → expand(id) → camera({fit})`, which frames the collapsed stub, lets the
+ *  children spill past the pane, then zooms back out — three tweens where one was wanted.
+ *
+ *  - `true` frames the toggled container itself (`fit: true` for the -All ops, which have no
+ *    one subject).
+ *  - A `CameraTarget` is a shot in its own right (`{fit: true}`, `{nodes: [...]}`,
+ *    `{node, k}`…); one that names no box (`{pad: 60}`, say) frames the toggled id.
+ *  - A FITTED scale is lidded at 1.5 like a `nodes[]` union, so a lone closed box is never a
+ *    close-up; `k` or `maxK` on the target still wins. `dur` on the target is ignored: the
+ *    shot rides the toggle's duration. `ease` on the target overrides the mount easing.
+ *  - Taking the shot takes the camera (D13), exactly as `g.camera()` would: relayout stops
+ *    auto-refitting, and in a storyboard the viewport joins the scrub snapshots.
+ *  - A toggle that is a no-op (already in the requested state) still flies the shot, and
+ *    resolves `applied: false`.
+ *  Absent or `false`, the toggle keeps the anchored D10 behaviour. */
+export interface ToggleOpts {
+  camera?: boolean | CameraTarget;
 }
 
 /** The probe `g.validate(fn)` hands its callback: the structural mutation methods, run
@@ -980,10 +1008,10 @@ export interface ValidateProbe {
   split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): void;
   /** View-only — nothing commits, but an unknown id still records `"missing"`, because the
    *  real `expand()`/`collapse()` throw on one. */
-  expand(id?: string): void;
-  collapse(id?: string): void;
-  expandAll(): void;
-  collapseAll(): void;
+  expand(id?: string, opts?: ToggleOpts): void;
+  collapse(id?: string, opts?: ToggleOpts): void;
+  expandAll(opts?: ToggleOpts): void;
+  collapseAll(opts?: ToggleOpts): void;
   batch(fn: (probe: ValidateProbe) => void): void;
 }
 
@@ -1055,10 +1083,13 @@ export interface Graph {
    *  skipped, an `op` that `storyboard()` would not accept reports `"validate-op"`. */
   validate(ops: StoryboardStep[] | ((probe: ValidateProbe) => void)): ValidateResult;
 
-  /** D5 — children bloom out of the container's previous centre. */
-  expand(id: string): Awaitable<MutationResult>;
-  /** D5 inverse — everything that just went away flies into the container's new centre. */
-  collapse(id: string): Awaitable<MutationResult>;
+  /** D5 — children bloom out of the container's previous centre. `{ camera: true }` frames
+   *  the OPENED box in the same tween, so the camera never has to chase the expansion
+   *  (F37, `ToggleOpts`). */
+  expand(id: string, opts?: ToggleOpts): Awaitable<MutationResult>;
+  /** D5 inverse — everything that just went away flies into the container's new centre.
+   *  `{ camera: true }` frames the closed box; `{ camera: { fit: true } }` the whole graph. */
+  collapse(id: string, opts?: ToggleOpts): Awaitable<MutationResult>;
   /** D6 — merge N nodes into one over the 3-phase choreography (highlight/converge/reveal).
    *  Resolves with the created/removed ids once the merge actually lands — see
    *  `CondenseSplitResult`. */
@@ -1066,10 +1097,11 @@ export interface Graph {
   /** D6 inverse — one node becomes N (highlight/diverge/reveal). Same resolution shape as
    *  `condense()`. */
   split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): Awaitable<CondenseSplitResult>;
-  /** Every container open in ONE commit. */
-  expandAll(): Awaitable<MutationResult>;
-  /** The inverse: every open container closed in ONE commit. */
-  collapseAll(): Awaitable<MutationResult>;
+  /** Every container open in ONE commit. `{ camera: true }` fits the opened graph in the
+   *  same tween (F37). */
+  expandAll(opts?: ToggleOpts): Awaitable<MutationResult>;
+  /** The inverse: every open container closed in ONE commit. `{ camera }` as on expandAll(). */
+  collapseAll(opts?: ToggleOpts): Awaitable<MutationResult>;
 
   /** D4 — the token run. Called with opts it (re)compiles; bare it returns the current one
    *  (compiling a default Mode A run on first call). */

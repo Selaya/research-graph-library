@@ -55,12 +55,25 @@ const DIRECTOR_OPS = new Set(["camera", "highlight", "clearHighlight", "caption"
  *  that commit (D12: the declared duration must be the awaited one). */
 const PARALLEL_IN_BATCH = new Set(["wait", "camera", "condense", "split"]);
 
-/** True when `steps` (batches included) contains at least one camera op — D13's trigger for
- *  the script taking ownership of the viewport. */
+/** F37 — the mutation ops that take a `{camera}` option (a shot resolved against the layout
+ *  the mutation itself produces, flown on the mutation's own clock), and which `args` slot
+ *  their options object sits in. `update` counts because a `collapsed` patch IS a toggle. */
+const TOGGLE_CAMERA_ARG = { expand: 1, collapse: 1, expandAll: 0, collapseAll: 0, update: 2 };
+
+/** True when `steps` (batches included) contains at least one camera op — or a toggle op
+ *  carrying `{camera}`, which composes a shot just the same — D13's trigger for the script
+ *  taking ownership of the viewport. */
 function hasCameraOp(steps) {
   return (steps || []).some((s) => {
     if (!s) return false;
     if (s.op === "camera") return true;
+    const at = TOGGLE_CAMERA_ARG[s.op];
+    if (at !== undefined) {
+      const a = s.args || [];
+      // update() only reads `camera` off a patch that carries `collapsed` (the toggle route).
+      if (s.op === "update" && !(a[1] && a[1].collapsed !== undefined)) return false;
+      return !!(a[at] && a[at].camera);
+    }
     if (s.op !== "batch") return false;
     return hasCameraOp(Array.isArray(s.steps) ? s.steps : (s.args && s.args[0]) || []);
   });
@@ -294,7 +307,7 @@ export function mount(el, spec = {}, opts = {}) {
     return Object.keys(out).length ? out : null;
   }
 
-  function relayout({ focal = null, duration, enterFrom, exitTo, easeOverride } = {}) {
+  function relayout({ focal = null, duration, enterFrom, exitTo, easeOverride, camera = null } = {}) {
     if (destroyed) return thenable(Promise.resolve({ canceled: true }), () => {});
     const v = vs.view();
     // M3 — `prevOrder` is the solver's order-stability channel, the exact counterpart of
@@ -347,9 +360,23 @@ export function mount(el, spec = {}, opts = {}) {
     });
     last = res;
 
-    // D10 — anchored, not auto-fit: hold the focal point still in screen space; only
-    // refit when the user has never moved AND the new content lands outside the pane.
-    if (prev) {
+    if (prev && camera) {
+      // F37 — the mutation brought its own shot. It is resolved against `res`, the layout
+      // this very commit is animating TOWARDS (so an expand frames the opened box, children
+      // and all, not the collapsed stub the camera could see a moment ago), and it rides the
+      // commit's own duration and easing, so the pull-back and the bloom read as one motion
+      // instead of the zoom-in / overflow / zoom-out stutter a script gets from framing the
+      // container first and expanding it second. Taking the shot takes the camera (D13),
+      // exactly as g.camera() would, and replaces the anchor correction below outright: the
+      // shot already says where everything should land.
+      cameraOwned = true;
+      viewport.userMoved = true;
+      const size = { ...viewport.size(), inset: camera.inset ?? chromeInset() };
+      const to = resolveCameraTarget(camera, res, size, viewport.target, (id) => vs.visibleAncestor(id));
+      viewport.moveTo(to, { duration: dur, ease: EASINGS[camera.ease] || easing });
+    } else if (prev) {
+      // D10 — anchored, not auto-fit: hold the focal point still in screen space; only
+      // refit when the user has never moved AND the new content lands outside the pane.
       const before = focal && prev.nodes[focal] ? prev.nodes[focal] : centerOf(prev.bounds);
       const after = focal && res.nodes[focal] && prev.nodes[focal] ? res.nodes[focal] : centerOf(res.bounds);
       viewport.anchor(before, after, dur);
@@ -381,6 +408,8 @@ export function mount(el, spec = {}, opts = {}) {
         batchExtra.enterFrom.push(...asList(extra.enterFrom));
         batchExtra.exitTo.push(...asList(extra.exitTo));
         Object.assign(batchExtra.easeOverride, extra.easeOverride);
+        // One commit, one camera: the last toggle in the batch to name a shot composes it.
+        if (extra.camera) batchExtra.camera = extra.camera;
       }
       const d = batchDefer;
       t = thenable(d.promise, () => transition && transition.cancel());
@@ -393,6 +422,29 @@ export function mount(el, spec = {}, opts = {}) {
   /** For a mutation that turned out to be a no-op (e.g. expand() on an already-open
    *  container) — `applied:false` says nothing actually changed. */
   const settled = () => thenable(Promise.resolve({ canceled: false, applied: false }), () => {});
+
+  /** F37 — the `{camera}` option on a toggle op, normalised to a CameraTarget. `true` frames
+   *  the toggled container itself (`fit: true` for expandAll/collapseAll, which have no one
+   *  subject); an object is a target in its own right, and one that names no box at all
+   *  (`{ pad: 60 }`, say) frames `id`. A fitted scale is lidded at NODES_MAX_K the way a
+   *  `nodes[]` union is: the shot means "watch this open", not "fill the pane with it" — a
+   *  collapsed stub framed at k=4 is a close-up nobody asked for. `k` or `maxK` on the
+   *  target still wins, as everywhere else. Null when the option is absent or false. */
+  function shotFor(camera, id) {
+    if (!camera) return null;
+    const o = typeof camera === "object" ? { ...camera } : {};
+    const framed = Number.isFinite(o.x) || Number.isFinite(o.y) || o.node != null || Array.isArray(o.nodes) || o.fit === true;
+    if (!framed) { if (id != null) o.node = id; else o.fit = true; }
+    if (o.k === undefined && o.maxK === undefined) o.maxK = NODES_MAX_K;
+    delete o.dur; // the shot rides the toggle's clock (step `dur` / animation.duration), never its own
+    return o;
+  }
+
+  /** A toggle that turned out to be a no-op but still carried a shot: the graph does not
+   *  move, the camera does — `expand(id, {camera:true})` on an open container is still
+   *  "show me this open", and an agent-written script leans on that being idempotent. It
+   *  flies at the toggle's own duration (a step `dur` still wins inside g.camera()). */
+  const shotOnly = (shot) => (shot ? withMeta(g.camera({ ...shot, dur: baseDuration }), { applied: false }) : settled());
 
   /** Nearest positioned ancestor of `id` (itself first) in a layout's node map. What makes
    *  expandAll/collapseAll bloom from / fly into the RIGHT container when several, possibly
@@ -946,14 +998,14 @@ export function mount(el, spec = {}, opts = {}) {
      *  `{ replace: true }` swaps the whole `data` payload instead of merging into it.
      *  `collapsed` is not stored view state — it is folded into the view once, at first
      *  sight — so a `collapsed` patch is routed to the real expand()/collapse() rather
-     *  than quietly doing nothing. */
+     *  than quietly doing nothing — `opts.camera` (F37) rides along with it. */
     update(id, patch, o) {
       const item = store.update(id, patch, o);
       bus.emit("update", { id, patch, item });
       if (patch && patch.collapsed !== undefined && store.hasNode(id)) {
         vs.isContainer(id); // fold any spec-level `collapsed:true` in before reading the set
         const was = vs.collapsed.has(id);
-        const view = patch.collapsed ? g.collapse(id) : g.expand(id);
+        const view = patch.collapsed ? g.collapse(id, o) : g.expand(id, o);
         // Only the view half went through expand()/collapse(). When that actually moved,
         // its relayout carries the rest of the patch too; when it was a no-op (already in
         // that state) the other fields in the same patch still have to reach the screen.
@@ -1027,27 +1079,34 @@ export function mount(el, spec = {}, opts = {}) {
       return { ok: errors.length === 0, errors };
     },
 
-    /** D5 — children bloom out of the container's *previous* centre. */
-    expand(id) {
+    /** D5 — children bloom out of the container's *previous* centre. F37 — `{camera}` frames
+     *  the OPENED box (or the target you name) in the same tween, so the pull-back and the
+     *  bloom are one motion; see shotFor(). */
+    expand(id, o = {}) {
       if (!store.hasNode(id)) throw new GraphError("missing", `node "${id}" does not exist`);
+      const shot = shotFor(o && o.camera, id);
       const at = last && last.nodes[id] ? { x: last.nodes[id].x, y: last.nodes[id].y } : null;
-      if (!vs.expand(id)) return settled();
+      if (!vs.expand(id)) return shotOnly(shot);
       bus.emit("expand", { id });
-      return commitOrDefer(id, at && {
-        enterFrom: (res, prev) => {
+      return commitOrDefer(id, {
+        camera: shot,
+        enterFrom: at && ((res, prev) => {
           const out = {};
           for (const k of Object.keys(res.nodes)) if (!prev || !prev.nodes[k]) out[k] = at;
           return out;
-        },
+        }),
       }, { applied: true });
     },
 
-    /** The exact inverse: everything that just went away flies into the container's new centre. */
-    collapse(id) {
+    /** The exact inverse: everything that just went away flies into the container's new centre.
+     *  `{camera}` as on expand(): `true` frames the closed box, `{fit: true}` the whole graph. */
+    collapse(id, o = {}) {
       if (!store.hasNode(id)) throw new GraphError("missing", `node "${id}" does not exist`);
-      if (!vs.collapse(id)) return settled();
+      const shot = shotFor(o && o.camera, id);
+      if (!vs.collapse(id)) return shotOnly(shot);
       bus.emit("collapse", { id });
       return commitOrDefer(id, {
+        camera: shot,
         exitTo: (res, prev) => {
           const c = res.nodes[id];
           const out = {};
@@ -1112,12 +1171,15 @@ export function mount(el, spec = {}, opts = {}) {
     },
 
     /** Every container open in ONE commit — the children bloom out of whichever box was
-     *  actually holding them, not out of a single global centroid. */
-    expandAll() {
+     *  actually holding them, not out of a single global centroid. `{camera: true}` fits
+     *  the whole opened graph in the same tween (F37); an object names its own target. */
+    expandAll(o = {}) {
+      const shot = shotFor(o && o.camera, null);
       const changed = vs.expandAll();
-      if (!changed.length) return settled();
+      if (!changed.length) return shotOnly(shot);
       bus.emit("expandAll", { ids: changed });
       return commitOrDefer(changed[0], {
+        camera: shot,
         enterFrom: (res, prev) => {
           const out = {};
           if (!prev) return out;
@@ -1131,12 +1193,15 @@ export function mount(el, spec = {}, opts = {}) {
       }, { applied: true });
     },
 
-    /** The inverse: everything that just went away flies into its new collapsed box. */
-    collapseAll() {
+    /** The inverse: everything that just went away flies into its new collapsed box.
+     *  `{camera}` as on expandAll(). */
+    collapseAll(o = {}) {
+      const shot = shotFor(o && o.camera, null);
       const changed = vs.collapseAll();
-      if (!changed.length) return settled();
+      if (!changed.length) return shotOnly(shot);
       bus.emit("collapseAll", { ids: changed });
       return commitOrDefer(changed[0], {
+        camera: shot,
         exitTo: (res, prev) => {
           const out = {};
           if (!prev) return out;
