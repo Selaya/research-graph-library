@@ -1146,6 +1146,17 @@ vp.target                                 // getter: where a live tween is headi
   (instantaneous: nothing to await), condense/split `CHOREO_MS` (the CONDENSE_PHASES sum,
   900), batch max of members (one commit, parallel), default `baseDuration`.
   `run.play` slices still come from the run's own clock.
+- **F40 — a `dur` on a discrete step is a hold.** `durOf()` reads `step.dur` first for
+  every op, so `{op:"caption", dur:1600}` was always priced at 1600 on the scrubber and
+  the cue sheet — while `g.caption()` returned `g`, the sequencer had nothing to await,
+  and the story moved on at once (declared ≠ awaited). `applyStep` now checks
+  `holdFor(step, r)` after `applyOp`: when the step declared a positive `dur`, the op
+  handed back nothing awaitable (not a thenable, not a `run.play` `{run}` — note `g` itself
+  has a `run` *function*, hence the `typeof r.run === "object"` guard), and it is not
+  `run`/`run.reset` (priced 0 before `dur` is read), it returns `waitMs(stepDur)`. Skipped
+  while `scrubDepth > 0`, like every director tween on a forward scrub. The discrete ops
+  joined `PARALLEL_IN_BATCH` so a held child counts toward the batch's `durOf` exactly as
+  it is awaited (bare, they still cost 0 there).
 - **`stepDur` ambient (D12):** `applyStep` saves/sets `stepDur = step.dur ?? null` around
   the op and restores after (a batch's `dur` survives its children); `relayout` reads
   `duration ?? stepDur ?? baseDuration` (reduced → 1). Every mutation op gains per-step

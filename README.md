@@ -346,6 +346,11 @@ g.caption("Three manual steps become one.", { place: "bottom" });  g.caption(nul
 g.cues();   // every label + caption with its absolute ms offset — the voice-over sheet
 ```
 
+In a storyboard a `dur` on a `caption` (or `highlight` / `props`) step is its **hold**:
+`{ "op": "caption", "args": ["…"], "dur": 1500 }` shows the line and keeps the clock for
+1.5s — one step in place of `caption` + `wait`, and the cue sheet's subtitle span ends
+where the hold does.
+
 Every storyboard step — a mutation op name (the set mirrors `g`'s own methods:
 `condense`, `split`, `expandAll`, `collapseAll` and `layout` included), a run op
 (`run` to recompile like `g.run(opts)`, `run.reset`, `run.play`, `run.step`, `run.seek`) or

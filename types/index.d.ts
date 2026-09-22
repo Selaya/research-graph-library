@@ -746,7 +746,11 @@ export interface Cue {
 }
 
 /** D12 — every step may declare its own duration; scrubber, cue sheet and frame renderer
- *  all read the same number. Omitted, the op's own default applies. */
+ *  all read the same number. Omitted, the op's own default applies. On a mutation it paces
+ *  the relayout; on a discrete step (`caption`, `highlight`, `clearHighlight`, `props`,
+ *  `run.step`, `run.seek`) it is a HOLD — the flip happens at once and the step keeps the
+ *  clock for `dur` ms, so `{op:"caption", args:["…"], dur:1500}` replaces caption + wait
+ *  (F40). `run` / `run.reset` are always 0. */
 export type StoryboardStep = { dur?: number } & (
   /** F38 — every relayout-producing op takes `{ camera }` in its options slot, composed
    *  against the layout the op produces and flown on the step's `dur` (`MutationOpts`). */

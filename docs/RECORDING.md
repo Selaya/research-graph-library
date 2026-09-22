@@ -228,13 +228,24 @@ children (a mutation child folds into the one shared relayout, so its own `dur` 
 — put the `dur` on the batch).
 
 `dur` on a mutation step is ambient for the whole op — `{ "op": "expand", "args":
-["clean"], "dur": 1200 }` slows that one relayout without touching anything else. Use
-`wait` for beats where nothing moves but the narration needs air:
+["clean"], "dur": 1200 }` slows that one relayout without touching anything else.
+
+`dur` on a discrete step — `caption`, `highlight`, `clearHighlight`, `props`, `run.step`,
+`run.seek` — is a **hold** (F40): the flip happens at once and the step then keeps the
+clock for that long, so the beat is one step and the cue sheet prices it:
 
 ```json
-{ "op": "caption", "args": ["Watch the fan-out."] },
-{ "op": "wait", "ms": 1500 },
+{ "op": "caption", "args": ["Watch the fan-out."], "dur": 1500 },
+{ "op": "highlight", "args": [{ "nodes": ["gate"], "pulse": true }], "dur": 800 },
 ```
+
+- **Do not write** `caption` → `wait` → `caption(null)` for a held line: the first step
+  was already priced at whatever `dur` you gave it, but without the hold the story moved
+  on at once and the declared timeline lied. With `dur` the subtitle span in `--cues`
+  ends exactly where the hold does.
+- `wait` is still the right op for air where *nothing* is on screen, and inside a `batch` a
+  held child stretches the step like a `wait` child does (it runs alongside the commit).
+- A forward scrub skips holds the way it snaps camera moves to zero.
 
 ### Labels as chapters
 

@@ -231,6 +231,26 @@ parts, { camera })`, forwarded to the choreography's converge/diverge relayout s
 that phase's tween and is resolved against the merged layout. `true` frames the merged
 node / the union of the parts.
 
+### F40. A `dur` on a caption is declared to the scrubber but never awaited
+**Observed in:** `ci-matrix` (l.236–239, 243–245), `llm-eval-harness` (l.290–292,
+308–310, 323–325, 335–337), `seq-basics` (l.167–168), `seq-cache-aside` (l.219–220,
+227–228, 232–233, 250–251, 255–256), and the `cap()` + `hold()` helper pairs every
+pipeline page defines (`ab-experiment`, `agent-swarm`, `git-branching`,
+`human-in-the-loop`, `recipe-dag`, `sdlc`'s `holdAt`).
+The natural way to hold a caption on screen is `{ "op": "caption", "args": ["…"], "dur":
+1600 }` — `dur` is the declared pacing on every step, and `durOf()` reads it first for
+every op, so the scrubber and `g.cues()` price that step at 1600. But `g.caption()`
+returns `g`, the sequencer has nothing to await, and the story moves on at once: a
+storyboard of held captions declares a 2.4s timeline and finishes with zero ticks of the
+clock (reproduced), which is precisely the disagreement D12 forbids. Nobody noticed
+because every page wrote the beat as three steps instead — `caption`, `wait`,
+`caption(null)` — and the `wait` carried the time. The same is true of a `dur` on
+`highlight`, `clearHighlight`, `props`, `run.step` and `run.seek`.
+**Recommendation (S):** make the declaration true: a step that hands the sequencer
+nothing to await holds for its `dur` on the shared clock (skipped on a forward scrub, like
+every director tween; `run`/`run.reset` stay 0). Then a held caption is one step, and
+`smv-record --cues` ends the subtitle span where the hold ends.
+
 ### F18. `props()` replaces rather than merges, and out-ranks status styling
 **Observed in:** `agent-swarm`, `seq-saga`.
 Recolouring one node from an event handler wipes every other node's override unless the
@@ -436,6 +456,7 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 | F35 | done | a container the solver omitted is derived from its children alone (an empty one warns) |
 | F36 | done | `autoplay: 'auto'` honours `?auto=1`; `g.finished` / `g.finish(reason)`; `check-demos.mjs` awaits `window.smv.finished` |
 | F37 | done | `expand/collapse/expandAll/collapseAll(…, { camera })` frame the post-toggle layout in the toggle's own tween; storyboard args carry it; D13 ownership |
+| F40 | done | a `dur` on `caption`/`highlight`/`clearHighlight`/`props`/`run.step`/`run.seek` is held on the shared clock (skipped on a scrub), so declared = awaited; a held batch child counts toward the batch |
 | F39 | done | `condense(ids, node, { camera })` / `split(id, parts, { camera })` frame the merged node / the parts' union in the converge/diverge tween |
 | F38 | done | `addNode/addEdge/removeNode/removeEdge/update(…, { camera })` and `layout(o, { camera })` frame the op's subject against the layout it produces, on its own clock; a batch child's shot rides the batch's one commit |
 

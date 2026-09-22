@@ -329,6 +329,9 @@ const directed: StoryboardStep[] = [
   { op: "camera", args: [{ node: "clean", dur: 700 }], dur: 700 },
   { op: "highlight", args: [{ nodes: ["clean"], dim: true }] },
   { op: "caption", args: ["Cleaning the data", { place: "bottom" }] },
+  // F40 — a `dur` on a discrete step is its hold.
+  { op: "caption", args: ["Hold this line", { place: "bottom" }], dur: 1500 },
+  { op: "highlight", args: [{ nodes: ["clean"], pulse: true }], dur: 800 },
   { op: "props", args: [{ clean: { "--smv-fill": "#7c5cff" } }, { merge: true }] },
   { op: "props", args: [{ clean: null }, { merge: true }] },
   { op: "wait", ms: 800 },

@@ -52,8 +52,13 @@ const DIRECTOR_OPS = new Set(["camera", "highlight", "clearHighlight", "caption"
 
 /** Inside a batch, these are the ops that keep their own clock instead of folding into the
  *  one shared relayout — so they, and only they, can make the batch step cost more than
- *  that commit (D12: the declared duration must be the awaited one). */
-const PARALLEL_IN_BATCH = new Set(["wait", "camera", "condense", "split"]);
+ *  that commit (D12: the declared duration must be the awaited one). F40 — the discrete
+ *  ops are here too: bare they cost 0 and change nothing, but a child declaring `dur` is a
+ *  HOLD (see applyStep), and a hold runs alongside the commit like a `wait` does. */
+const PARALLEL_IN_BATCH = new Set([
+  "wait", "camera", "condense", "split",
+  "highlight", "clearHighlight", "caption", "props", "run.step", "run.seek",
+]);
 
 /** F37/F38 — the mutation ops that take a `{camera}` option (a shot resolved against the
  *  layout the mutation itself produces, flown on the mutation's own clock), and which `args`
@@ -595,8 +600,29 @@ export function mount(el, spec = {}, opts = {}) {
     const prevDur = stepDur, prevInstant = instant;
     stepDur = step.dur ?? null;
     if (scrubDepth > 0 && DIRECTOR_OPS.has(step.op)) instant = true;
-    try { return applyOp(step); }
-    finally { stepDur = prevDur; instant = prevInstant; }
+    try {
+      const r = applyOp(step);
+      // F40 — a `dur` on a step that hands nothing back to await is a HOLD. durOf() prices
+      // every op at `step.dur` first, so `{op:"caption", args:[text], dur:1600}` was already
+      // worth 1600 on the scrubber and the cue sheet — but g.caption() returns `g`, the
+      // sequencer had nothing to wait for, and the story moved on at once: the declared
+      // timeline and the awaited one disagreed (the exact thing D12 forbids), and pages
+      // wrote the beat as caption + wait + caption(null) instead. Holding on the shared
+      // clock makes the declaration true. `run`/`run.reset` are excluded because durOf()
+      // prices them at 0 before it reads `dur`; a forward scrub skips the hold the way it
+      // snaps every director op to zero (you asked for a position, not a screening).
+      if (holdFor(step, r)) return waitMs(stepDur);
+      return r;
+    } finally { stepDur = prevDur; instant = prevInstant; }
+  }
+
+  /** True when `r` is not something the sequencer will wait on (`g` itself, or nothing —
+   *  never a thenable, never a `run.play` `{run}`) and the step declared a positive `dur`. */
+  function holdFor(step, r) {
+    if (!(stepDur > 0) || scrubDepth > 0) return false;
+    if (step.op === "run" || step.op === "run.reset") return false;
+    if (r && (typeof r.then === "function" || (r.run && typeof r.run === "object"))) return false;
+    return true;
   }
 
   function applyOp(step) {
