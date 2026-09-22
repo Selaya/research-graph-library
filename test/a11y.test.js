@@ -330,6 +330,37 @@ test("attachA11y: Enter/Space toggle expand/collapse on containers only, via pub
   assert.deepEqual(g._calls.collapse, ["C"]);
 });
 
+test("F41: hand-rolling the shot off `nodeclick` double-toggles on the keyboard; `onToggle` is one path for both", () => {
+  const doc = new FakeDocument();
+  const ids = ["C"];
+  const pos = { C: { x: 0, y: 0 } };
+  const svg = fakeSvg(doc, ids, pos);
+  const root = fakeRoot(doc);
+  root.appendChild(svg);
+  const collapsed = new Set(["C"]);
+  const g = fakeG({ ids, pos, specNodes: [{ id: "C", label: "C" }], isContainer: () => true, collapsed });
+  // The page's own handler (what an embedder writes with `tapToggle: false` to get the F37
+  // shot): open it on click. a11y.js's own toggle then runs — and finds it open.
+  const pageCalls = [];
+  const emit = (type, p) => { if (type === "nodeclick") { pageCalls.push(p.id); collapsed.delete(p.id); } };
+  const h1 = attachA11y(g, { root, svg, emit });
+  svg.dispatch("keydown", { key: "Enter" });
+  assert.deepEqual(pageCalls, ["C"], "the page opened it…");
+  assert.deepEqual(g._calls.collapse, ["C"], "…and the keyboard toggle closed it again");
+  h1.destroy();
+
+  // With `onToggle` there is ONE toggle, the host's, and the bare path is never taken.
+  collapsed.add("C");
+  g._calls.collapse.length = 0;
+  const toggled = [];
+  const h2 = attachA11y(g, { root, svg, onToggle: (id) => toggled.push(id) });
+  svg.dispatch("keydown", { key: "Enter" });
+  assert.deepEqual(toggled, ["C"]);
+  assert.deepEqual(g._calls.expand, [], "bare g.expand not called");
+  assert.deepEqual(g._calls.collapse, []);
+  h2.destroy();
+});
+
 test("attachA11y: re-applies attrs on the 'commit' event against fresh elements", () => {
   const doc = new FakeDocument();
   const ids = ["A"];

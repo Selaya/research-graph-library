@@ -741,6 +741,17 @@ joined (pinch) — one guard, both behaviours. index.js wires `emit` to the inst
 the toggle and `opts.interaction.click === false` drops the events (either alone still
 attaches the listeners). Containers get `cursor: pointer`. Ships in the IIFE.
 
+**F41 — `onToggle`.** Both `attachTapToggle` and `attachA11y` take an optional
+`onToggle(id)`; when present it replaces the bare `g.expand/collapse` call (the container
+check stays in each module). index.js hands the SAME `readerToggle` to both, built from
+`interaction.tapToggle.camera`: it calls `g.expand(id, {camera})` / `g.collapse(id,
+{camera})` and then puts `cameraOwned` back to what it was — `viewport.userMoved` flips
+(auto-refit off, as after a pan) but a storyboard never starts snapshotting the viewport
+because the reader tapped (D13). One function for both paths is the point: a page that
+hand-rolled the shot off `nodeclick` with `tapToggle:false` left Enter/Space on a11y.js's
+own bare toggle, which fired after the page's handler had already opened the box and
+closed it again.
+
 ---
 
 # M3 contracts (in-house layered engine · dagre adapter · size · culling)

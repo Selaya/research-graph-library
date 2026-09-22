@@ -131,6 +131,10 @@ g.removeNode("notify", { camera: { fit: true } });
 const relaid: Awaitable = g.layout({ dir: "TB" }, { camera: true });
 void relaid;
 const mutOpts: MutationOpts = { camera: { fit: true, pad: 32 } };
+// F41 — the reader's toggle frames what it opens, on both the tap and the keyboard path.
+const tapOpts: MountOpts = { interaction: { tapToggle: { camera: true } } };
+const tapOpts2: MountOpts = { interaction: { tapToggle: { camera: { pad: 60, ease: "cubic-in-out" } }, click: false } };
+void [tapOpts, tapOpts2];
 const addOpts: AddNodeOpts = { after: "check", camera: true };
 void [mutOpts, addOpts];
 

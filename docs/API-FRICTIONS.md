@@ -251,6 +251,24 @@ nothing to await holds for its `dur` on the shared clock (skipped on a forward s
 every director tween; `run`/`run.reset` stay 0). Then a held caption is one step, and
 `smv-record --cues` ends the subtitle span where the hold ends.
 
+### F41. A reader's tap opens a container but never frames it, and hand-rolling the shot breaks the keyboard
+**Observed in:** every page that leaves `tapToggle` on (all 27), by inspection of
+`src/interact.js` l.62–66 and `src/a11y.js` l.307–318: both paths call bare
+`g.expand(id)` / `g.collapse(id)`, so a container opened by hand blooms under the D10
+anchor and, once the reader has panned (or a script owns the camera), spills past the
+pane exactly as F37 described for scripts. The only way to give the reader the F37 shot
+today is to set `interaction: { tapToggle: false }`, listen to `nodeclick`, check
+`g.viewstate.isContainer(id)` (an internal), and call `g.expand(id, { camera: true })` —
+three primitives, and they get the keyboard wrong: `a11y.js`'s Enter/Space handler emits
+the same `nodeclick` and *then* runs its own toggle, which is not switched off by
+`tapToggle: false`, so it fires after the page's handler has already opened the box and
+closes it again (reproduced in `test/a11y.test.js`). No demo ships this because the
+gallery's stories are scripted; every embedder who wants "tap to open and look" will.
+**Recommendation (S):** `interaction: { tapToggle: { camera } }` taking the F37 option,
+routed through ONE toggle function that `interact.js` and `a11y.js` both call, so a tap
+and an Enter frame identically. It is the reader's move, so it flips `userMoved` (as a pan
+does) but never takes the camera from a storyboard (D13).
+
 ### F18. `props()` replaces rather than merges, and out-ranks status styling
 **Observed in:** `agent-swarm`, `seq-saga`.
 Recolouring one node from an event handler wipes every other node's override unless the
@@ -456,6 +474,7 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 | F35 | done | a container the solver omitted is derived from its children alone (an empty one warns) |
 | F36 | done | `autoplay: 'auto'` honours `?auto=1`; `g.finished` / `g.finish(reason)`; `check-demos.mjs` awaits `window.smv.finished` |
 | F37 | done | `expand/collapse/expandAll/collapseAll(…, { camera })` frame the post-toggle layout in the toggle's own tween; storyboard args carry it; D13 ownership |
+| F41 | done | `interaction: { tapToggle: { camera } }` — the reader's tap and Enter/Space toggle both frame through one `readerToggle`; `userMoved` flips, D13 ownership does not |
 | F40 | done | a `dur` on `caption`/`highlight`/`clearHighlight`/`props`/`run.step`/`run.seek` is held on the shared clock (skipped on a scrub), so declared = awaited; a held batch child counts toward the batch |
 | F39 | done | `condense(ids, node, { camera })` / `split(id, parts, { camera })` frame the merged node / the parts' union in the converge/diverge tween |
 | F38 | done | `addNode/addEdge/removeNode/removeEdge/update(…, { camera })` and `layout(o, { camera })` frame the op's subject against the layout it produces, on its own clock; a batch child's shot rides the batch's one commit |

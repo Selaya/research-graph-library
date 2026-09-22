@@ -24,7 +24,7 @@ function fakeEl(cls, id, parent) {
   return el;
 }
 
-function harness({ containers = ["box"], collapsed = ["box"], toggle, emit } = {}) {
+function harness({ containers = ["box"], collapsed = ["box"], toggle, emit, onToggle } = {}) {
   const rootEl = fakeEl(null, null, null);
   const svg = fakeEl("smv", null, rootEl);
   const nodeG = fakeEl("smv-node", "box", svg);
@@ -40,7 +40,7 @@ function harness({ containers = ["box"], collapsed = ["box"], toggle, emit } = {
     expand(id) { calls.push(["expand", id]); collapsedSet.delete(id); },
     collapse(id) { calls.push(["collapse", id]); collapsedSet.add(id); },
   };
-  const tap = attachTapToggle(g, { svg, ...(toggle === undefined ? {} : { toggle }), emit });
+  const tap = attachTapToggle(g, { svg, ...(toggle === undefined ? {} : { toggle }), emit, onToggle });
   return { svg, rect, nodeG, calls, g, tap };
 }
 
@@ -167,4 +167,21 @@ test("F27: with no emit hook the toggle behaves exactly as it always did", () =>
   svg.fire("pointerdown", { target: rect, clientX: 10, clientY: 10, pointerId: 1 });
   svg.fire("pointerup", { target: svg, clientX: 10, clientY: 10, pointerId: 1 });
   assert.deepEqual(calls, [["expand", "box"]]);
+});
+
+test("F41: `onToggle` replaces the bare g.expand/collapse; `toggle:false` still suppresses it; a pan still never toggles", () => {
+  const toggled = [];
+  const { svg, rect, calls } = harness({ onToggle: (id) => toggled.push(id) });
+  svg.fire("pointerdown", { target: rect, clientX: 10, clientY: 10, pointerId: 1 });
+  svg.fire("pointerup", { target: svg, clientX: 11, clientY: 10, pointerId: 1 });
+  assert.deepEqual(toggled, ["box"]);
+  assert.deepEqual(calls, [], "the host's toggle owns the call");
+  svg.fire("pointerdown", { target: rect, clientX: 10, clientY: 10, pointerId: 2 });
+  svg.fire("pointerup", { target: svg, clientX: 40, clientY: 10, pointerId: 2 });
+  assert.deepEqual(toggled, ["box"], "a pan is not a tap, onToggle or not");
+
+  const off = harness({ toggle: false, onToggle: (id) => toggled.push(id) });
+  off.svg.fire("pointerdown", { target: off.rect, clientX: 10, clientY: 10, pointerId: 1 });
+  off.svg.fire("pointerup", { target: off.svg, clientX: 10, clientY: 10, pointerId: 1 });
+  assert.deepEqual(toggled, ["box"], "toggle:false wins over onToggle");
 });

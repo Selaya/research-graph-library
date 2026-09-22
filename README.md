@@ -139,7 +139,12 @@ marginx, marginy, solver}` — see **Layout** below),
 turn off tap/click-to-toggle on container nodes (on by default; a tap that travels past
 a small slop radius counts as a pan and never toggles — touch-friendly by construction).
 `interaction: { click: false }` turns off the `nodeclick`/`edgeclick` events below, which
-are otherwise on whether or not `tapToggle` is.
+are otherwise on whether or not `tapToggle` is. `interaction: { tapToggle: { camera: true } }`
+makes the reader's toggle frame what it opens or closes — the same `camera` option a
+script gives `expand()` (see **Framing an expansion**), applied to taps and to the
+keyboard toggle alike, so a container never spills past the pane when someone opens it
+by hand. It is the reader's move, not the script's: the viewport stops auto-refitting,
+as after a pan, but a running storyboard does not start snapshotting the camera.
 
 `preset` is `"pipeline"`, or an object when the preset takes options:
 `{ name: "pipeline", total: "sum" | "critical" | "both" }`.

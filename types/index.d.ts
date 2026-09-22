@@ -409,8 +409,12 @@ export interface MountOpts {
   a11y?: boolean;
   /** Pointer interactions. `tapToggle` (tap/click a container to expand/collapse) and
    *  `click` (the `nodeclick`/`edgeclick` events, F27) are both on by default; either can be
-   *  turned off on its own. */
-  interaction?: { tapToggle?: boolean; click?: boolean };
+   *  turned off on its own. F41 — `tapToggle: { camera }` makes the reader's toggle frame
+   *  what it opens or closes, with the same option a script gives `expand()` (`true` frames
+   *  the container, an object is a target of its own); the keyboard toggle (Enter/Space)
+   *  frames identically. Unlike a scripted shot it never takes the camera from a storyboard
+   *  (D13): auto-refit stops, as after a pan, but the viewport is not snapshotted. */
+  interaction?: { tapToggle?: boolean | { camera?: boolean | CameraTarget }; click?: boolean };
   storyboard?: StoryboardStep[];
   /** `true` plays the storyboard as soon as it is mounted; `'auto'` plays it only when the
    *  page URL carries `?auto=1` (or `auto=true`) — the headless-verification convention

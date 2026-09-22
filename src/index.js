@@ -1490,14 +1490,35 @@ export function mount(el, spec = {}, opts = {}) {
   const ia = opts.interaction || {};
   const clickEmit = ia.click === false ? null : (t, p) => bus.emit(t, p);
 
+  // F41 — `interaction: {tapToggle: {camera}}`: the reader's toggle frames what it opens,
+  // through the same F37 option a script would use, and ONE function serves both the tap
+  // path and the keyboard path so they cannot drift (a page hand-rolling this off
+  // `nodeclick` with `tapToggle: false` framed the tap but left Enter/Space on a11y.js's
+  // own bare toggle — which, firing after the page's handler had already opened the box,
+  // closed it again). It is the reader's move, not the script's: `viewport.userMoved`
+  // flips (auto-refit stops, exactly as after a pan) but `cameraOwned` is put back, so a
+  // storyboard never starts snapshotting the viewport — and yanking a later pan back on
+  // every seek — because someone tapped a container (D13).
+  const tapShot = ia.tapToggle && typeof ia.tapToggle === "object" ? ia.tapToggle.camera : undefined;
+  const readerToggle = (id) => {
+    if (!vs.isContainer(id)) return null;
+    const o = tapShot ? { camera: tapShot } : {};
+    const owned = cameraOwned;
+    const h = vs.collapsed.has(id) ? g.expand(id, o) : g.collapse(id, o);
+    cameraOwned = owned;
+    return h;
+  };
+
   // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
-  // Enter/Space there publishes the same `nodeclick` a tap does (F27).
-  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg, emit: clickEmit });
+  // Enter/Space there publishes the same `nodeclick` a tap does (F27), and toggles through
+  // the same readerToggle the tap does (F41).
+  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg, emit: clickEmit, onToggle: readerToggle });
   if (ia.tapToggle !== false || ia.click !== false) {
     tap = attachTapToggle(g, {
       svg: renderer.svg,
       toggle: ia.tapToggle !== false,
       emit: clickEmit,
+      onToggle: readerToggle,
     });
   }
 

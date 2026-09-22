@@ -29,8 +29,11 @@ function hitFrom(target, stopAt) {
  * `toggle: false` keeps the listeners (F27 clicks still fire) but stops the expand/collapse.
  * `emit` publishes `nodeclick`/`edgeclick` on `g`'s own bus — suppressed by the very same
  * slop/pinch guard the toggle uses, so a pan never reads as a click.
+ * `onToggle(id)` (F41) replaces the bare `g.expand/collapse` call with the host's own
+ * toggle — index.js hands in one that carries `interaction.tapToggle.camera`, and hands
+ * the SAME function to the keyboard path, so a tap and an Enter frame identically.
  */
-export function attachTapToggle(g, { svg, toggle = true, emit = null }) {
+export function attachTapToggle(g, { svg, toggle = true, emit = null, onToggle = null }) {
   if (!svg || typeof svg.addEventListener !== "function") return { destroy() {} };
 
   let down = null; // {hit, x, y, pointerId, dead}
@@ -57,6 +60,7 @@ export function attachTapToggle(g, { svg, toggle = true, emit = null }) {
     if (!toggle || kind !== "node") return;
     const vs = g.viewstate;
     if (!vs || !vs.isContainer(id)) return;
+    if (typeof onToggle === "function") { onToggle(id); return; }
     if (vs.collapsed.has(id)) g.expand(id);
     else g.collapse(id);
   }
