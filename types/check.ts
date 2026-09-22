@@ -112,6 +112,13 @@ g.expand("clean");
 g.collapse("clean");
 g.expandAll();
 g.collapseAll();
+// F37 — a shot resolved against the layout the toggle produces, flown on its clock.
+g.expand("clean", { camera: true });
+g.expand("clean", { camera: { pad: 60 } });
+g.collapse("clean", { camera: { fit: true } });
+g.expandAll({ camera: true });
+g.collapseAll({ camera: { nodes: ["ingest", "build"] } });
+g.update("clean", { collapsed: false }, { camera: true });
 
 // condense()/split() resolve the created/removed ids once the merge/split actually lands
 // (`applied:true`) — `ids` is optional because a run canceled before that never happened.
@@ -244,6 +251,9 @@ const steps: StoryboardStep[] = [
   { op: "addNode", args: [{ id: "s1", label: "Step 1" }] },
   { op: "wait", ms: 200 },
   { op: "expand", args: ["clean"] },
+  { op: "expand", args: ["clean", { camera: true }] },
+  { op: "collapse", args: ["clean", { camera: { fit: true } }] },
+  { op: "expandAll", args: [{ camera: true }] },
   { op: "condense", args: [["build.compile", "build.link"], { id: "build" }] },
   { op: "run.play", until: "deploy" },
   { op: "batch", steps: [{ op: "run.step" }, { op: "run.seek", ms: 0 }] },

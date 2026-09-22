@@ -64,6 +64,39 @@ until playback reached it and threw a bare `TypeError` instead of the library's 
   instead of fighting; a new camera op cancels the in-flight one (D9), never queues.
 - The first `camera` op in a script hands the viewport to the script (D13): auto-refit
   stops, the camera joins the per-step snapshots, and scrubbing restores your shots.
+  A toggle step carrying `{ camera }` (next entry) counts as one.
+
+**`expand` / `collapse` / `expandAll` / `collapseAll` with `camera`** — frame what the
+toggle produces, in the toggle's own tween. This is the shot to reach for whenever a
+container opens or closes on camera:
+
+```json
+{ "op": "expand", "args": ["clean", { "camera": true }], "dur": 700 }
+{ "op": "collapse", "args": ["clean", { "camera": { "fit": true } }] }
+{ "op": "expandAll", "args": [{ "camera": true }] }
+{ "op": "update", "args": ["clean", { "collapsed": false }, { "camera": { "pad": 60 } }] }
+```
+
+- **Do not write** `camera({node: "clean"})` → `expand("clean")` → `camera({fit: true})`.
+  The first shot frames the *collapsed* stub, the expansion then spills its children past
+  the pane, and the third shot zooms back out: three tweens, a visible stutter, and the
+  single most common thing a script-writing assistant gets wrong. The option above is the
+  same beat as one motion — the camera pulls back exactly as far as the opened box needs,
+  while the children bloom into it.
+- The target is any `camera` target object, resolved against the layout the toggle *lands
+  on* rather than the one on screen when the step starts. `true` frames the toggled
+  container itself (`fit: true` for the `-All` ops); an object that names no box
+  (`{ "pad": 60 }`) frames the toggled id with those options; `{ "nodes": [...] }`,
+  `{ "fit": true }`, `{ "node": "other" }` are shots of their own.
+- It rides the step's `dur` (else the mount's `animation.duration`), never the 600ms
+  camera default, so the cue sheet and the scrubber price the step exactly as before —
+  a `dur` on the target object is ignored. `ease` on the target replaces the mount easing.
+- A fitted scale is lidded at 1.5 like a `nodes` union: a lone closed box is never a
+  close-up. `k` or `maxK` on the target still wins.
+- A toggle that is already in the requested state still flies the shot (and resolves
+  `applied: false`), so re-issuing "show me this open" is idempotent rather than a warning.
+- Inside a `batch`, the shot is composed against the batch's one shared commit; the last
+  toggle in the batch to name one wins.
 
 **`highlight`** — emphasis, replace-not-accumulate: one call IS the emphasis state, so
 you never clear the previous one first.

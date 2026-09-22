@@ -238,9 +238,11 @@
     { op: "caption", args: ["A ReAct-style loop: think, call a tool, observe, decide whether to think again.", { place: "bottom" }] },
     { op: "wait", ms: 900 },
     { label: "expand" },
-    { op: "camera", args: [{ node: "act", pad: 70 }], dur: 600 },
     { op: "caption", args: ["Act is a tool container — expand it to see what the agent can call.", { place: "bottom" }] },
-    { op: "expand", args: ["act"] },
+    // F37 — the toggle carries its own shot: the camera pulls back exactly as far as the
+    // opened box needs while the tools bloom into it, one tween instead of frame-stub /
+    // spill / refit.
+    { op: "expand", args: ["act", { camera: { pad: 70 } }], dur: 600 },
     { op: "wait", ms: 700 },
     { label: "run" },
     { op: "camera", args: [{ fit: true, pad: 40 }], dur: 600 },

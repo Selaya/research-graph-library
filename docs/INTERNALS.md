@@ -1100,6 +1100,22 @@ vp.target                                 // getter: where a live tween is headi
   Deliberately not routed through `viewport.fit()` — see the FIT_MAX_K note above.
 - `g.highlight(sel)` / `g.clearHighlight()` / `g.caption(text, o?)` — thin delegates to
   the director; return `g`.
+- **F37 — `{camera}` on a toggle.** `expand(id, o)` / `collapse(id, o)` / `expandAll(o)` /
+  `collapseAll(o)` (and `update()`'s `collapsed` route, which forwards its `opts`) run
+  `shotFor(o.camera, id)`: `true` → `{node: id}` (`{fit: true}` when there is no id), an
+  object is copied and given `node: id` when it names no box (`x`/`y`/`node`/`nodes`/`fit`),
+  and `maxK: NODES_MAX_K` is injected unless the target names `k` or `maxK`. The result
+  travels as `extra.camera` through `commitOrDefer` → `relayout({camera})` (inside a batch
+  it lands on `batchExtra.camera`, last writer wins). In `relayout`, a `camera` REPLACES the
+  D10 anchor + auto-refit branch: `resolveCameraTarget(camera, res, size, viewport.target,
+  vs.visibleAncestor)` against the layout just computed, then `viewport.moveTo(to,
+  {duration: dur, ease: EASINGS[camera.ease] || easing})` — the commit's own duration and
+  easing, so the camera and the FLIP are one tween. It also sets `cameraOwned = true` and
+  `viewport.userMoved = true`, exactly as `g.camera()` does, and `hasCameraOp()` reads the
+  option off the step's args (`TOGGLE_CAMERA_ARG` names the slot per op) so the step-0
+  snapshot already knows the script owns the viewport. A no-op toggle carrying a shot goes
+  through `shotOnly()` — `g.camera(shot)` with `applied: false` merged in — so the camera
+  still moves; `camera: false`/absent is the pre-F37 path byte-for-byte.
 - **M5 (F15/F17/F18):** `chromeInset()` = `paneInsets(root, renderer.svg)`, read by
   `fitView`, `camera` and relayout's auto-refit (and the one mount-time fit, which now runs
   AFTER the transport mounts so there is chrome to measure). `g.camera` injects

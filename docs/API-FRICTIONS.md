@@ -176,6 +176,19 @@ say so in the docs); keep the warning for truly unknown ids.
 Fitting two nodes into a 420 px pane produces k ≈ 3; pages pass an explicit `k`.
 **Recommendation (S):** a `maxK` option with a sane default (1.5).
 
+### F37. Framing an expansion takes three camera moves and stutters
+**Observed in:** `tool-use-loop`, `ci-matrix`, `spec-editor`, and nearly every script an
+AI assistant writes against the library.
+There is no way to say "open this container and show me the result". The script frames
+the collapsed stub (`camera({node})`), expands it, watches the children spill past the
+pane, and fits again — or expands first and fits second, which is the same overflow with
+the order swapped. Both read as a zoom-in / spill / zoom-out stutter, and because the
+right shot depends on a layout that does not exist until the toggle commits, no ordering
+of the existing ops can compose it.
+**Recommendation (S):** a `camera` option on `expand` / `collapse` / `expandAll` /
+`collapseAll` (and `update`'s `collapsed` route), resolved against the layout the toggle
+produces and flown on the toggle's own clock, so the pull-back and the bloom are one tween.
+
 ### F18. `props()` replaces rather than merges, and out-ranks status styling
 **Observed in:** `agent-swarm`, `seq-saga`.
 Recolouring one node from an event handler wipes every other node's override unless the
@@ -380,6 +393,7 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 | F34 | done | documented next to F28/F32; the demo solver reads placement from `data.seq` |
 | F35 | done | a container the solver omitted is derived from its children alone (an empty one warns) |
 | F36 | done | `autoplay: 'auto'` honours `?auto=1`; `g.finished` / `g.finish(reason)`; `check-demos.mjs` awaits `window.smv.finished` |
+| F37 | done | `expand/collapse/expandAll/collapseAll(…, { camera })` frame the post-toggle layout in the toggle's own tween; storyboard args carry it; D13 ownership |
 
 ## Suggested order
 
