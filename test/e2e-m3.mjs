@@ -8,8 +8,7 @@
 // parity (left-to-right stage order, containers contain their children, no overlaps, no
 // NaN), and a 300-node synthetic graph (demo/m3-scale.html) mounts with viewport culling
 // active — nothing culled at the initial fit, plenty culled once zoomed into a corner —
-// with per-frame pan cost measured and reported for the compositor-offload decision
-// (docs/DEVIATIONS.md item 10).
+// with per-frame pan cost measured and reported for the compositor-offload decision.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -215,7 +214,7 @@ try {
     `panMedian=${sc.frameMedianMs?.toFixed(2)}ms ` +
     `panMean=${sc.frameMeanMs?.toFixed(2)}ms panMax=${sc.frameMaxMs?.toFixed(2)}ms samples=${sc.frameSamples}`);
 
-  // Compositor-offload decision rule (docs/DEVIATIONS.md item 10, plan §7 M3): if the
+  // Compositor-offload decision rule: if the
   // median frame on the 300-node run is <= 8ms headless, the "not justified at v1 scale"
   // verdict stands as recorded; otherwise this is a finding for the orchestrator.
   const OFFLOAD_THRESHOLD_MS = 8;

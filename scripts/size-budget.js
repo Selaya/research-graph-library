@@ -1,4 +1,4 @@
-// Runs the build, then hard-fails if gzip'd bundle sizes exceed budget (docs/PLAN.md §8).
+// Runs the build, then hard-fails if gzip'd bundle sizes exceed budget.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
 import { gzipSync, constants as zlibConstants } from 'node:zlib';
@@ -12,16 +12,8 @@ const dist = join(root, 'dist');
 // (it is unloadable by design — the layout engine is externalized out of it).
 const metric = join(root, 'build');
 
-// M3 budget: the in-house engine replaced dagre, so the IIFE limit tightens 56 -> 50KB
-// (docs/PLAN.md §8: "full pipeline IIFE < 50KB gzip from M3"). Core was 40KB through M4;
-// the usability round (misuse warnings/validation across director/run/live-mode, the
-// aria-live layer, --smv-radius, richer mutation handles) grew it past that, so core
-// moves 40 -> 45KB while the shipped IIFE budget stays at 50KB.
-// The API-frictions round (docs/API-FRICTIONS.md: retry loops, injected tokens, live joins,
-// edge durations and labels, chrome-aware fit, the measure hook, g.validate, storyboard run
-// ops, container ports) added ~4.8KB gzip to each bundle with the stylesheets already
-// minified in the build; a trim pass found no further slack (the bundle compresses at a
-// uniform ~2.9:1 with no dead code), so core moves 45 -> 50KB and the IIFE 50 -> 55KB.
+// Budgets: core (layout engine externalized) < 50KB, full IIFE (in-house layout
+// included) < 55KB, both min+gzip. Raise them deliberately, never to paper over a leak.
 const CORE_LIMIT = 50 * 1024;
 const IIFE_LIMIT = 55 * 1024;
 

@@ -187,8 +187,8 @@
    *  spends inside viewport's pointer handler + index.js's recull + renderer.frame — not
    *  the wall-clock gap between rAF callbacks (that gap is dominated by vsync, ~16.7ms at
    *  60Hz regardless of how cheap the work is, and would make every page "cost" the same).
-   *  This is the number the compositor-offload decision rule (docs/DEVIATIONS.md item 10 /
-   *  INTERNALS "M3 exit") means by "median frame <= 8ms". Returns {median, mean, max,
+   *  This is the number the compositor-offload decision rule (INTERNALS
+   *  "M3 exit") means by "median frame <= 8ms". Returns {median, mean, max,
    *  count} in ms. */
   function measurePan(ms) {
     return new Promise(function (resolve) {

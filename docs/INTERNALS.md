@@ -1,6 +1,6 @@
 # smv internals — module contracts (M0/M1)
 
-Read `docs/PLAN.md` first (decisions D1–D11). This file pins the internal interfaces so
+This file pins the internal interfaces so
 modules developed in parallel compose. **Do not change a contract here without updating
 every consumer.** Plain-JS ESM, no TypeScript, no framework. Browser-only APIs must be
 guarded so every module *imports* cleanly in Node (tests run under `node --test`).
@@ -599,7 +599,7 @@ makeQuery(store) → { nodes(filter?), edges(filter?), children(id), descendants
 - **Edge labels:** `edge.label` renders as `<text class="smv-edge-label">` inside the
   edge group, positioned per frame at `pointAt(clippedPoints, t)` with a small
   perpendicular offset; content/truncation set at styleCommit only (D7). Labels do NOT
-  affect layout (documented simplification — record in DEVIATIONS if judged material).
+  affect layout (documented simplification).
   Meta-edges: when a collapsed boundary edge aggregates ≥2 labeled edges the label drops
   (weight badge already carries the story). CSS: `.smv-edge-label` muted, 10px, paint-order
   stroke halo for readability, in styles.js.
@@ -764,7 +764,7 @@ M2 is DONE and merged (351 tests, e2e-m0/1/2, size, types green). Do not regress
 |---|---|
 | `src/engine.js` + optional `src/engine/*.js` (new), `test/engine.test.js`, `test/engine-parity.test.js` | engine agent |
 | `src/render.js`, `src/viewport.js`, `test/cull.test.js` | culling agent |
-| `src/layout.js`, `src/adapters/dagre.js` (new), `src/index.js`, `package.json`, `scripts/*`, `types/*`, `test/golden/*`, `test/layout.test.js`, README, docs/DEVIATIONS.md | integration agent |
+| `src/layout.js`, `src/adapters/dagre.js` (new), `src/index.js`, `package.json`, `scripts/*`, `types/*`, `test/golden/*`, `test/layout.test.js`, README | integration agent |
 | `demo/*`, `test/e2e-m3.mjs` | verify agent |
 
 ## `src/engine.js` — the in-house layered solver (D2/M3), PURE, no deps
@@ -952,8 +952,8 @@ the IIFE and default ESM path must not pull it in at all.
 - `scripts/size-budget.js`: IIFE limit tightens **56 → 50KB** gzip (plan §8 M3 public
   commitment); core stays 40KB.
 - Goldens: regenerate via `node test/golden/update.js` (intentional layout change).
-  “Parity” gate = structural invariants + crossing non-regression, recorded as such in
-  DEVIATIONS (coordinate-identical parity with dagre is not a meaningful target):
+  “Parity” gate = structural invariants + crossing non-regression, because
+  coordinate-identical parity with dagre is not a meaningful target:
   - every forward edge strictly advances along the rank axis;
   - no two visible sibling nodes overlap; children strictly inside container rects
     (post-padContainers);
@@ -974,16 +974,15 @@ the IIFE and default ESM path must not pull it in at all.
   children, no overlaps/NaN, and a 300-node synthetic graph mounts with culling active
   (fewer rendered-visible groups than total when zoomed in) at interactive frame cost.
 - Compositor offload (plan: only if profiling justifies): verify agent profiles the
-  300-node run; if median frame ≤ 8ms headless, record "not justified at v1 scale" in
-  DEVIATIONS instead of building it. Gantt mode: skipped by default per plan (no
-  demand); note in DEVIATIONS.
+  300-node run; if median frame ≤ 8ms headless, record "not justified at v1 scale"
+  instead of building it. Gantt mode: skipped by default (no demand).
 
 ---
 
 # M4 contracts (director ops: camera · highlight · caption · declared timeline)
 
 M3 is DONE and green (435 tests, e2e-m0/1/2/3, size, types). Do not regress it. M4a lands
-the core director ops (D12–D15 in PLAN.md, op shapes in §5.7); the deterministic frame
+the core director ops; the deterministic frame
 renderer is M4b and its plumbing (`opts.ticker/motion`, `data-smv-record`,
 `setInteractive`) is landed here so M4b touches no core file.
 
@@ -1081,7 +1080,7 @@ vp.target                                 // getter: where a live tween is headi
   attribute); `.smv-caption` with `data-place`/`data-variant` and a `.smv-has-transport`
   bottom offset mirroring `.smv-totalbar`; the `[data-smv-record] *` transition/animation
   kill-switch (D15). No transitions on any of it (D14).
-  - **Lesson (API-FRICTIONS.md F20, fixed):** the transport-aware bottom offset
+  - **Lesson (fixed):** the transport-aware bottom offset
     (`.smv-has-transport .smv-caption{bottom:46px}`) used to outrank
     `.smv-caption[data-place="top"]{bottom:auto}` by specificity, so a top-placed caption
     under `controls: true` kept both `top` and `bottom` set and stretched over the whole

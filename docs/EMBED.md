@@ -87,9 +87,9 @@ smv-pack <spec.json> [-o out.html] [--storyboard sb.json] [--title T] [--preset 
 
 | Flag | Meaning |
 |---|---|
-| `<spec.json>` (required) | Path to a graph spec — the same JSON shape as `mount()`'s second argument (§5.1 in `docs/PLAN.md`). |
+| `<spec.json>` (required) | Path to a graph spec — the same JSON shape as `mount()`'s second argument (see the README's API section). |
 | `-o, --out <file>` | Output path. Defaults to `<spec-basename>.smv.html`. |
-| `--storyboard <sb.json>` | Path to a JSON storyboard op array (§5.5). When given, the packed page mounts with `autoplay: true` and replays it. |
+| `--storyboard <sb.json>` | Path to a JSON storyboard op array (see `docs/RECORDING.md`). When given, the packed page mounts with `autoplay: true` and replays it. |
 | `--title <T>` | `<title>` of the emitted HTML document. |
 | `--preset <pipeline>` | Enables a preset (currently only `"pipeline"`) via `opts.preset`. |
 | `--theme <dark\|light>` | Mounts with a fixed `opts.theme` instead of leaving it to `"auto"`. |
@@ -117,7 +117,7 @@ no external `<script src>`, no fetch, no CDN dependency — open the file direct
 ## Spec and mount options
 
 Both paths above take the same graph spec shape and the same `mount()` options
-documented in `docs/PLAN.md` §5.1–§5.6 and the top-level `README.md`. In particular:
+documented in the top-level `README.md`. In particular:
 `theme`, `layout`, `animation`, `controls`, `preset`, `storyboard`, `autoplay` all work
 identically whether you wired the `<script>` tag by hand or generated the page with
 `smv-pack`.

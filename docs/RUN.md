@@ -437,8 +437,7 @@ particular play at fewer than `maxIterations`.
 Because the in-place tick has nothing to re-stage, a story where later iterations should
 look different (a different result, a different branch taken) has to be narrated
 reactively off `run.on('loop', ...)` rather than declared as a storyboard step — see the
-README's "Retry loops" callout for the pattern, and docs/PLAN.md (D18) for a proposed
-`replay` mode that would re-simulate the subgraph per iteration instead.
+README's "Retry loops" callout for the pattern.
 
 ## Per-branch speed
 

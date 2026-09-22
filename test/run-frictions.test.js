@@ -1,4 +1,4 @@
-// Mode A frictions F1/F3/F4/F7/F8/F9 (docs/API-FRICTIONS.md §1): retry budgets on a
+// Mode A regressions: retry budgets on a
 // declared failure, mid-graph seeds, a declared start instant, playback vs the declared
 // timeline, per-edge hop times, and multi-port containers.
 

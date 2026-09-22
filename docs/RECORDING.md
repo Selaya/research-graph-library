@@ -7,11 +7,11 @@ renderer (§3). Screen-recording a live tab (§4) is still the fastest way to a 
 it is just not reproducible. §5 is the matching still image, and §6 fits the script's holds
 to a voice-over you have already recorded.
 
-Design background: PLAN.md D12–D17 and §5.7; module contracts in INTERNALS.md (M4).
+Module contracts: INTERNALS.md (M4).
 
 ## 1. Writing a director script
 
-A director script is an ordinary storyboard (PLAN §5.5): a serializable JSON op array.
+A director script is an ordinary storyboard: a serializable JSON op array.
 M4 adds five ops and one field. Nothing here needs authored JS — the array is the whole
 artifact, and `smv-pack --storyboard` ships it. `split` (the mirror of `condense`, README
 §API) is a full storyboard op too — `{ "op": "split", "args": ["clean", { "nodes": [...],
