@@ -1126,6 +1126,12 @@ vp.target                                 // getter: where a live tween is headi
   `hasCameraOp()` sees a shot on any of them at build time; `update` no longer needs the
   `collapsed` special case there, since the option is read on both routes. Inside a batch
   every one of these lands on `batchExtra.camera`, last writer wins, exactly as toggles do.
+- **F39 — `{camera}` on condense/split.** `condense(ids, node, o)` / `split(id, parts, o)`
+  normalise `o.camera` with `shotFor` (subject: the merged id / the parts' ids) and pass
+  it as `opts.camera` to `runCondense` / `runSplit`, which forward it verbatim to their
+  phase-2 `relayout({camera})` — so it rides the converge/diverge duration and easing, is
+  resolved against the merged layout (the id exists by then), and never touches phases 1
+  or 3. `MUTATION_CAMERA_ARG` names slot 2 for both, so `hasCameraOp` sees it at build time.
 - **M5 (F15/F17/F18):** `chromeInset()` = `paneInsets(root, renderer.svg)`, read by
   `fitView`, `camera` and relayout's auto-refit (and the one mount-time fit, which now runs
   AFTER the transport mounts so there is chrome to measure). `g.camera` injects

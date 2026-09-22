@@ -757,8 +757,10 @@ export type StoryboardStep = { dur?: number } & (
   | { op: "update"; args: [string, Record<string, unknown>, UpdateOpts?] }
   | { op: "expand"; args: [string, ToggleOpts?] }
   | { op: "collapse"; args: [string, ToggleOpts?] }
-  | { op: "condense"; args: [string[], CondenseNodeSpec] }
-  | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }] }
+  /** F39 — `{ camera }` in the third slot frames the merged node / the parts' union in the
+   *  choreography's own converge/diverge tween (`MutationOpts`). */
+  | { op: "condense"; args: [string[], CondenseNodeSpec, MutationOpts?] }
+  | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }, MutationOpts?] }
   | { op: "batch"; steps: StoryboardStep[] }
   /** Every container open / closed in one commit — `g.expandAll()` / `g.collapseAll()`.
    *  `[{ camera: true }]` fits the result in the same tween (F37). */
@@ -1123,11 +1125,14 @@ export interface Graph {
   collapse(id: string, opts?: ToggleOpts): Awaitable<MutationResult>;
   /** D6 — merge N nodes into one over the 3-phase choreography (highlight/converge/reveal).
    *  Resolves with the created/removed ids once the merge actually lands — see
-   *  `CondenseSplitResult`. */
-  condense(ids: Iterable<string>, node: CondenseNodeSpec): Awaitable<CondenseSplitResult>;
+   *  `CondenseSplitResult`. F39 — `{ camera: true }` frames the MERGED node where it lands,
+   *  in the converge phase's own tween: the id does not exist before that phase, so no
+   *  `camera()` call placed before or after the condense can compose the shot
+   *  (`MutationOpts`). */
+  condense(ids: Iterable<string>, node: CondenseNodeSpec, opts?: MutationOpts): Awaitable<CondenseSplitResult>;
   /** D6 inverse — one node becomes N (highlight/diverge/reveal). Same resolution shape as
-   *  `condense()`. */
-  split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): Awaitable<CondenseSplitResult>;
+   *  `condense()`. F39 — `{ camera: true }` frames the union of the parts in the diverge. */
+  split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }, opts?: MutationOpts): Awaitable<CondenseSplitResult>;
   /** Every container open in ONE commit. `{ camera: true }` fits the opened graph in the
    *  same tween (F37). */
   expandAll(opts?: ToggleOpts): Awaitable<MutationResult>;

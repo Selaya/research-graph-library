@@ -276,10 +276,10 @@
     { op: "collapse", args: ["mgr"] },
     { op: "caption", args: ["Swap the slow manual steps for two integrations — watch the chips odometer down.", { place: "bottom" }] },
     { op: "condense", args: [HR_SET, HR_AUTO] },
-    { op: "condense", args: [IT_SET, IT_AUTO] },
+    // F39 — the second merge's converge also refits the shorter graph, one tween.
+    { op: "condense", args: [IT_SET, IT_AUTO, { camera: { fit: true } }] },
     { op: "highlight", args: [{ nodes: [HR_AUTO.id, IT_AUTO.id], variant: "ok", pulse: true } ] },
     { label: "re-run, automated" },
-    { op: "camera", args: [{ fit: true }] },
     { op: "caption", args: ["Same plan, automated — no resubmission round, and the total-duration bar drops with it.", { place: "bottom" }] },
     { op: "run", args: [RUN_OPTS] },
     { op: "run.play" },

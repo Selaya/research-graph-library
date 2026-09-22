@@ -244,9 +244,10 @@
   STEPS.push({ label: "condense" });
   STEPS.push({ op: "camera", args: [{ nodes: CONDENSE_IDS, pad: 90, dur: 400 * P }] });
   STEPS.push({ op: "caption", args: ["Folding request 1's miss → fetch → fill into one hop.", { place: "top" }] });
-  STEPS.push({ op: "condense", args: [CONDENSE_IDS, READTHROUGH] });
+  // F39 — the shot rides the converge: the merged id does not exist before the step, and a
+  // camera after it would pan to wherever the anchored viewport had let it bloom.
+  STEPS.push({ op: "condense", args: [CONDENSE_IDS, READTHROUGH, { camera: { k: 1.1, pad: 100 } }] });
   STEPS.push({ op: "highlight", args: [{ nodes: ["readthrough.1"], variant: "ok", pulse: true }] });
-  STEPS.push({ op: "camera", args: [{ node: "readthrough.1", k: 1.1, pad: 100, dur: 400 * P }] });
   STEPS.push({ op: "caption", args: ["Same real latency — now one conceptual hop.", { place: "top" }] });
   STEPS.push({ op: "wait", ms: 800 * P });
   STEPS.push({ op: "clearHighlight", args: [] });

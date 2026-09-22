@@ -148,6 +148,9 @@ splitAwaitable.then((r) => { if (r.applied && r.ids) { const created: string[] =
 // `parent: null` on the merged spec = "inherit the sources' common parent".
 const condenseAwaitable: Awaitable<CondenseSplitResult> = g.condense(["build.compile", "build.link"], { id: "build", parent: null });
 void condenseAwaitable;
+// F39 — the shot rides the choreography's converge/diverge phase.
+g.condense(["check", "deploy"], { id: "ship" }, { camera: true });
+g.split("ship", { nodes: [{ id: "check" }, { id: "deploy" }] }, { camera: { fit: true, pad: 40 } });
 
 g.style((n: NodeSpec) => (n.data && n.data.status === "done" ? { "--smv-fill": "#e8f6ec" } : null));
 g.theme("dark");
@@ -278,6 +281,8 @@ const steps: StoryboardStep[] = [
   { op: "update", args: ["s1", { label: "Step one" }, { camera: true }] },
   { op: "layout", args: [{ dir: "TB" }, { camera: true }] },
   { op: "condense", args: [["build.compile", "build.link"], { id: "build" }] },
+  { op: "condense", args: [["s1", "build"], { id: "merged" }, { camera: true }] },
+  { op: "split", args: ["merged", { nodes: [{ id: "s1" }, { id: "build" }] }, { camera: { k: 1.1 } }] },
   { op: "run.play", until: "deploy" },
   { op: "batch", steps: [{ op: "run.step" }, { op: "run.seek", ms: 0 }] },
   // F5 — the run-shaped and structural ops.

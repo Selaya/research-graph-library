@@ -390,12 +390,15 @@ close-up (`k` / `maxK` still win). Taking the shot takes the camera exactly as
 instead of a warning. In a storyboard: `{ "op": "expand", "args": ["clean", { "camera": true }] }`.
 
 **Framing any mutation.** The same option is on every op that re-lays the graph out —
-`addNode`, `addEdge`, `removeNode`, `removeEdge`, `update` and `layout` — because "add
-this and show me it" has the same problem: the shot depends on where the new node *lands*,
-which no `camera` step can know until the add has already committed. `true` frames the
-op's subject: the added or patched node (with `after`, that node and the one it hangs
-off), an edge's two endpoints; ops with no one subject (a remove, `layout`) fit the whole
-graph. Inside a `batch` a child's shot is composed against the batch's single commit:
+`addNode`, `addEdge`, `removeNode`, `removeEdge`, `update`, `layout`, and the `condense` /
+`split` choreographies — because "add this and show me it" has the same problem: the shot
+depends on where the new node *lands*, which no `camera` step can know until the add has
+already committed. For `condense` it is worse: the merged id does not exist until the
+converge phase, so a `camera({node})` before the step warns and one after it starts 900ms
+late. `true` frames the op's subject: the added or patched node (with `after`, that node
+and the one it hangs off), an edge's two endpoints, the merged node, the union of a
+split's parts; ops with no one subject (a remove, `layout`) fit the whole graph. Inside a
+`batch` a child's shot is composed against the batch's single commit:
 
 ```js
 await g.addNode({ id: "deploy" }, { after: "test", camera: true });     // frame test + deploy
@@ -404,6 +407,7 @@ g.batch((b) => {                                                        // one c
   b.addEdge(e);
 });
 await g.layout({ dir: "TB" }, { camera: true });   // refit after a direction change
+await g.condense(["x", "y", "z"], { id: "clean" }, { camera: true });  // frame the merge as it lands
 ```
 
 Without it, `layout({ dir })` under a script-owned camera re-flows the drawing under a

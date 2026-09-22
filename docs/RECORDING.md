@@ -126,6 +126,22 @@ the node has already bloomed wherever the anchored viewport left it.
   the camera: the relayout re-flows the drawing under the old shot for a whole commit
   before the fit catches up. `layout(o, {camera: true})` is one tween.
 
+**`condense` / `split` with `camera`** — the same option in the third slot (F39), riding
+the choreography's converge / diverge phase:
+
+```json
+{ "op": "condense", "args": [["miss", "fetch", "fill"], { "id": "readthrough" }, { "camera": true }] }
+{ "op": "split", "args": ["assemble", { "nodes": [...], "edges": [...] }, { "camera": { "fit": true } }] }
+```
+
+- **Do not write** `condense(ids, node)` then `camera({node: node.id})`: the merged id does
+  not exist until 150ms into the choreography, so a shot placed *before* the step warns
+  (`unknown node id`) and one placed *after* it starts 900ms late, over a graph the converge
+  already moved under an anchored viewport. `true` frames the merged node — or, on `split`,
+  the union of the parts — exactly where the converge lands it, in the same tween the
+  sources fly into it; the reveal pulse then plays on a framed node. The step is still
+  priced at 900 (`dur` overrides), and the shot rides the converge's 450, not the step.
+
 **`highlight`** — emphasis, replace-not-accumulate: one call IS the emphasis state, so
 you never clear the previous one first.
 

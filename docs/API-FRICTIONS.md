@@ -211,6 +211,26 @@ its clock; inside a `batch`, composed against the batch's one commit. `true` fra
 op's subject (the node, the edge's endpoints, `[after, id]`), or fits the graph when the
 op has no one subject.
 
+### F39. The merged node cannot be framed: it does not exist before the condense, and the camera is late after it
+**Observed in:** `seq-cache-aside` (l.245–249), `recipe-dag` (l.232–235, 241–244),
+`employee-onboarding` (l.278–282), `sequential-vs-parallel` (l.506–509, `fitSide` after a
+programmatic condense).
+Every page that condenses or splits wants the camera on the result. It cannot be
+composed: a `camera({node: merged.id})` step *before* the condense warns (`[smv:camera]
+unknown node id`) because the id is minted 150ms into the choreography; the F16 resolver
+maps a collapsed descendant to its drawn ancestor, not an unborn id to anything. A camera
+step *after* the condense starts 900ms later, once the converge has already flown the
+sources into a spot the anchored viewport (D10) chose — the merged node blooms wherever
+that was, then the camera pans to it, and the reveal pulse plays on a node that is still
+being framed. `seq-cache-aside` pins an explicit `k: 1.1` on that trailing shot to keep
+the pan from also zooming; `recipe-dag` and `employee-onboarding` settle for a `camera({fit})`
+after the fact. The right shot depends on a layout that only exists mid-choreography, and
+the phase that produces it already goes through `relayout()`.
+**Recommendation (S):** a third argument, `condense(ids, node, { camera })` / `split(id,
+parts, { camera })`, forwarded to the choreography's converge/diverge relayout so it rides
+that phase's tween and is resolved against the merged layout. `true` frames the merged
+node / the union of the parts.
+
 ### F18. `props()` replaces rather than merges, and out-ranks status styling
 **Observed in:** `agent-swarm`, `seq-saga`.
 Recolouring one node from an event handler wipes every other node's override unless the
@@ -416,6 +436,7 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 | F35 | done | a container the solver omitted is derived from its children alone (an empty one warns) |
 | F36 | done | `autoplay: 'auto'` honours `?auto=1`; `g.finished` / `g.finish(reason)`; `check-demos.mjs` awaits `window.smv.finished` |
 | F37 | done | `expand/collapse/expandAll/collapseAll(…, { camera })` frame the post-toggle layout in the toggle's own tween; storyboard args carry it; D13 ownership |
+| F39 | done | `condense(ids, node, { camera })` / `split(id, parts, { camera })` frame the merged node / the parts' union in the converge/diverge tween |
 | F38 | done | `addNode/addEdge/removeNode/removeEdge/update(…, { camera })` and `layout(o, { camera })` frame the op's subject against the layout it produces, on its own clock; a batch child's shot rides the batch's one commit |
 
 ## Suggested order

@@ -64,6 +64,8 @@ const PARALLEL_IN_BATCH = new Set(["wait", "camera", "condense", "split"]);
 const MUTATION_CAMERA_ARG = {
   expand: 1, collapse: 1, expandAll: 0, collapseAll: 0, update: 2,
   addNode: 1, addEdge: 1, removeNode: 1, removeEdge: 1, layout: 1,
+  // F39 — the choreographies: the shot rides their converge/diverge relayout.
+  condense: 2, split: 2,
 };
 
 /** True when `steps` (batches included) contains at least one camera op — or a mutation op
@@ -1147,8 +1149,12 @@ export function mount(el, spec = {}, opts = {}) {
       }, { applied: true });
     },
 
-    /** D6 — merge N nodes into one over the 3-phase choreography. Guards fire synchronously. */
-    condense(ids, node) {
+    /** D6 — merge N nodes into one over the 3-phase choreography. Guards fire synchronously.
+     *  F39 — `{camera}` frames the MERGED node (or the target you name) in the converge
+     *  phase's own tween: the id does not exist until that phase, so a camera step before
+     *  the condense cannot name it, and one after it starts 900ms late over a graph the
+     *  converge already moved under an anchored viewport. See shotFor(). */
+    condense(ids, node, o = {}) {
       const list = [...ids];
       for (const id of list) if (!store.hasNode(id)) throw new GraphError("missing", `node "${id}" does not exist`);
       if (!node || node.id == null || node.id === "") throw new GraphError("node-id", "condense needs a new node with a non-empty id");
@@ -1159,14 +1165,15 @@ export function mount(el, spec = {}, opts = {}) {
       if (!isConvex(store, containmentClosure(store, list))) {
         throw new GraphError("non-convex", `condense set [${list.join(", ")}] is not convex: a path leaves the set and re-enters`);
       }
-      const run = runCondense(g, internals, list, node);
+      const run = runCondense(g, internals, list, node, { camera: shotFor(o && o.camera, node.id) });
       return thenable(run.promise, run.cancel);
     },
 
     /** D6 inverse — one node becomes N. Same discipline as condense: every guard that
      *  store.split() will apply is asked here, synchronously, so a bad call throws at the
-     *  call site instead of 150ms later out of runSplit's async phase 2. */
-    split(id, parts) {
+     *  call site instead of 150ms later out of runSplit's async phase 2. F39 — `{camera}`
+     *  frames the union of the parts in the diverge phase's tween, as on condense(). */
+    split(id, parts, o = {}) {
       if (!store.hasNode(id)) throw new GraphError("missing", `node "${id}" does not exist`);
       if (store.children(id).length > 0) {
         throw new GraphError("split-container", `node "${id}" is a container (has children) and cannot be split`);
@@ -1197,7 +1204,7 @@ export function mount(el, spec = {}, opts = {}) {
       if (outg && list.every((n) => fedOut.has(n.id))) {
         throw new GraphError("split-no-exit", `split of "${id}" has no exit node to redirect its ${outg} outgoing edge(s) from`);
       }
-      const run = runSplit(g, internals, id, parts);
+      const run = runSplit(g, internals, id, parts, { camera: shotFor(o && o.camera, list.map((n) => n.id)) });
       return thenable(run.promise, run.cancel);
     },
 
