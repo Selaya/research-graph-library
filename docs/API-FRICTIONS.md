@@ -1,9 +1,19 @@
 # API frictions found while building the demo gallery
 
 **Status: resolved, except F2 (L) and F19, which are proposed in `docs/PLAN.md` (D18, D19)
-and not implemented.** The table under **Resolution** at the end says what each item became;
-the item text below is kept as written, as the record of what the gallery hit and why. The
-demo pages were rewritten in the same round to drop the workarounds this document describes.
+and not implemented, and F42 (M), proposed below with an API sketch.** The table under
+**Resolution** at the end says what each item became; the item text below is kept as
+written, as the record of what the gallery hit and why. The demo pages were rewritten in
+the same round to drop the workarounds this document describes.
+
+F37–F42 came from a second pass with a different lens: not "what did the gallery have to
+work around" but "where does a script author — an AI assistant in particular — have to
+compose two to four primitives in a fixed order, and get a visibly wrong result (a
+stutter, an overflow, a warning, a clock that lies) from the obvious ordering". Each one
+is a case where the right shot or beat depends on state that does not exist until the
+first primitive commits, so no ordering could compose it; the fix in every case is an
+option on the mutation that owns that state. The candidates that turned out to be
+already covered, or not worth an API, are listed under **Considered and dropped**.
 
 This document collects every rough edge the demo builders hit while producing the
 27 use-case demos under `demo/` (18 pipeline, agent and live-mode pages, then 9 sequence-diagram
@@ -269,6 +279,51 @@ routed through ONE toggle function that `interact.js` and `a11y.js` both call, s
 and an Enter frame identically. It is the reader's move, so it flips `userMoved` (as a pan
 does) but never takes the camera from a storyboard (D13).
 
+### F42. A run cannot be followed: framing the active token is a per-event camera call
+**Observed in:** `incident-postmortem` (l.493, `if (ev.cam) g.camera(ev.cam)` on every
+feed line), `seq-trace-live` (l.405–408, a camera per span start), `prompt-chain-debugger`
+(l.438, 465), and the Mode A pages that narrate off `run.on(...)` — `tool-use-loop`,
+`agent-swarm`, `ab-experiment`.
+A story that plays a run and wants the camera on the ball has no op for it: `run.play` is
+one step, priced off the compiled transport, and the camera can only be moved between
+steps. So pages hang `g.camera({node})` off `run.on('enter')` / `start` events — one call
+per hop, each a 600ms tween that lands after the token has already moved on, all of them
+outside the declared timeline (they are not steps, so `cues()` and `smv-record` do not
+see them, and a backward scrub does not restore them: the F19 shape). Fan-outs make it
+worse: N tokens, N competing camera calls, the last one wins.
+**Recommendation (M, proposed):** a `follow` option on the run step —
+`{ "op": "run.play", "args": [{ "until": "gate", "follow": true }] }`, or `follow: { pad,
+maxK }` — that keeps the viewport on the union of the nodes currently occupied by
+tokens, retargeted on the run's own clock (a `moveTo` per `enter`/`start`, with the union
+lidded at `NODES_MAX_K` so a fan-out pulls back rather than thrashing), and hands the
+camera back at the step's end. It is M rather than S because three things have to be
+decided first: (1) D13 ownership inside one step — the viewport must be snapshotted for
+the seek *into* a followed `run.play` to land the camera where the run's clock has it,
+which the per-step snapshot cannot express today; (2) a `run.seek` inside the step must
+reposition the camera from the schedule, not replay tweens; (3) live mode has `follow()`
+already — for the *clock* — and the option should not collide with it in name or in
+`run.options()`.
+
+### Considered and dropped
+
+Candidates from the same pass that turned out to be covered, or not to need an API.
+
+- **`highlight` + `camera` on the same set** (`employee-onboarding` l.254–255,
+  `llm-eval-harness` l.288–289, `ci-matrix` l.241–242, and most `seq-*` pages). Two steps,
+  but both correct: the highlight is a 0ms flip and the camera a tween, and either order
+  reads as intended. A `camera: true` on `highlight` would be sugar over a composition
+  that is not wrong. Dropped.
+- **`collapse` then `fitView`.** Covered by F37 (`collapse(id, { camera: { fit: true } })`).
+- **`layout({ dir })` leaving the camera stale.** Folded into F38 (`layout(o, { camera })`).
+- **Mount-time `storyboard` + `autoplay` boilerplate.** Covered by F36; the `__smvExit`
+  lines the pages still carry are the older checker hook, kept on purpose.
+- **A `caption` that clears itself after its hold.** F40 makes `dur` the hold; where the
+  clear sits (`caption(null)`, a 0ms flip) is editorial — some pages let the next caption
+  replace the last, others clear before a camera move. Dropped.
+- **`{camera}` on `batch()` itself.** A child's option already composes against the
+  batch's one commit (F37/F38), and `g.batch(fn, opts)` would put a presentation option
+  on an op whose only job is to coalesce. Dropped.
+
 ### F18. `props()` replaces rather than merges, and out-ranks status styling
 **Observed in:** `agent-swarm`, `seq-saga`.
 Recolouring one node from an event handler wipes every other node's override unless the
@@ -474,6 +529,7 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 | F35 | done | a container the solver omitted is derived from its children alone (an empty one warns) |
 | F36 | done | `autoplay: 'auto'` honours `?auto=1`; `g.finished` / `g.finish(reason)`; `check-demos.mjs` awaits `window.smv.finished` |
 | F37 | done | `expand/collapse/expandAll/collapseAll(…, { camera })` frame the post-toggle layout in the toggle's own tween; storyboard args carry it; D13 ownership |
+| F42 | proposed | `run.play({ follow })` — keep the viewport on the occupied nodes on the run's own clock; needs a D13 decision for seeks into the step (sketch above) |
 | F41 | done | `interaction: { tapToggle: { camera } }` — the reader's tap and Enter/Space toggle both frame through one `readerToggle`; `userMoved` flips, D13 ownership does not |
 | F40 | done | a `dur` on `caption`/`highlight`/`clearHighlight`/`props`/`run.step`/`run.seek` is held on the shared clock (skipped on a scrub), so declared = awaited; a held batch child counts toward the batch |
 | F39 | done | `condense(ids, node, { camera })` / `split(id, parts, { camera })` frame the merged node / the parts' union in the converge/diverge tween |
@@ -488,3 +544,4 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 3. F25 (edge labels), F27 (click events), F18 (props merge) — presentation gaps the sequence
    diagrams made obvious.
 4. F2 and F19 — larger design work, worth a docs/PLAN.md decision first.
+5. F42 (follow the run) — an M with the same D13 question F19 has; decide them together.
