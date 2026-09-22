@@ -64,9 +64,13 @@ function centroid(nodes, ids) {
  * @param {object} internals { ticker, store, bus, relayout, mark, reduced }
  * @param {string[]} ids     the source nodes to merge
  * @param {object} newNodeSpec the merged node
+ * @param {object} [opts]     `{camera}` — F39: a CameraTarget (already normalised by
+ *                            index.js's shotFor) that rides the converge relayout, so the
+ *                            merged node is framed where it LANDS, in the same tween the
+ *                            sources fly into it. Absent, the converge keeps the D10 anchor.
  * @returns {{promise: Promise<{canceled:boolean, applied:boolean, ids?:{created:string[],removed:string[]}}>, cancel: () => void}}
  */
-export function runCondense(g, internals, ids, newNodeSpec) {
+export function runCondense(g, internals, ids, newNodeSpec, opts = {}) {
   const { ticker, store, bus, relayout } = internals;
   const ms = (n) => (internals.reduced ? 1 : n); // G9 — phases shrink, sequencing survives
   const sources = [...ids];
@@ -125,6 +129,7 @@ export function runCondense(g, internals, ids, newNodeSpec) {
     const tr = relayout({
       focal: target,
       duration: ms(CONDENSE_PHASES.converge),
+      camera: opts.camera || null,
       enterFrom: (res, prev) => {
         const c = prev && centroid(prev.nodes, sources);
         return c ? { [target]: c } : {};

@@ -51,9 +51,10 @@ function awaitTransition(ticker, tr) {
  * @param {object} internals  { ticker, store, bus, relayout, mark, reduced }
  * @param {string} id         the node being split
  * @param {object} parts      { nodes, edges? } — store.split()'s second argument
+ * @param {object} [opts]     `{camera}` — F39, exactly as runCondense's: rides the diverge
  * @returns {{promise: Promise<{canceled:boolean, applied:boolean, ids?:{created:string[],removed:string[]}}>, cancel: () => void}}
  */
-export function runSplit(g, internals, id, parts) {
+export function runSplit(g, internals, id, parts, opts = {}) {
   const { ticker, store, bus, relayout } = internals;
   const ms = (n) => (internals.reduced ? 1 : n); // G9 — phases shrink, sequencing survives
   const mark = (list, value) => internals.mark && internals.mark(list, value);
@@ -97,6 +98,8 @@ export function runSplit(g, internals, id, parts) {
     const tr = relayout({
       focal: targets[0],
       duration: ms(SPLIT_PHASES.diverge),
+      // F39 — the shot rides the diverge, as on condense (see runCondense's `opts`).
+      camera: opts.camera || null,
       enterFrom: (res, prev) => {
         const c = prev && prev.nodes && prev.nodes[id];
         if (!c) return {};

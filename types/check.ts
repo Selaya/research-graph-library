@@ -25,6 +25,8 @@ import {
   type StoryboardStep,
   type Timeline,
   type CameraTarget,
+  type MutationOpts,
+  type AddNodeOpts,
   type HighlightSelection,
   type PropsOverride,
   type Cue,
@@ -119,6 +121,22 @@ g.collapse("clean", { camera: { fit: true } });
 g.expandAll({ camera: true });
 g.collapseAll({ camera: { nodes: ["ingest", "build"] } });
 g.update("clean", { collapsed: false }, { camera: true });
+// F38 — the same option on every relayout-producing mutation, framing the op's subject.
+g.addNode({ id: "deploy", label: "Deploy" }, { after: "check", camera: true });
+g.addNode({ id: "notify", label: "Notify" }, { camera: { nodes: ["deploy", "notify"], maxK: 1, pad: 120 } });
+g.addEdge({ id: "e6", source: "deploy", target: "notify" }, { camera: true });
+g.update("deploy", { label: "Deploy to production" }, { camera: { pad: 40 } });
+g.removeEdge("e6", { camera: true });
+g.removeNode("notify", { camera: { fit: true } });
+const relaid: Awaitable = g.layout({ dir: "TB" }, { camera: true });
+void relaid;
+const mutOpts: MutationOpts = { camera: { fit: true, pad: 32 } };
+// F41 — the reader's toggle frames what it opens, on both the tap and the keyboard path.
+const tapOpts: MountOpts = { interaction: { tapToggle: { camera: true } } };
+const tapOpts2: MountOpts = { interaction: { tapToggle: { camera: { pad: 60, ease: "cubic-in-out" } }, click: false } };
+void [tapOpts, tapOpts2];
+const addOpts: AddNodeOpts = { after: "check", camera: true };
+void [mutOpts, addOpts];
 
 // condense()/split() resolve the created/removed ids once the merge/split actually lands
 // (`applied:true`) — `ids` is optional because a run canceled before that never happened.
@@ -134,6 +152,9 @@ splitAwaitable.then((r) => { if (r.applied && r.ids) { const created: string[] =
 // `parent: null` on the merged spec = "inherit the sources' common parent".
 const condenseAwaitable: Awaitable<CondenseSplitResult> = g.condense(["build.compile", "build.link"], { id: "build", parent: null });
 void condenseAwaitable;
+// F39 — the shot rides the choreography's converge/diverge phase.
+g.condense(["check", "deploy"], { id: "ship" }, { camera: true });
+g.split("ship", { nodes: [{ id: "check" }, { id: "deploy" }] }, { camera: { fit: true, pad: 40 } });
 
 g.style((n: NodeSpec) => (n.data && n.data.status === "done" ? { "--smv-fill": "#e8f6ec" } : null));
 g.theme("dark");
@@ -254,7 +275,18 @@ const steps: StoryboardStep[] = [
   { op: "expand", args: ["clean", { camera: true }] },
   { op: "collapse", args: ["clean", { camera: { fit: true } }] },
   { op: "expandAll", args: [{ camera: true }] },
+  // F38 — a child's shot composes against the batch's one commit (the seq-diagram idiom).
+  { op: "batch", steps: [
+    { op: "addNode", args: [{ id: "s2", label: "Step 2" }, { camera: { nodes: ["s1", "s2"], maxK: 1 } }] },
+    { op: "addEdge", args: [{ id: "s1-s2", source: "s1", target: "s2" }] },
+  ], dur: 300 },
+  { op: "removeEdge", args: ["s1-s2", { camera: true }] },
+  { op: "removeNode", args: ["s2", { camera: { fit: true } }] },
+  { op: "update", args: ["s1", { label: "Step one" }, { camera: true }] },
+  { op: "layout", args: [{ dir: "TB" }, { camera: true }] },
   { op: "condense", args: [["build.compile", "build.link"], { id: "build" }] },
+  { op: "condense", args: [["s1", "build"], { id: "merged" }, { camera: true }] },
+  { op: "split", args: ["merged", { nodes: [{ id: "s1" }, { id: "build" }] }, { camera: { k: 1.1 } }] },
   { op: "run.play", until: "deploy" },
   { op: "batch", steps: [{ op: "run.step" }, { op: "run.seek", ms: 0 }] },
   // F5 — the run-shaped and structural ops.
@@ -301,6 +333,9 @@ const directed: StoryboardStep[] = [
   { op: "camera", args: [{ node: "clean", dur: 700 }], dur: 700 },
   { op: "highlight", args: [{ nodes: ["clean"], dim: true }] },
   { op: "caption", args: ["Cleaning the data", { place: "bottom" }] },
+  // F40 — a `dur` on a discrete step is its hold.
+  { op: "caption", args: ["Hold this line", { place: "bottom" }], dur: 1500 },
+  { op: "highlight", args: [{ nodes: ["clean"], pulse: true }], dur: 800 },
   { op: "props", args: [{ clean: { "--smv-fill": "#7c5cff" } }, { merge: true }] },
   { op: "props", args: [{ clean: null }, { merge: true }] },
   { op: "wait", ms: 800 },

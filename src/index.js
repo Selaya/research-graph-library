@@ -52,26 +52,37 @@ const DIRECTOR_OPS = new Set(["camera", "highlight", "clearHighlight", "caption"
 
 /** Inside a batch, these are the ops that keep their own clock instead of folding into the
  *  one shared relayout — so they, and only they, can make the batch step cost more than
- *  that commit (D12: the declared duration must be the awaited one). */
-const PARALLEL_IN_BATCH = new Set(["wait", "camera", "condense", "split"]);
+ *  that commit (D12: the declared duration must be the awaited one). F40 — the discrete
+ *  ops are here too: bare they cost 0 and change nothing, but a child declaring `dur` is a
+ *  HOLD (see applyStep), and a hold runs alongside the commit like a `wait` does. */
+const PARALLEL_IN_BATCH = new Set([
+  "wait", "camera", "condense", "split",
+  "highlight", "clearHighlight", "caption", "props", "run.step", "run.seek",
+]);
 
-/** F37 — the mutation ops that take a `{camera}` option (a shot resolved against the layout
- *  the mutation itself produces, flown on the mutation's own clock), and which `args` slot
- *  their options object sits in. `update` counts because a `collapsed` patch IS a toggle. */
-const TOGGLE_CAMERA_ARG = { expand: 1, collapse: 1, expandAll: 0, collapseAll: 0, update: 2 };
+/** F37/F38 — the mutation ops that take a `{camera}` option (a shot resolved against the
+ *  layout the mutation itself produces, flown on the mutation's own clock), and which `args`
+ *  slot their options object sits in. F37 covered the toggles; F38 extends it to every op
+ *  that produces a relayout, because "add this and show me it" has the same shape as "open
+ *  this and show me it": the right shot depends on a layout that does not exist until the
+ *  commit, so no ordering of `addNode` + `camera` can compose it. */
+const MUTATION_CAMERA_ARG = {
+  expand: 1, collapse: 1, expandAll: 0, collapseAll: 0, update: 2,
+  addNode: 1, addEdge: 1, removeNode: 1, removeEdge: 1, layout: 1,
+  // F39 — the choreographies: the shot rides their converge/diverge relayout.
+  condense: 2, split: 2,
+};
 
-/** True when `steps` (batches included) contains at least one camera op — or a toggle op
+/** True when `steps` (batches included) contains at least one camera op — or a mutation op
  *  carrying `{camera}`, which composes a shot just the same — D13's trigger for the script
  *  taking ownership of the viewport. */
 function hasCameraOp(steps) {
   return (steps || []).some((s) => {
     if (!s) return false;
     if (s.op === "camera") return true;
-    const at = TOGGLE_CAMERA_ARG[s.op];
+    const at = MUTATION_CAMERA_ARG[s.op];
     if (at !== undefined) {
       const a = s.args || [];
-      // update() only reads `camera` off a patch that carries `collapsed` (the toggle route).
-      if (s.op === "update" && !(a[1] && a[1].collapsed !== undefined)) return false;
       return !!(a[at] && a[at].camera);
     }
     if (s.op !== "batch") return false;
@@ -408,7 +419,7 @@ export function mount(el, spec = {}, opts = {}) {
         batchExtra.enterFrom.push(...asList(extra.enterFrom));
         batchExtra.exitTo.push(...asList(extra.exitTo));
         Object.assign(batchExtra.easeOverride, extra.easeOverride);
-        // One commit, one camera: the last toggle in the batch to name a shot composes it.
+        // One commit, one camera: the last op in the batch to name a shot composes it.
         if (extra.camera) batchExtra.camera = extra.camera;
       }
       const d = batchDefer;
@@ -423,20 +434,27 @@ export function mount(el, spec = {}, opts = {}) {
    *  container) — `applied:false` says nothing actually changed. */
   const settled = () => thenable(Promise.resolve({ canceled: false, applied: false }), () => {});
 
-  /** F37 — the `{camera}` option on a toggle op, normalised to a CameraTarget. `true` frames
-   *  the toggled container itself (`fit: true` for expandAll/collapseAll, which have no one
-   *  subject); an object is a target in its own right, and one that names no box at all
-   *  (`{ pad: 60 }`, say) frames `id`. A fitted scale is lidded at NODES_MAX_K the way a
-   *  `nodes[]` union is: the shot means "watch this open", not "fill the pane with it" — a
-   *  collapsed stub framed at k=4 is a close-up nobody asked for. `k` or `maxK` on the
-   *  target still wins, as everywhere else. Null when the option is absent or false. */
-  function shotFor(camera, id) {
+  /** F37/F38 — the `{camera}` option on a mutation op, normalised to a CameraTarget. `true`
+   *  frames the mutation's SUBJECT — `subject` is the one id (a toggled container, an added
+   *  or patched node), a list of ids (an added edge's two endpoints, a node and the one it
+   *  was added `after`), or nothing for an op with no one subject (the -All toggles, a
+   *  remove, a relayout), which fits the whole graph. An object is a target in its own
+   *  right, and one that names no box at all (`{ pad: 60 }`, say) frames the subject with
+   *  those options. A fitted scale is lidded at NODES_MAX_K the way a `nodes[]` union is:
+   *  the shot means "watch this land", not "fill the pane with it" — a lone node framed at
+   *  k=4 is a close-up nobody asked for. `k` or `maxK` on the target still wins, as
+   *  everywhere else. Null when the option is absent or false. */
+  function shotFor(camera, subject) {
     if (!camera) return null;
     const o = typeof camera === "object" ? { ...camera } : {};
     const framed = Number.isFinite(o.x) || Number.isFinite(o.y) || o.node != null || Array.isArray(o.nodes) || o.fit === true;
-    if (!framed) { if (id != null) o.node = id; else o.fit = true; }
+    if (!framed) {
+      if (Array.isArray(subject)) { if (subject.length) o.nodes = [...subject]; else o.fit = true; }
+      else if (subject != null) o.node = subject;
+      else o.fit = true;
+    }
     if (o.k === undefined && o.maxK === undefined) o.maxK = NODES_MAX_K;
-    delete o.dur; // the shot rides the toggle's clock (step `dur` / animation.duration), never its own
+    delete o.dur; // the shot rides the mutation's clock (step `dur` / animation.duration), never its own
     return o;
   }
 
@@ -582,8 +600,29 @@ export function mount(el, spec = {}, opts = {}) {
     const prevDur = stepDur, prevInstant = instant;
     stepDur = step.dur ?? null;
     if (scrubDepth > 0 && DIRECTOR_OPS.has(step.op)) instant = true;
-    try { return applyOp(step); }
-    finally { stepDur = prevDur; instant = prevInstant; }
+    try {
+      const r = applyOp(step);
+      // F40 — a `dur` on a step that hands nothing back to await is a HOLD. durOf() prices
+      // every op at `step.dur` first, so `{op:"caption", args:[text], dur:1600}` was already
+      // worth 1600 on the scrubber and the cue sheet — but g.caption() returns `g`, the
+      // sequencer had nothing to wait for, and the story moved on at once: the declared
+      // timeline and the awaited one disagreed (the exact thing D12 forbids), and pages
+      // wrote the beat as caption + wait + caption(null) instead. Holding on the shared
+      // clock makes the declaration true. `run`/`run.reset` are excluded because durOf()
+      // prices them at 0 before it reads `dur`; a forward scrub skips the hold the way it
+      // snaps every director op to zero (you asked for a position, not a screening).
+      if (holdFor(step, r)) return waitMs(stepDur);
+      return r;
+    } finally { stepDur = prevDur; instant = prevInstant; }
+  }
+
+  /** True when `r` is not something the sequencer will wait on (`g` itself, or nothing —
+   *  never a thenable, never a `run.play` `{run}`) and the step declared a positive `dur`. */
+  function holdFor(step, r) {
+    if (!(stepDur > 0) || scrubDepth > 0) return false;
+    if (step.op === "run" || step.op === "run.reset") return false;
+    if (r && (typeof r.then === "function" || (r.run && typeof r.run === "object"))) return false;
+    return true;
   }
 
   function applyOp(step) {
@@ -949,6 +988,11 @@ export function mount(el, spec = {}, opts = {}) {
     bounds() { return last && last.bounds; },
     layoutResult() { return last; },
 
+    /** `{after}` also mints the `after -> id` edge. F38 — `{camera}` frames the new node
+     *  (with `after`, the new node AND the one it hangs off) in the add's own tween, resolved
+     *  against the layout the add produces: the shot a script used to chase with a second
+     *  `camera({nodes: [prev, id]})` step, which could only start once the node had already
+     *  bloomed wherever the anchored viewport left it. See shotFor(). */
     addNode(node, o = {}) {
       const n = store.addNode(node);
       bus.emit("add", { kind: "node", id: n.id, item: n });
@@ -959,16 +1003,21 @@ export function mount(el, spec = {}, opts = {}) {
       // `applied` is unconditionally true from here down: the store mutation above already
       // happened synchronously, and cancel() only ever interrupts the relayout tween, never
       // undoes it (finding #4).
-      return commitOrDefer(n.id, undefined, { applied: true });
+      const shot = shotFor(o.camera, o.after != null ? [o.after, n.id] : n.id);
+      return commitOrDefer(n.id, shot && { camera: shot }, { applied: true });
     },
 
-    addEdge(edge) {
+    /** F38 — `{camera: true}` frames the edge's two endpoints in the same tween. */
+    addEdge(edge, o = {}) {
       const e = store.addEdge(edge);
       bus.emit("add", { kind: "edge", id: e.id, item: e });
-      return commitOrDefer(e.target, undefined, { applied: true });
+      const shot = shotFor(o && o.camera, [e.source, e.target]);
+      return commitOrDefer(e.target, shot && { camera: shot }, { applied: true });
     },
 
-    removeNode(id) {
+    /** F38 — `{camera: true}` fits what is LEFT, in the remove's own tween: there is no one
+     *  subject to frame once it is gone. */
+    removeNode(id, o = {}) {
       const edgesBefore = new Set(store.edges.keys());
       const removed = store.removeNode(id);
       for (const r of removed) bus.emit("remove", { kind: "node", id: r });
@@ -981,24 +1030,29 @@ export function mount(el, spec = {}, opts = {}) {
       }
       // The doomed cascade (store.js's removeNode): `id` plus every descendant it swallowed,
       // and every edge left dangling by any of them.
-      return commitOrDefer(null, undefined, {
+      const shot = shotFor(o && o.camera, null);
+      return commitOrDefer(null, shot && { camera: shot }, {
         applied: true,
         ids: { nodes: [...removed], edges: removedEdges },
       });
     },
 
-    removeEdge(id) {
+    /** F38 — `{camera}` as on removeNode(). */
+    removeEdge(id, o = {}) {
       store.removeEdge(id);
       pinnedReversals.delete(id);
       bus.emit("remove", { kind: "edge", id });
-      return commitOrDefer(null, undefined, { applied: true });
+      const shot = shotFor(o && o.camera, null);
+      return commitOrDefer(null, shot && { camera: shot }, { applied: true });
     },
 
     /** `patch.data` merges; `data: { key: undefined }` REMOVES that key, and
      *  `{ replace: true }` swaps the whole `data` payload instead of merging into it.
      *  `collapsed` is not stored view state — it is folded into the view once, at first
      *  sight — so a `collapsed` patch is routed to the real expand()/collapse() rather
-     *  than quietly doing nothing — `opts.camera` (F37) rides along with it. */
+     *  than quietly doing nothing — `opts.camera` (F37) rides along with it. On any other
+     *  patch `opts.camera` frames the patched node in the update's own tween (F38): a
+     *  relabel that widens a box is framed at the width it is heading to. */
     update(id, patch, o) {
       const item = store.update(id, patch, o);
       bus.emit("update", { id, patch, item });
@@ -1008,10 +1062,15 @@ export function mount(el, spec = {}, opts = {}) {
         const view = patch.collapsed ? g.collapse(id, o) : g.expand(id, o);
         // Only the view half went through expand()/collapse(). When that actually moved,
         // its relayout carries the rest of the patch too; when it was a no-op (already in
-        // that state) the other fields in the same patch still have to reach the screen.
+        // that state) the other fields in the same patch still have to reach the screen —
+        // and the shot the no-op already flew is retargeted onto that commit (D9).
         if (vs.collapsed.has(id) !== was || Object.keys(patch).every((k) => k === "collapsed")) return view;
       }
-      return commitOrDefer(store.hasNode(id) ? id : null, undefined, { applied: true });
+      const subject = store.hasNode(id) ? id : null;
+      // An edge patch frames its endpoints, the way addEdge() does.
+      const e = subject ? null : store.edge(id);
+      const shot = shotFor(o && o.camera, subject || (e ? [e.source, e.target] : null));
+      return commitOrDefer(subject, shot && { camera: shot }, { applied: true });
     },
 
     /** F30 — dry-run the structural guards. `ops` is either a `batch()`-shaped function
@@ -1116,8 +1175,12 @@ export function mount(el, spec = {}, opts = {}) {
       }, { applied: true });
     },
 
-    /** D6 — merge N nodes into one over the 3-phase choreography. Guards fire synchronously. */
-    condense(ids, node) {
+    /** D6 — merge N nodes into one over the 3-phase choreography. Guards fire synchronously.
+     *  F39 — `{camera}` frames the MERGED node (or the target you name) in the converge
+     *  phase's own tween: the id does not exist until that phase, so a camera step before
+     *  the condense cannot name it, and one after it starts 900ms late over a graph the
+     *  converge already moved under an anchored viewport. See shotFor(). */
+    condense(ids, node, o = {}) {
       const list = [...ids];
       for (const id of list) if (!store.hasNode(id)) throw new GraphError("missing", `node "${id}" does not exist`);
       if (!node || node.id == null || node.id === "") throw new GraphError("node-id", "condense needs a new node with a non-empty id");
@@ -1128,14 +1191,15 @@ export function mount(el, spec = {}, opts = {}) {
       if (!isConvex(store, containmentClosure(store, list))) {
         throw new GraphError("non-convex", `condense set [${list.join(", ")}] is not convex: a path leaves the set and re-enters`);
       }
-      const run = runCondense(g, internals, list, node);
+      const run = runCondense(g, internals, list, node, { camera: shotFor(o && o.camera, node.id) });
       return thenable(run.promise, run.cancel);
     },
 
     /** D6 inverse — one node becomes N. Same discipline as condense: every guard that
      *  store.split() will apply is asked here, synchronously, so a bad call throws at the
-     *  call site instead of 150ms later out of runSplit's async phase 2. */
-    split(id, parts) {
+     *  call site instead of 150ms later out of runSplit's async phase 2. F39 — `{camera}`
+     *  frames the union of the parts in the diverge phase's tween, as on condense(). */
+    split(id, parts, o = {}) {
       if (!store.hasNode(id)) throw new GraphError("missing", `node "${id}" does not exist`);
       if (store.children(id).length > 0) {
         throw new GraphError("split-container", `node "${id}" is a container (has children) and cannot be split`);
@@ -1166,7 +1230,7 @@ export function mount(el, spec = {}, opts = {}) {
       if (outg && list.every((n) => fedOut.has(n.id))) {
         throw new GraphError("split-no-exit", `split of "${id}" has no exit node to redirect its ${outg} outgoing edge(s) from`);
       }
-      const run = runSplit(g, internals, id, parts);
+      const run = runSplit(g, internals, id, parts, { camera: shotFor(o && o.camera, list.map((n) => n.id)) });
       return thenable(run.promise, run.cancel);
     },
 
@@ -1295,9 +1359,14 @@ export function mount(el, spec = {}, opts = {}) {
 
     theme(t) { root.setAttribute("data-smv-theme", t); return g; },
 
-    layout(o) {
+    /** Re-lay the graph out with new options (merged in place, so they persist). F38 —
+     *  a SECOND argument's `{camera}` fits the re-laid graph in the same tween: a script
+     *  that owns the camera (D13) gets no auto-refit, so `layout({dir: "TB"})` alone
+     *  re-flows the drawing under a shot composed for the old direction. */
+    layout(o, opts) {
       if (o) Object.assign(layoutOpts, o);
-      return relayout({});
+      const shot = shotFor(opts && opts.camera, null);
+      return relayout(shot ? { camera: shot } : {});
     },
 
     fitView(o = {}) {
@@ -1421,14 +1490,35 @@ export function mount(el, spec = {}, opts = {}) {
   const ia = opts.interaction || {};
   const clickEmit = ia.click === false ? null : (t, p) => bus.emit(t, p);
 
+  // F41 — `interaction: {tapToggle: {camera}}`: the reader's toggle frames what it opens,
+  // through the same F37 option a script would use, and ONE function serves both the tap
+  // path and the keyboard path so they cannot drift (a page hand-rolling this off
+  // `nodeclick` with `tapToggle: false` framed the tap but left Enter/Space on a11y.js's
+  // own bare toggle — which, firing after the page's handler had already opened the box,
+  // closed it again). It is the reader's move, not the script's: `viewport.userMoved`
+  // flips (auto-refit stops, exactly as after a pan) but `cameraOwned` is put back, so a
+  // storyboard never starts snapshotting the viewport — and yanking a later pan back on
+  // every seek — because someone tapped a container (D13).
+  const tapShot = ia.tapToggle && typeof ia.tapToggle === "object" ? ia.tapToggle.camera : undefined;
+  const readerToggle = (id) => {
+    if (!vs.isContainer(id)) return null;
+    const o = tapShot ? { camera: tapShot } : {};
+    const owned = cameraOwned;
+    const h = vs.collapsed.has(id) ? g.expand(id, o) : g.collapse(id, o);
+    cameraOwned = owned;
+    return h;
+  };
+
   // ARIA after the first layout: a11y.js reads reading order from g.layoutResult().
-  // Enter/Space there publishes the same `nodeclick` a tap does (F27).
-  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg, emit: clickEmit });
+  // Enter/Space there publishes the same `nodeclick` a tap does (F27), and toggles through
+  // the same readerToggle the tap does (F41).
+  if (opts.a11y !== false) a11y = attachA11y(g, { root, svg: renderer.svg, emit: clickEmit, onToggle: readerToggle });
   if (ia.tapToggle !== false || ia.click !== false) {
     tap = attachTapToggle(g, {
       svg: renderer.svg,
       toggle: ia.tapToggle !== false,
       emit: clickEmit,
+      onToggle: readerToggle,
     });
   }
 

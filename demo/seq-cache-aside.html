@@ -216,21 +216,19 @@
 
     if (m.id === "app.2") {
       STEPS.push({ op: "highlight", args: [{ nodes: REQ1_IDS, variant: "warn" }] });
-      STEPS.push({ op: "caption", args: ["Cold cache: 5 hops, ~24ms.", { place: "top" }] });
-      STEPS.push({ op: "wait", ms: 700 * P });
+      // F40 — a caption's `dur` is its hold: one step per beat, and g.cues() prices it.
+      STEPS.push({ op: "caption", args: ["Cold cache: 5 hops, ~24ms.", { place: "top" }], dur: 700 * P });
       STEPS.push({ op: "clearHighlight", args: [] });
     }
     if (m.id === "redis.3") {
       STEPS.push({ op: "highlight", args: [{ nodes: ["redis.3"], variant: "ok", pulse: true }] });
     }
     if (m.id === "app.4") {
-      STEPS.push({ op: "caption", args: ["Warm cache: 3 hops, ~2ms.", { place: "top" }] });
-      STEPS.push({ op: "wait", ms: 700 * P });
+      STEPS.push({ op: "caption", args: ["Warm cache: 3 hops, ~2ms.", { place: "top" }], dur: 700 * P });
       STEPS.push({ op: "clearHighlight", args: [] });
     }
     if (m.id === "pg.s2") {
-      STEPS.push({ op: "caption", args: ["Cache stampede: both requests refill the same key.", { place: "top" }] });
-      STEPS.push({ op: "wait", ms: 700 * P });
+      STEPS.push({ op: "caption", args: ["Cache stampede: both requests refill the same key.", { place: "top" }], dur: 700 * P });
     }
   }
 
@@ -244,16 +242,15 @@
   STEPS.push({ label: "condense" });
   STEPS.push({ op: "camera", args: [{ nodes: CONDENSE_IDS, pad: 90, dur: 400 * P }] });
   STEPS.push({ op: "caption", args: ["Folding request 1's miss → fetch → fill into one hop.", { place: "top" }] });
-  STEPS.push({ op: "condense", args: [CONDENSE_IDS, READTHROUGH] });
+  // F39 — the shot rides the converge: the merged id does not exist before the step, and a
+  // camera after it would pan to wherever the anchored viewport had let it bloom.
+  STEPS.push({ op: "condense", args: [CONDENSE_IDS, READTHROUGH, { camera: { k: 1.1, pad: 100 } }] });
   STEPS.push({ op: "highlight", args: [{ nodes: ["readthrough.1"], variant: "ok", pulse: true }] });
-  STEPS.push({ op: "camera", args: [{ node: "readthrough.1", k: 1.1, pad: 100, dur: 400 * P }] });
-  STEPS.push({ op: "caption", args: ["Same real latency — now one conceptual hop.", { place: "top" }] });
-  STEPS.push({ op: "wait", ms: 800 * P });
+  STEPS.push({ op: "caption", args: ["Same real latency — now one conceptual hop.", { place: "top" }], dur: 800 * P });
   STEPS.push({ op: "clearHighlight", args: [] });
   STEPS.push({ label: "done" });
   STEPS.push({ op: "camera", args: [{ fit: true, dur: 500 * P }] });
-  STEPS.push({ op: "caption", args: ["Cold vs warm: watch the total-duration bar below.", { place: "top" }] });
-  STEPS.push({ op: "wait", ms: 900 * P });
+  STEPS.push({ op: "caption", args: ["Cold vs warm: watch the total-duration bar below.", { place: "top" }], dur: 900 * P });
 
   var RUN_OPTS = {
     hopMs: 300,     // the default crossing; every real message declares its own duration

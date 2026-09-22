@@ -139,7 +139,12 @@ marginx, marginy, solver}` — see **Layout** below),
 turn off tap/click-to-toggle on container nodes (on by default; a tap that travels past
 a small slop radius counts as a pan and never toggles — touch-friendly by construction).
 `interaction: { click: false }` turns off the `nodeclick`/`edgeclick` events below, which
-are otherwise on whether or not `tapToggle` is.
+are otherwise on whether or not `tapToggle` is. `interaction: { tapToggle: { camera: true } }`
+makes the reader's toggle frame what it opens or closes — the same `camera` option a
+script gives `expand()` (see **Framing an expansion**), applied to taps and to the
+keyboard toggle alike, so a container never spills past the pane when someone opens it
+by hand. It is the reader's move, not the script's: the viewport stops auto-refitting,
+as after a pan, but a running storyboard does not start snapshotting the camera.
 
 `preset` is `"pipeline"`, or an object when the preset takes options:
 `{ name: "pipeline", total: "sum" | "critical" | "both" }`.
@@ -346,6 +351,11 @@ g.caption("Three manual steps become one.", { place: "bottom" });  g.caption(nul
 g.cues();   // every label + caption with its absolute ms offset — the voice-over sheet
 ```
 
+In a storyboard a `dur` on a `caption` (or `highlight` / `props`) step is its **hold**:
+`{ "op": "caption", "args": ["…"], "dur": 1500 }` shows the line and keeps the clock for
+1.5s — one step in place of `caption` + `wait`, and the cue sheet's subtitle span ends
+where the hold does.
+
 Every storyboard step — a mutation op name (the set mirrors `g`'s own methods:
 `condense`, `split`, `expandAll`, `collapseAll` and `layout` included), a run op
 (`run` to recompile like `g.run(opts)`, `run.reset`, `run.play`, `run.step`, `run.seek`) or
@@ -388,6 +398,31 @@ close-up (`k` / `maxK` still win). Taking the shot takes the camera exactly as
 `g.camera()` does, and a toggle that turns out to be a no-op still flies it, resolving
 `applied: false` — so an assistant re-issuing "show me this open" gets the same frame twice
 instead of a warning. In a storyboard: `{ "op": "expand", "args": ["clean", { "camera": true }] }`.
+
+**Framing any mutation.** The same option is on every op that re-lays the graph out —
+`addNode`, `addEdge`, `removeNode`, `removeEdge`, `update`, `layout`, and the `condense` /
+`split` choreographies — because "add this and show me it" has the same problem: the shot
+depends on where the new node *lands*, which no `camera` step can know until the add has
+already committed. For `condense` it is worse: the merged id does not exist until the
+converge phase, so a `camera({node})` before the step warns and one after it starts 900ms
+late. `true` frames the op's subject: the added or patched node (with `after`, that node
+and the one it hangs off), an edge's two endpoints, the merged node, the union of a
+split's parts; ops with no one subject (a remove, `layout`) fit the whole graph. Inside a
+`batch` a child's shot is composed against the batch's single commit:
+
+```js
+await g.addNode({ id: "deploy" }, { after: "test", camera: true });     // frame test + deploy
+g.batch((b) => {                                                        // one commit, one shot
+  b.addNode(m, { camera: { nodes: [prev, m.id], maxK: 1, pad: 120 } });
+  b.addEdge(e);
+});
+await g.layout({ dir: "TB" }, { camera: true });   // refit after a direction change
+await g.condense(["x", "y", "z"], { id: "clean" }, { camera: true });  // frame the merge as it lands
+```
+
+Without it, `layout({ dir })` under a script-owned camera re-flows the drawing under a
+shot composed for the old direction — the anchored viewport never refits on its own once
+the script has taken the camera.
 
 Camera moves ride the shared clock and cancel-and-retarget like everything else; the
 first one in a script takes the viewport (auto-refit stops, the camera joins the scrub

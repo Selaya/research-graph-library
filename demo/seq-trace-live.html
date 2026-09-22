@@ -401,11 +401,14 @@
     var inE = edges.filter(function (e) { return e.target === a.id; })[0];
     var prev = a.from;
     at(a.startRep - LEAD, function () {                       // grow the diagram ahead of the ball
+      // F38 — the shot rides the add's own commit, composed against the layout the batch
+      // lands on, so the activation blooms INTO frame instead of the camera chasing it.
+      var shot = { nodes: prev ? [prev.id, a.id] : [a.id], k: 1, pad: prev ? 120 : 200 };
       g.batch(function () {
-        if (idx > 0) g.addNode(nodeOf(a));
-        if (inE) g.addEdge({ id: inE.id, source: inE.source, target: inE.target, label: inE.label });
+        if (idx > 0) g.addNode(nodeOf(a), { camera: shot });
+        if (inE) g.addEdge({ id: inE.id, source: inE.source, target: inE.target, label: inE.label }, { camera: shot });
       });
-      g.camera({ nodes: prev ? [prev.id, a.id] : [a.id], k: 1, pad: prev ? 120 : 200, dur: 340 * P });
+      if (idx === 0 && !inE) g.camera(Object.assign({ dur: 340 * P }, shot)); // the seed is already drawn
       if (a.note && !a.fail) g.caption(a.note, { place: "bottom" });
     });
     // `token: false` (a span that HANDLES another, like the 500's fallback) has no token

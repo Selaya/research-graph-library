@@ -197,11 +197,12 @@
         op: "batch",
         steps: [
           { op: "addNode", args: [nodeOf(other)] }, { op: "addEdge", args: [edgeOf(other)] },
-          { op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeOf(m)] },
+          // F38 — the shot rides the batch's one commit, composed against the layout it lands on.
+          { op: "addNode", args: [nodeOf(m), { camera: { nodes: [prev.id, other.id, m.id], maxK: 1, pad: 130 } }] },
+          { op: "addEdge", args: [edgeOf(m)] },
         ],
-        dur: 260 * P,
+        dur: 340 * P,
       });
-      STEPS.push({ op: "camera", args: [{ nodes: [prev.id, other.id, m.id], maxK: 1, pad: 130, dur: 340 * P }] });
       var fanCaption = other.caption || m.caption;
       if (fanCaption) STEPS.push({ op: "caption", args: [fanCaption, { place: "top" }] });
       STEPS.push({ op: "run.play", until: other.id });
@@ -209,9 +210,11 @@
       continue;
     }
 
-    STEPS.push({ op: "batch", steps: [{ op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeOf(m)] }], dur: 260 * P });
     var wide = (m.id === "app.2"); // the 3DS answer skips two columns — give the shot more room
-    STEPS.push({ op: "camera", args: [{ nodes: [prev.id, m.id], maxK: 1, pad: wide ? 170 : 120, dur: (wide ? 420 : 300) * P }] });
+    STEPS.push({ op: "batch", steps: [
+      { op: "addNode", args: [nodeOf(m), { camera: { nodes: [prev.id, m.id], maxK: 1, pad: wide ? 170 : 120 } }] },
+      { op: "addEdge", args: [edgeOf(m)] },
+    ], dur: (wide ? 420 : 300) * P });
     STEPS.push({ op: "run.play", until: m.id });
     if (m.highlight) {
       var h = Object.assign({ nodes: [m.id] }, m.highlight);

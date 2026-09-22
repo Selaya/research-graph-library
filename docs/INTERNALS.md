@@ -741,6 +741,17 @@ joined (pinch) — one guard, both behaviours. index.js wires `emit` to the inst
 the toggle and `opts.interaction.click === false` drops the events (either alone still
 attaches the listeners). Containers get `cursor: pointer`. Ships in the IIFE.
 
+**F41 — `onToggle`.** Both `attachTapToggle` and `attachA11y` take an optional
+`onToggle(id)`; when present it replaces the bare `g.expand/collapse` call (the container
+check stays in each module). index.js hands the SAME `readerToggle` to both, built from
+`interaction.tapToggle.camera`: it calls `g.expand(id, {camera})` / `g.collapse(id,
+{camera})` and then puts `cameraOwned` back to what it was — `viewport.userMoved` flips
+(auto-refit off, as after a pan) but a storyboard never starts snapshotting the viewport
+because the reader tapped (D13). One function for both paths is the point: a page that
+hand-rolled the shot off `nodeclick` with `tapToggle:false` left Enter/Space on a11y.js's
+own bare toggle, which fired after the page's handler had already opened the box and
+closed it again.
+
 ---
 
 # M3 contracts (in-house layered engine · dagre adapter · size · culling)
@@ -1116,6 +1127,22 @@ vp.target                                 // getter: where a live tween is headi
   snapshot already knows the script owns the viewport. A no-op toggle carrying a shot goes
   through `shotOnly()` — `g.camera(shot)` with `applied: false` merged in — so the camera
   still moves; `camera: false`/absent is the pre-F37 path byte-for-byte.
+- **F38 — `{camera}` on every relayout-producing op.** `addNode(n, o)` / `addEdge(e, o)` /
+  `removeNode(id, o)` / `removeEdge(id, o)` / `update(id, patch, o)` (its non-toggle
+  route) / `layout(lo, o)` run the same `shotFor(o.camera, subject)` and hand the result
+  to `commitOrDefer` as `extra.camera` — no new plumbing past that point. `shotFor`'s
+  second argument is now a SUBJECT: one id (`{node}`), a list (`{nodes}` — an edge's
+  endpoints, `[after, id]`), or null (`{fit: true}` — removes, layout, the -All toggles).
+  `MUTATION_CAMERA_ARG` (was `TOGGLE_CAMERA_ARG`) names the options slot per op so
+  `hasCameraOp()` sees a shot on any of them at build time; `update` no longer needs the
+  `collapsed` special case there, since the option is read on both routes. Inside a batch
+  every one of these lands on `batchExtra.camera`, last writer wins, exactly as toggles do.
+- **F39 — `{camera}` on condense/split.** `condense(ids, node, o)` / `split(id, parts, o)`
+  normalise `o.camera` with `shotFor` (subject: the merged id / the parts' ids) and pass
+  it as `opts.camera` to `runCondense` / `runSplit`, which forward it verbatim to their
+  phase-2 `relayout({camera})` — so it rides the converge/diverge duration and easing, is
+  resolved against the merged layout (the id exists by then), and never touches phases 1
+  or 3. `MUTATION_CAMERA_ARG` names slot 2 for both, so `hasCameraOp` sees it at build time.
 - **M5 (F15/F17/F18):** `chromeInset()` = `paneInsets(root, renderer.svg)`, read by
   `fitView`, `camera` and relayout's auto-refit (and the one mount-time fit, which now runs
   AFTER the transport mounts so there is chrome to measure). `g.camera` injects
@@ -1130,6 +1157,17 @@ vp.target                                 // getter: where a live tween is headi
   (instantaneous: nothing to await), condense/split `CHOREO_MS` (the CONDENSE_PHASES sum,
   900), batch max of members (one commit, parallel), default `baseDuration`.
   `run.play` slices still come from the run's own clock.
+- **F40 — a `dur` on a discrete step is a hold.** `durOf()` reads `step.dur` first for
+  every op, so `{op:"caption", dur:1600}` was always priced at 1600 on the scrubber and
+  the cue sheet — while `g.caption()` returned `g`, the sequencer had nothing to await,
+  and the story moved on at once (declared ≠ awaited). `applyStep` now checks
+  `holdFor(step, r)` after `applyOp`: when the step declared a positive `dur`, the op
+  handed back nothing awaitable (not a thenable, not a `run.play` `{run}` — note `g` itself
+  has a `run` *function*, hence the `typeof r.run === "object"` guard), and it is not
+  `run`/`run.reset` (priced 0 before `dur` is read), it returns `waitMs(stepDur)`. Skipped
+  while `scrubDepth > 0`, like every director tween on a forward scrub. The discrete ops
+  joined `PARALLEL_IN_BATCH` so a held child counts toward the batch's `durOf` exactly as
+  it is awaited (bare, they still cost 0 there).
 - **`stepDur` ambient (D12):** `applyStep` saves/sets `stepDur = step.dur ?? null` around
   the op and restores after (a batch's `dur` survives its children); `relayout` reads
   `duration ?? stepDur ?? baseDuration` (reduced → 1). Every mutation op gains per-step

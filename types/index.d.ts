@@ -409,8 +409,12 @@ export interface MountOpts {
   a11y?: boolean;
   /** Pointer interactions. `tapToggle` (tap/click a container to expand/collapse) and
    *  `click` (the `nodeclick`/`edgeclick` events, F27) are both on by default; either can be
-   *  turned off on its own. */
-  interaction?: { tapToggle?: boolean; click?: boolean };
+   *  turned off on its own. F41 — `tapToggle: { camera }` makes the reader's toggle frame
+   *  what it opens or closes, with the same option a script gives `expand()` (`true` frames
+   *  the container, an object is a target of its own); the keyboard toggle (Enter/Space)
+   *  frames identically. Unlike a scripted shot it never takes the camera from a storyboard
+   *  (D13): auto-refit stops, as after a pan, but the viewport is not snapshotted. */
+  interaction?: { tapToggle?: boolean | { camera?: boolean | CameraTarget }; click?: boolean };
   storyboard?: StoryboardStep[];
   /** `true` plays the storyboard as soon as it is mounted; `'auto'` plays it only when the
    *  page URL carries `?auto=1` (or `auto=true`) — the headless-verification convention
@@ -746,24 +750,33 @@ export interface Cue {
 }
 
 /** D12 — every step may declare its own duration; scrubber, cue sheet and frame renderer
- *  all read the same number. Omitted, the op's own default applies. */
+ *  all read the same number. Omitted, the op's own default applies. On a mutation it paces
+ *  the relayout; on a discrete step (`caption`, `highlight`, `clearHighlight`, `props`,
+ *  `run.step`, `run.seek`) it is a HOLD — the flip happens at once and the step keeps the
+ *  clock for `dur` ms, so `{op:"caption", args:["…"], dur:1500}` replaces caption + wait
+ *  (F40). `run` / `run.reset` are always 0. */
 export type StoryboardStep = { dur?: number } & (
-  | { op: "addNode"; args: [NodeSpec, ({ after?: string } | undefined)?] }
-  | { op: "addEdge"; args: [EdgeSpec] }
-  | { op: "removeNode"; args: [string] }
-  | { op: "removeEdge"; args: [string] }
+  /** F38 — every relayout-producing op takes `{ camera }` in its options slot, composed
+   *  against the layout the op produces and flown on the step's `dur` (`MutationOpts`). */
+  | { op: "addNode"; args: [NodeSpec, AddNodeOpts?] }
+  | { op: "addEdge"; args: [EdgeSpec, MutationOpts?] }
+  | { op: "removeNode"; args: [string, MutationOpts?] }
+  | { op: "removeEdge"; args: [string, MutationOpts?] }
   | { op: "update"; args: [string, Record<string, unknown>, UpdateOpts?] }
   | { op: "expand"; args: [string, ToggleOpts?] }
   | { op: "collapse"; args: [string, ToggleOpts?] }
-  | { op: "condense"; args: [string[], CondenseNodeSpec] }
-  | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }] }
+  /** F39 — `{ camera }` in the third slot frames the merged node / the parts' union in the
+   *  choreography's own converge/diverge tween (`MutationOpts`). */
+  | { op: "condense"; args: [string[], CondenseNodeSpec, MutationOpts?] }
+  | { op: "split"; args: [string, { nodes: NodeSpec[]; edges?: EdgeSpec[] }, MutationOpts?] }
   | { op: "batch"; steps: StoryboardStep[] }
   /** Every container open / closed in one commit — `g.expandAll()` / `g.collapseAll()`.
    *  `[{ camera: true }]` fits the result in the same tween (F37). */
   | { op: "expandAll"; args?: [ToggleOpts?] }
   | { op: "collapseAll"; args?: [ToggleOpts?] }
-  /** Re-lay the graph out with new layout opts — `g.layout(o)`. */
-  | { op: "layout"; args?: [LayoutOpts?] }
+  /** Re-lay the graph out with new layout opts — `g.layout(o, opts)`; `[{dir:"TB"},
+   *  {camera:true}]` fits the re-laid drawing in the same tween (F38). */
+  | { op: "layout"; args?: [LayoutOpts?, MutationOpts?] }
   /** (Re)compile the run with these opts — `g.run(opts)`. Subscriptions survive it (F6).
    *  Omit the argument to recompile with the opts the run already has. */
   | { op: "run"; args?: [(SimRunOpts | LiveRunOpts)?] }
@@ -954,40 +967,62 @@ export interface ViewState {
   view(): unknown;
 }
 
+/** F37/F38 — the `{ camera }` option every relayout-producing mutation takes: the toggles
+ *  (`ToggleOpts`), `addNode`/`addEdge`/`removeNode`/`removeEdge`/`update`/`layout`, and the
+ *  condense/split choreographies.
+ *
+ *  `camera` composes a shot AGAINST THE LAYOUT THE MUTATION PRODUCES and flies it on the
+ *  mutation's own clock (a storyboard step's `dur`, else the mount's `animation.duration`;
+ *  the choreography's converge phase for condense/split), so the camera move and the
+ *  structural motion are one tween. This replaces the pattern of chasing a mutation with a
+ *  second `camera` step — `batch(addNode, addEdge)` then `camera({nodes: [prev, id]})`,
+ *  `expand(id)` then `camera({fit})` — which can only start once the graph has already
+ *  bloomed wherever the anchored viewport left it: two tweens where one was wanted, and a
+ *  target that names ids the first step has not created yet.
+ *
+ *  - `true` frames the mutation's SUBJECT: the toggled container, the added or patched
+ *    node (with `after`, that node and the one it hangs off), an edge's two endpoints, the
+ *    merged node, the union of a split's parts. An op with no one subject — the -All
+ *    toggles, a remove, `layout` — fits the whole graph.
+ *  - A `CameraTarget` is a shot in its own right (`{fit: true}`, `{nodes: [...]}`,
+ *    `{node, k}`…); one that names no box (`{pad: 60}`, say) frames the subject.
+ *  - A FITTED scale is lidded at 1.5 like a `nodes[]` union, so a lone node is never a
+ *    close-up; `k` or `maxK` on the target still wins. `dur` on the target is ignored: the
+ *    shot rides the mutation's duration. `ease` on the target overrides the mount easing.
+ *  - Taking the shot takes the camera (D13), exactly as `g.camera()` would: relayout stops
+ *    auto-refitting, and in a storyboard the viewport joins the scrub snapshots.
+ *  - Inside a `batch`, the shot is composed against the batch's one shared commit (the
+ *    last child to name one wins).
+ *  Absent or `false`, the mutation keeps the anchored D10 behaviour. */
+export interface MutationOpts {
+  camera?: boolean | CameraTarget;
+}
+
+/** `g.addNode(node, opts)`. */
+export interface AddNodeOpts extends MutationOpts {
+  /** Also mint the edge `e:<after>-><id>` from this node. With `camera: true` the shot
+   *  frames the new node AND this one (F38). */
+  after?: string;
+}
+
 /** `g.update(id, patch, opts)`. */
-export interface UpdateOpts {
+export interface UpdateOpts extends MutationOpts {
   /** `patch.data` REPLACES the record's `data` instead of merging into it (`data: {}` or
    *  `data: undefined` then clears it). Merging is the default either way;
    *  `data: { key: undefined }` removes a single key without it. */
   replace?: boolean;
-  /** Read only when the patch carries `collapsed` (which routes to `expand()`/`collapse()`):
-   *  the same shot option those take — see `ToggleOpts`. */
+  /** When the patch carries `collapsed` (which routes to `expand()`/`collapse()`) this is
+   *  the shot option those take (`ToggleOpts`); on any other patch it frames the patched
+   *  node — or an edge's endpoints — at the geometry the update produces (F38). */
   camera?: boolean | CameraTarget;
 }
 
-/** F37 — the options `expand()`, `collapse()`, `expandAll()` and `collapseAll()` take.
- *
- *  `camera` composes a shot AGAINST THE LAYOUT THE TOGGLE PRODUCES and flies it on the
- *  toggle's own clock (its `dur`, the mount's `animation.duration`, or a storyboard step's
- *  `dur`), so the pull-back and the bloom are one motion. This replaces the pattern
- *  `camera({node}) → expand(id) → camera({fit})`, which frames the collapsed stub, lets the
- *  children spill past the pane, then zooms back out — three tweens where one was wanted.
- *
- *  - `true` frames the toggled container itself (`fit: true` for the -All ops, which have no
- *    one subject).
- *  - A `CameraTarget` is a shot in its own right (`{fit: true}`, `{nodes: [...]}`,
- *    `{node, k}`…); one that names no box (`{pad: 60}`, say) frames the toggled id.
- *  - A FITTED scale is lidded at 1.5 like a `nodes[]` union, so a lone closed box is never a
- *    close-up; `k` or `maxK` on the target still wins. `dur` on the target is ignored: the
- *    shot rides the toggle's duration. `ease` on the target overrides the mount easing.
- *  - Taking the shot takes the camera (D13), exactly as `g.camera()` would: relayout stops
- *    auto-refitting, and in a storyboard the viewport joins the scrub snapshots.
- *  - A toggle that is a no-op (already in the requested state) still flies the shot, and
- *    resolves `applied: false`.
- *  Absent or `false`, the toggle keeps the anchored D10 behaviour. */
-export interface ToggleOpts {
-  camera?: boolean | CameraTarget;
-}
+/** F37 — the options `expand()`, `collapse()`, `expandAll()` and `collapseAll()` take:
+ *  `MutationOpts`, where `camera: true` frames the toggled container itself (`fit: true`
+ *  for the -All ops, which have no one subject). A toggle that is a no-op (already in the
+ *  requested state) still flies the shot, and resolves `applied: false` — re-issuing "show
+ *  me this open" is idempotent rather than a warning. */
+export interface ToggleOpts extends MutationOpts {}
 
 /** The probe `g.validate(fn)` hands its callback: the structural mutation methods, run
  *  against a throwaway clone, plus the read sugar. Nothing commits, nothing renders, and
@@ -1060,12 +1095,18 @@ export interface Graph {
   bounds(): Rect | null | undefined;
   layoutResult(): LayoutResult | null;
 
-  addNode(node: NodeSpec, opts?: { after?: string }): Awaitable<MutationResult>;
-  addEdge(edge: EdgeSpec): Awaitable<MutationResult>;
+  /** `{ after }` also mints the `after -> id` edge. F38 — `{ camera: true }` frames the new
+   *  node (with `after`, the new node and the one it hangs off) in the add's own tween,
+   *  against the layout the add produces (`MutationOpts`). */
+  addNode(node: NodeSpec, opts?: AddNodeOpts): Awaitable<MutationResult>;
+  /** F38 — `{ camera: true }` frames the edge's two endpoints in the same tween. */
+  addEdge(edge: EdgeSpec, opts?: MutationOpts): Awaitable<MutationResult>;
   /** Resolves with the full removed-ids cascade (`ids.nodes`/`ids.edges`), not just
-   *  `{canceled, applied}` — see `RemoveNodeResult`. */
-  removeNode(id: string): Awaitable<RemoveNodeResult>;
-  removeEdge(id: string): Awaitable<MutationResult>;
+   *  `{canceled, applied}` — see `RemoveNodeResult`. F38 — `{ camera: true }` fits what is
+   *  left, in the remove's own tween. */
+  removeNode(id: string, opts?: MutationOpts): Awaitable<RemoveNodeResult>;
+  /** F38 — `{ camera }` as on `removeNode()`. */
+  removeEdge(id: string, opts?: MutationOpts): Awaitable<MutationResult>;
   /** `patch.data` merges into the record's `data`; `data: { key: undefined }` REMOVES that
    *  key, and `{ replace: true }` swaps the whole payload. A `collapsed` patch is routed to
    *  `expand()`/`collapse()` (it is view state, not a rendered spec field): a patch whose
@@ -1092,11 +1133,14 @@ export interface Graph {
   collapse(id: string, opts?: ToggleOpts): Awaitable<MutationResult>;
   /** D6 — merge N nodes into one over the 3-phase choreography (highlight/converge/reveal).
    *  Resolves with the created/removed ids once the merge actually lands — see
-   *  `CondenseSplitResult`. */
-  condense(ids: Iterable<string>, node: CondenseNodeSpec): Awaitable<CondenseSplitResult>;
+   *  `CondenseSplitResult`. F39 — `{ camera: true }` frames the MERGED node where it lands,
+   *  in the converge phase's own tween: the id does not exist before that phase, so no
+   *  `camera()` call placed before or after the condense can compose the shot
+   *  (`MutationOpts`). */
+  condense(ids: Iterable<string>, node: CondenseNodeSpec, opts?: MutationOpts): Awaitable<CondenseSplitResult>;
   /** D6 inverse — one node becomes N (highlight/diverge/reveal). Same resolution shape as
-   *  `condense()`. */
-  split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }): Awaitable<CondenseSplitResult>;
+   *  `condense()`. F39 — `{ camera: true }` frames the union of the parts in the diverge. */
+  split(id: string, parts: { nodes: NodeSpec[]; edges?: EdgeSpec[] }, opts?: MutationOpts): Awaitable<CondenseSplitResult>;
   /** Every container open in ONE commit. `{ camera: true }` fits the opened graph in the
    *  same tween (F37). */
   expandAll(opts?: ToggleOpts): Awaitable<MutationResult>;
@@ -1154,7 +1198,11 @@ export interface Graph {
    *  one key and a `null` entry drops one id. */
   props(map: PropsOverride | null, opts?: PropsOpts): Graph;
   theme(t: ThemeName): Graph;
-  layout(o?: LayoutOpts): Awaitable;
+  /** Re-lay the graph out with new options (merged in place, so they persist). F38 — a
+   *  second argument's `{ camera: true }` fits the re-laid drawing in the same tween: a
+   *  script that owns the camera (D13) gets no auto-refit, so `layout({dir:"TB"})` alone
+   *  re-flows the drawing under a shot composed for the old direction. */
+  layout(o?: LayoutOpts, opts?: MutationOpts): Awaitable;
   /** `inset` defaults to the chrome the library mounted over the pane (F15); `0` opts out. */
   fitView(o?: { pad?: number; animate?: boolean; duration?: number; inset?: Inset | number }): Graph;
   destroy(): void;

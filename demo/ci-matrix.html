@@ -233,15 +233,14 @@
     // expanding into an overflow and then flying the camera to the leg.
     { op: "expand", args: ["matrix", { camera: { node: "matrix.windows20", pad: 70 } }], dur: 700 },
     { op: "highlight", args: [{ nodes: ["matrix.windows20"], edges: ["m-out:matrix.windows20"], variant: "warn", pulse: true }] },
-    { op: "caption", args: ["windows/node20: EPERM on a symlink, re-run twice, still red. Gate needs all 6 legs — it never fires.", { place: "bottom" }] },
-    { op: "wait", ms: 1600 },
+    // F40 — a `dur` on a caption is its hold: one step, and the cue sheet knows how long it stays up.
+    { op: "caption", args: ["windows/node20: EPERM on a symlink, re-run twice, still red. Gate needs all 6 legs — it never fires.", { place: "bottom" }], dur: 1600 },
     { label: "gate blocked" },
     { op: "caption", args: [null] },
     { op: "clearHighlight" },
     { op: "camera", args: [{ node: "gate", pad: 80, dur: 650 }] },
     { op: "highlight", args: [{ nodes: ["gate"], variant: "mute", dim: true }] },
-    { op: "caption", args: ["Integration tests and publish preview never run this build.", { place: "bottom", variant: "note" }] },
-    { op: "wait", ms: 1400 },
+    { op: "caption", args: ["Integration tests and publish preview never run this build.", { place: "bottom", variant: "note" }], dur: 1400 },
     { op: "caption", args: [null] },
     { op: "clearHighlight" },
     { op: "collapse", args: ["matrix"], dur: 700 },

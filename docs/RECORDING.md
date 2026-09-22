@@ -98,6 +98,50 @@ container opens or closes on camera:
 - Inside a `batch`, the shot is composed against the batch's one shared commit; the last
   toggle in the batch to name one wins.
 
+**`addNode` / `addEdge` / `removeNode` / `removeEdge` / `update` / `layout` with `camera`**
+— the same option on every op that re-lays the graph out (F38). The shape is the one the
+sequence-diagram demos kept reaching for: a `batch` that adds the next activation, then a
+`camera` step framing `[prev, new]` — two tweens, the second of which can only start once
+the node has already bloomed wherever the anchored viewport left it.
+
+```json
+{ "op": "addNode", "args": [{ "id": "deploy" }, { "after": "test", "camera": true }] }
+{ "op": "batch", "steps": [
+    { "op": "addNode", "args": [{ "id": "app.2" }, { "camera": { "nodes": ["gw.1", "app.2"], "maxK": 1, "pad": 120 } }] },
+    { "op": "addEdge", "args": [{ "id": "m2", "source": "gw.1", "target": "app.2" }] }
+  ], "dur": 300 }
+{ "op": "removeNode", "args": ["legacy", { "camera": true }] }
+{ "op": "layout", "args": [{ "dir": "TB" }, { "camera": true }] }
+```
+
+- `true` frames the op's subject: the added or patched node (with `after`, that node and
+  the one it hangs off), an added edge's two endpoints, an updated edge's endpoints. A
+  remove and `layout` have no one subject, so `true` fits the whole graph.
+- Everything else is as for the toggles: resolved against the layout the op *lands on*,
+  flown on the step's `dur`, a fitted scale lidded at 1.5, `k`/`maxK`/`ease` on the target
+  still win, taking the shot takes the camera (D13). Inside a `batch` the shot rides the
+  batch's one commit and its `dur`, so put the option on any child and the `dur` on the
+  batch.
+- **Do not write** `layout({dir: "TB"})` then `camera({fit: true})` once the script owns
+  the camera: the relayout re-flows the drawing under the old shot for a whole commit
+  before the fit catches up. `layout(o, {camera: true})` is one tween.
+
+**`condense` / `split` with `camera`** — the same option in the third slot (F39), riding
+the choreography's converge / diverge phase:
+
+```json
+{ "op": "condense", "args": [["miss", "fetch", "fill"], { "id": "readthrough" }, { "camera": true }] }
+{ "op": "split", "args": ["assemble", { "nodes": [...], "edges": [...] }, { "camera": { "fit": true } }] }
+```
+
+- **Do not write** `condense(ids, node)` then `camera({node: node.id})`: the merged id does
+  not exist until 150ms into the choreography, so a shot placed *before* the step warns
+  (`unknown node id`) and one placed *after* it starts 900ms late, over a graph the converge
+  already moved under an anchored viewport. `true` frames the merged node — or, on `split`,
+  the union of the parts — exactly where the converge lands it, in the same tween the
+  sources fly into it; the reveal pulse then plays on a framed node. The step is still
+  priced at 900 (`dur` overrides), and the shot rides the converge's 450, not the step.
+
 **`highlight`** — emphasis, replace-not-accumulate: one call IS the emphasis state, so
 you never clear the previous one first.
 
@@ -184,13 +228,24 @@ children (a mutation child folds into the one shared relayout, so its own `dur` 
 — put the `dur` on the batch).
 
 `dur` on a mutation step is ambient for the whole op — `{ "op": "expand", "args":
-["clean"], "dur": 1200 }` slows that one relayout without touching anything else. Use
-`wait` for beats where nothing moves but the narration needs air:
+["clean"], "dur": 1200 }` slows that one relayout without touching anything else.
+
+`dur` on a discrete step — `caption`, `highlight`, `clearHighlight`, `props`, `run.step`,
+`run.seek` — is a **hold** (F40): the flip happens at once and the step then keeps the
+clock for that long, so the beat is one step and the cue sheet prices it:
 
 ```json
-{ "op": "caption", "args": ["Watch the fan-out."] },
-{ "op": "wait", "ms": 1500 },
+{ "op": "caption", "args": ["Watch the fan-out."], "dur": 1500 },
+{ "op": "highlight", "args": [{ "nodes": ["gate"], "pulse": true }], "dur": 800 },
 ```
+
+- **Do not write** `caption` → `wait` → `caption(null)` for a held line: the first step
+  was already priced at whatever `dur` you gave it, but without the hold the story moved
+  on at once and the declared timeline lied. With `dur` the subtitle span in `--cues`
+  ends exactly where the hold does.
+- `wait` is still the right op for air where *nothing* is on screen, and inside a `batch` a
+  held child stretches the step like a `wait` child does (it runs alongside the commit).
+- A forward scrub skips holds the way it snaps camera moves to zero.
 
 ### Labels as chapters
 

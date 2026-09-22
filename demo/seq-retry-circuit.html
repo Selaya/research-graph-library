@@ -223,15 +223,16 @@
   });
   function group(i) { return GROUPS[i]; }
 
-  function addsFor(grp) {
-    return grp.map(function (m) { return { op: "addNode", args: [nodeOf(m)] }; })
-      .concat(grp.map(function (m) { return { op: "addEdge", args: [edgeOf(m)] }; }));
+  function addsFor(grp, shot) {
+    // F38 — the shot rides the batch's one commit (any child may carry it; the last wins).
+    return grp.map(function (m, i) {
+      return { op: "addNode", args: shot && i === 0 ? [nodeOf(m), { camera: shot }] : [nodeOf(m)] };
+    }).concat(grp.map(function (m) { return { op: "addEdge", args: [edgeOf(m)] }; }));
   }
   function advance(grp, extra) {
-    var adds = addsFor(grp).concat(extra || []);
     var cam = [grp[0].from].concat(grp.map(function (m) { return m.id; }));
-    push({ op: "batch", steps: adds, dur: 260 * P });
-    push({ op: "camera", args: [{ nodes: cam, k: 1, pad: 110, dur: 300 * P }] });
+    var adds = addsFor(grp, { nodes: cam, k: 1, pad: 110 }).concat(extra || []);
+    push({ op: "batch", steps: adds, dur: 300 * P });
     // One `until` per member: the first is the real wait, the rest resolve instantly.
     grp.forEach(function (m) { push({ op: "run.play", until: m.id }); });
   }

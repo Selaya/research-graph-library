@@ -99,7 +99,7 @@ function depthOf(id, node) {
 
 const isSpace = (key) => key === " " || key === "Spacebar";
 
-export function attachA11y(g, { root, svg, emit } = {}) {
+export function attachA11y(g, { root, svg, emit, onToggle } = {}) {
   const noop = { destroy() {} };
   // Guard: importable and safely callable under Node (no document) or with a stub host.
   if (!g || !svg || typeof svg.setAttribute !== "function" || typeof svg.querySelectorAll !== "function") {
@@ -304,8 +304,12 @@ export function attachA11y(g, { root, svg, emit } = {}) {
     focusId(ids[Math.min(ids.length - 1, Math.max(0, i + delta))]);
   }
 
+  /** F41 — `onToggle` is the host's own toggle (the one the tap path uses too, carrying
+   *  `interaction.tapToggle.camera`), so Enter/Space frame exactly as a tap does. Without
+   *  it, the bare public expand/collapse, as before. */
   function toggle(id) {
     if (id == null || !isContainer(id)) return;
+    if (typeof onToggle === "function") { onToggle(id); return; }
     if (isCollapsed(id)) { if (typeof g.expand === "function") g.expand(id); }
     else if (typeof g.collapse === "function") g.collapse(id);
   }
