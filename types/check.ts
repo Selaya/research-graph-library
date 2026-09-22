@@ -25,6 +25,8 @@ import {
   type StoryboardStep,
   type Timeline,
   type CameraTarget,
+  type MutationOpts,
+  type AddNodeOpts,
   type HighlightSelection,
   type PropsOverride,
   type Cue,
@@ -119,6 +121,18 @@ g.collapse("clean", { camera: { fit: true } });
 g.expandAll({ camera: true });
 g.collapseAll({ camera: { nodes: ["ingest", "build"] } });
 g.update("clean", { collapsed: false }, { camera: true });
+// F38 — the same option on every relayout-producing mutation, framing the op's subject.
+g.addNode({ id: "deploy", label: "Deploy" }, { after: "check", camera: true });
+g.addNode({ id: "notify", label: "Notify" }, { camera: { nodes: ["deploy", "notify"], maxK: 1, pad: 120 } });
+g.addEdge({ id: "e6", source: "deploy", target: "notify" }, { camera: true });
+g.update("deploy", { label: "Deploy to production" }, { camera: { pad: 40 } });
+g.removeEdge("e6", { camera: true });
+g.removeNode("notify", { camera: { fit: true } });
+const relaid: Awaitable = g.layout({ dir: "TB" }, { camera: true });
+void relaid;
+const mutOpts: MutationOpts = { camera: { fit: true, pad: 32 } };
+const addOpts: AddNodeOpts = { after: "check", camera: true };
+void [mutOpts, addOpts];
 
 // condense()/split() resolve the created/removed ids once the merge/split actually lands
 // (`applied:true`) — `ids` is optional because a run canceled before that never happened.
@@ -254,6 +268,15 @@ const steps: StoryboardStep[] = [
   { op: "expand", args: ["clean", { camera: true }] },
   { op: "collapse", args: ["clean", { camera: { fit: true } }] },
   { op: "expandAll", args: [{ camera: true }] },
+  // F38 — a child's shot composes against the batch's one commit (the seq-diagram idiom).
+  { op: "batch", steps: [
+    { op: "addNode", args: [{ id: "s2", label: "Step 2" }, { camera: { nodes: ["s1", "s2"], maxK: 1 } }] },
+    { op: "addEdge", args: [{ id: "s1-s2", source: "s1", target: "s2" }] },
+  ], dur: 300 },
+  { op: "removeEdge", args: ["s1-s2", { camera: true }] },
+  { op: "removeNode", args: ["s2", { camera: { fit: true } }] },
+  { op: "update", args: ["s1", { label: "Step one" }, { camera: true }] },
+  { op: "layout", args: [{ dir: "TB" }, { camera: true }] },
   { op: "condense", args: [["build.compile", "build.link"], { id: "build" }] },
   { op: "run.play", until: "deploy" },
   { op: "batch", steps: [{ op: "run.step" }, { op: "run.seek", ms: 0 }] },

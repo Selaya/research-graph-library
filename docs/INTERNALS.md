@@ -1116,6 +1116,16 @@ vp.target                                 // getter: where a live tween is headi
   snapshot already knows the script owns the viewport. A no-op toggle carrying a shot goes
   through `shotOnly()` — `g.camera(shot)` with `applied: false` merged in — so the camera
   still moves; `camera: false`/absent is the pre-F37 path byte-for-byte.
+- **F38 — `{camera}` on every relayout-producing op.** `addNode(n, o)` / `addEdge(e, o)` /
+  `removeNode(id, o)` / `removeEdge(id, o)` / `update(id, patch, o)` (its non-toggle
+  route) / `layout(lo, o)` run the same `shotFor(o.camera, subject)` and hand the result
+  to `commitOrDefer` as `extra.camera` — no new plumbing past that point. `shotFor`'s
+  second argument is now a SUBJECT: one id (`{node}`), a list (`{nodes}` — an edge's
+  endpoints, `[after, id]`), or null (`{fit: true}` — removes, layout, the -All toggles).
+  `MUTATION_CAMERA_ARG` (was `TOGGLE_CAMERA_ARG`) names the options slot per op so
+  `hasCameraOp()` sees a shot on any of them at build time; `update` no longer needs the
+  `collapsed` special case there, since the option is read on both routes. Inside a batch
+  every one of these lands on `batchExtra.camera`, last writer wins, exactly as toggles do.
 - **M5 (F15/F17/F18):** `chromeInset()` = `paneInsets(root, renderer.svg)`, read by
   `fitView`, `camera` and relayout's auto-refit (and the one mount-time fit, which now runs
   AFTER the transport mounts so there is chrome to measure). `g.camera` injects

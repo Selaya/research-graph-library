@@ -213,10 +213,13 @@
   function cap(text) { return { op: "caption", args: [text, { place: "top" }] }; }
   function beat(m, prev) {
     return [
-      { op: "batch", steps: [{ op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeTo(prev, m)] }], dur: 260 * P },
       // A union fit with the zoom lid pinned at 1: the shot pans between the two
-      // activations, and only pulls back when they no longer fit side by side.
-      { op: "camera", args: [{ nodes: [prev.id, m.id], maxK: 1, pad: 130, dur: 320 * P }] },
+      // activations, and only pulls back when they no longer fit side by side. It rides
+      // the add itself (F38), so the activation blooms into frame in the same tween.
+      { op: "batch", steps: [
+        { op: "addNode", args: [nodeOf(m), { camera: { nodes: [prev.id, m.id], maxK: 1, pad: 130 } }] },
+        { op: "addEdge", args: [edgeTo(prev, m)] },
+      ], dur: 320 * P },
       { op: "run.play", until: m.id },
     ];
   }

@@ -226,8 +226,8 @@
     { op: "run.play" },
     { label: "change request" },
     { op: "addNode", args: [{ id: "dns-record", label: "dns-record", data: { duration: "5s" } }] },
-    { op: "addEdge", args: [{ id: "e-app-dns", source: "app-deployment", target: "dns-record" }] },
-    { op: "camera", args: [{ nodes: ["app-deployment", "dns-record"], pad: 70, dur: 600 }] },
+    // F38 — the shot rides the edge's own commit; `true` frames its two endpoints.
+    { op: "addEdge", args: [{ id: "e-app-dns", source: "app-deployment", target: "dns-record" }, { camera: { pad: 70 } }], dur: 600 },
     { op: "addEdge", args: [{ id: "cycle-edge", source: "dns-record", target: "app-deployment", loop: true, maxIterations: 1 }] },
     { op: "highlight", args: [{ nodes: ["dns-record", "app-deployment"], edges: ["cycle-edge"], variant: "warn", pulse: true }] },
     { op: "caption", args: ["Cycle detected: app-deployment now depends on dns-record, which already depends on app-deployment.", { place: "bottom" }] },

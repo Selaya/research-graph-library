@@ -189,6 +189,28 @@ of the existing ops can compose it.
 `collapseAll` (and `update`'s `collapsed` route), resolved against the layout the toggle
 produces and flown on the toggle's own clock, so the pull-back and the bloom are one tween.
 
+### F38. Framing an added node is two tweens, the second aimed at an id the first has not drawn yet
+**Observed in:** `seq-basics` (l.160–161), `seq-checkout` (l.197–204, 212–214),
+`seq-oauth-pkce` (l.228–237, 250–251), `seq-saga` (l.216–219), `seq-chat-fanout`
+(l.176–180, 187–191), `seq-retry-circuit` (l.226–234), `terraform-plan` (l.228–230).
+Every sequence-diagram page advances the same way: a `batch` step that adds the next
+activation and its edge (`dur: 260`), then a `camera` step framing `[prev, new]` (`dur:
+300`). The new node blooms first — wherever the D10 anchor left it, often half off the
+pane — and only then does the camera pan to it: two tweens where one beat was wanted, and
+a pan that always arrives late. `terraform-plan` does the same with `addEdge` then
+`camera({nodes: [source, target]})`. The order cannot be swapped: a `camera` step before the
+add names an id nothing has drawn (`[smv:camera] unknown node id`), so the shot depends
+on a layout that does not exist until the add commits — the F37 diagnosis, one op over.
+The same hole is under `layout({dir})`: once a script owns the camera (D13) nothing
+refits, so a direction change re-flows the whole drawing under a shot composed for the
+old direction, and the `camera({fit})` that follows it is a second tween chasing the first.
+**Recommendation (S):** the F37 `{camera}` option on every relayout-producing op —
+`addNode` / `addEdge` / `removeNode` / `removeEdge` / `update` (its non-toggle route) and a
+second argument on `layout` — resolved against the layout the op produces and flown on
+its clock; inside a `batch`, composed against the batch's one commit. `true` frames the
+op's subject (the node, the edge's endpoints, `[after, id]`), or fits the graph when the
+op has no one subject.
+
 ### F18. `props()` replaces rather than merges, and out-ranks status styling
 **Observed in:** `agent-swarm`, `seq-saga`.
 Recolouring one node from an event handler wipes every other node's override unless the
@@ -394,6 +416,7 @@ described; every public addition is typed in `types/index.d.ts` and covered by t
 | F35 | done | a container the solver omitted is derived from its children alone (an empty one warns) |
 | F36 | done | `autoplay: 'auto'` honours `?auto=1`; `g.finished` / `g.finish(reason)`; `check-demos.mjs` awaits `window.smv.finished` |
 | F37 | done | `expand/collapse/expandAll/collapseAll(…, { camera })` frame the post-toggle layout in the toggle's own tween; storyboard args carry it; D13 ownership |
+| F38 | done | `addNode/addEdge/removeNode/removeEdge/update(…, { camera })` and `layout(o, { camera })` frame the op's subject against the layout it produces, on its own clock; a batch child's shot rides the batch's one commit |
 
 ## Suggested order
 

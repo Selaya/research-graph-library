@@ -389,6 +389,27 @@ close-up (`k` / `maxK` still win). Taking the shot takes the camera exactly as
 `applied: false` — so an assistant re-issuing "show me this open" gets the same frame twice
 instead of a warning. In a storyboard: `{ "op": "expand", "args": ["clean", { "camera": true }] }`.
 
+**Framing any mutation.** The same option is on every op that re-lays the graph out —
+`addNode`, `addEdge`, `removeNode`, `removeEdge`, `update` and `layout` — because "add
+this and show me it" has the same problem: the shot depends on where the new node *lands*,
+which no `camera` step can know until the add has already committed. `true` frames the
+op's subject: the added or patched node (with `after`, that node and the one it hangs
+off), an edge's two endpoints; ops with no one subject (a remove, `layout`) fit the whole
+graph. Inside a `batch` a child's shot is composed against the batch's single commit:
+
+```js
+await g.addNode({ id: "deploy" }, { after: "test", camera: true });     // frame test + deploy
+g.batch((b) => {                                                        // one commit, one shot
+  b.addNode(m, { camera: { nodes: [prev, m.id], maxK: 1, pad: 120 } });
+  b.addEdge(e);
+});
+await g.layout({ dir: "TB" }, { camera: true });   // refit after a direction change
+```
+
+Without it, `layout({ dir })` under a script-owned camera re-flows the drawing under a
+shot composed for the old direction — the anchored viewport never refits on its own once
+the script has taken the camera.
+
 Camera moves ride the shared clock and cancel-and-retarget like everything else; the
 first one in a script takes the viewport (auto-refit stops, the camera joins the scrub
 snapshots). Every fit — `g.fitView()`, `camera({fit})`, `camera({node|nodes})` — frames

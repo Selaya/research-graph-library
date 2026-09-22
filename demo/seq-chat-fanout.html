@@ -173,22 +173,22 @@
     var it = ACT[i];
     if (it.pair) {
       var it2 = ACT[i + 1];
+      // F38 — the shot rides the batch's one commit, composed against the layout it lands on.
       STEPS.push({ op: "batch", steps: [
         { op: "addNode", args: [nodeOf(it)] }, { op: "addEdge", args: [edgesFor(it)[0]] },
-        { op: "addNode", args: [nodeOf(it2)] }, { op: "addEdge", args: [edgesFor(it2)[0]] },
-      ], dur: 260 * P });
-      STEPS.push({ op: "camera", args: [{ nodes: [it.from[0].id, it.id, it2.id], maxK: 1, pad: 130, dur: 320 * P }] });
+        { op: "addNode", args: [nodeOf(it2), { camera: { nodes: [it.from[0].id, it.id, it2.id], maxK: 1, pad: 130 } }] },
+        { op: "addEdge", args: [edgesFor(it2)[0]] },
+      ], dur: 320 * P });
       STEPS.push({ op: "caption", args: ["Two balls, one row — a 70 ms push to B, a 2 ms queue write for C.", { place: "top" }] });
       STEPS.push({ op: "run.play", until: it.id });
       STEPS.push({ op: "run.play", until: it2.id });
       i += 2;
       continue;
     }
-    var addOps = [{ op: "addNode", args: [nodeOf(it)] }];
-    edgesFor(it).forEach(function (e) { addOps.push({ op: "addEdge", args: [e] }); });
-    STEPS.push({ op: "batch", steps: addOps, dur: 260 * P });
     var camNodes = it.from.map(function (f) { return f.id; }).concat([it.id]);
-    STEPS.push({ op: "camera", args: [{ nodes: camNodes, maxK: 1, pad: 120, dur: 300 * P }] });
+    var addOps = [{ op: "addNode", args: [nodeOf(it), { camera: { nodes: camNodes, maxK: 1, pad: 120 } }] }];
+    edgesFor(it).forEach(function (e) { addOps.push({ op: "addEdge", args: [e] }); });
+    STEPS.push({ op: "batch", steps: addOps, dur: 300 * P });
     if (it.id === "gwjoin") {
       STEPS.push({ op: "caption", args: ["The report waits for both — B's read receipt and the store's queued ack.", { place: "top" }] });
     }

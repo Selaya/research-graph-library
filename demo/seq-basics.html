@@ -157,8 +157,12 @@
       STEPS.push({ label: "profile" });
       STEPS.push({ op: "caption", args: ["Second request: the gateway trusts the JWT, so auth is skipped.", { place: "top" }] });
     }
-    STEPS.push({ op: "batch", steps: [{ op: "addNode", args: [nodeOf(m)] }, { op: "addEdge", args: [edgeTo(prev, m)] }], dur: 260 * P });
-    STEPS.push({ op: "camera", args: [{ nodes: [prev.id, m.id], maxK: 1, pad: 120, dur: 300 * P }] });
+    // The shot rides the add itself (F38): resolved against the layout the batch lands on,
+    // so the new activation blooms INTO frame instead of the camera chasing it afterwards.
+    STEPS.push({ op: "batch", steps: [
+      { op: "addNode", args: [nodeOf(m), { camera: { nodes: [prev.id, m.id], maxK: 1, pad: 120 } }] },
+      { op: "addEdge", args: [edgeTo(prev, m)] },
+    ], dur: 300 * P });
     STEPS.push({ op: "run.play", until: m.id });
   }
   STEPS.push({ label: "done" });

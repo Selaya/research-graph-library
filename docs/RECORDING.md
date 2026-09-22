@@ -98,6 +98,34 @@ container opens or closes on camera:
 - Inside a `batch`, the shot is composed against the batch's one shared commit; the last
   toggle in the batch to name one wins.
 
+**`addNode` / `addEdge` / `removeNode` / `removeEdge` / `update` / `layout` with `camera`**
+— the same option on every op that re-lays the graph out (F38). The shape is the one the
+sequence-diagram demos kept reaching for: a `batch` that adds the next activation, then a
+`camera` step framing `[prev, new]` — two tweens, the second of which can only start once
+the node has already bloomed wherever the anchored viewport left it.
+
+```json
+{ "op": "addNode", "args": [{ "id": "deploy" }, { "after": "test", "camera": true }] }
+{ "op": "batch", "steps": [
+    { "op": "addNode", "args": [{ "id": "app.2" }, { "camera": { "nodes": ["gw.1", "app.2"], "maxK": 1, "pad": 120 } }] },
+    { "op": "addEdge", "args": [{ "id": "m2", "source": "gw.1", "target": "app.2" }] }
+  ], "dur": 300 }
+{ "op": "removeNode", "args": ["legacy", { "camera": true }] }
+{ "op": "layout", "args": [{ "dir": "TB" }, { "camera": true }] }
+```
+
+- `true` frames the op's subject: the added or patched node (with `after`, that node and
+  the one it hangs off), an added edge's two endpoints, an updated edge's endpoints. A
+  remove and `layout` have no one subject, so `true` fits the whole graph.
+- Everything else is as for the toggles: resolved against the layout the op *lands on*,
+  flown on the step's `dur`, a fitted scale lidded at 1.5, `k`/`maxK`/`ease` on the target
+  still win, taking the shot takes the camera (D13). Inside a `batch` the shot rides the
+  batch's one commit and its `dur`, so put the option on any child and the `dur` on the
+  batch.
+- **Do not write** `layout({dir: "TB"})` then `camera({fit: true})` once the script owns
+  the camera: the relayout re-flows the drawing under the old shot for a whole commit
+  before the fit catches up. `layout(o, {camera: true})` is one tween.
+
 **`highlight`** — emphasis, replace-not-accumulate: one call IS the emphasis state, so
 you never clear the previous one first.
 
