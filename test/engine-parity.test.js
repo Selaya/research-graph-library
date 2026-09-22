@@ -1,4 +1,4 @@
-// M3 parity gate (INTERNALS §M3 contracts). Coordinate-identical parity with dagre is
+// M3 parity gate (INTERNALS "Layout gates"). Coordinate-identical parity with dagre is
 // not a meaningful target — an independent solver lands elsewhere and that is the point.
 // What IS gated: the structural invariants below hold for engineSolve on every fixture,
 // and the engine never draws a materially messier picture than dagre did:
@@ -326,7 +326,7 @@ test("seeded synthetics: feeding the drawing back is a fixed point", () => {
 });
 
 test("seeded synthetics: appending a node with prevOrder keeps every rank's order", () => {
-  // The one licensed exception (INTERNALS: "keep the best-crossing result"): a reshuffle
+  // The one licensed exception (INTERNALS "engineSolve", stability over crossings): a reshuffle
   // that STRICTLY reduces crossings among the pre-existing edges is allowed. Anything
   // else — an equal-crossing reshuffle, or a worse one — is a mental-map violation.
   let improved = 0;

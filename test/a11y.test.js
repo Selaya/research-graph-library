@@ -2,7 +2,7 @@
 // Pure logic (reading order, row derivation) gets full coverage; DOM application gets a
 // lightweight hand-rolled fake (same technique as test/labels.test.js and
 // test/integration.test.js) so this stays a Node-only unit test — real-browser behavior
-// is e2e-m2's job (INTERNALS.md M2 exit).
+// is e2e-m2's job (INTERNALS.md "End-to-end scripts").
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

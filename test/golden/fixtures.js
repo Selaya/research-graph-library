@@ -1,5 +1,5 @@
 // Shared fixtures for the layout golden tests + the update script (test/golden/update.js).
-// Explicit w/h on every node keeps sizeNode() out of the loop entirely — determinism (INTERNALS §Tests).
+// Explicit w/h on every node keeps sizeNode() out of the loop entirely — determinism (INTERNALS "Layout gates").
 
 export const NODE_WH = { w: 100, h: 36 };
 export const OPTS = { dir: "LR" };

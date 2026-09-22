@@ -16,7 +16,7 @@ import * as dagre from "@dagrejs/dagre";
 import { layout } from "../layout.js";
 
 /**
- * The solver contract (INTERNALS §M3), implemented on dagre.
+ * The solver contract (INTERNALS "The solver contract"), implemented on dagre.
  *
  * @param {{nodes: Array<{id:string,w?:number,h?:number,parent?:string}>,
  *          edges: Array<{id:string,source:string,target:string}>}} input

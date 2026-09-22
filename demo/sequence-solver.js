@@ -1,7 +1,7 @@
 // sequence-solver.js — a sequence-diagram layout for sparkle-motion-visualizer.
 //
-// The library's layout() is a shell around a pluggable solver (README "Layout", INTERNALS
-// §M3): the shell breaks cycles, routes back edges as arcs, pads containers to their
+// The library's layout() is a shell around a pluggable solver (docs/API.md "Layout", INTERNALS
+// "Layout"): the shell breaks cycles, routes back edges as arcs, pads containers to their
 // children, and hands the solver `{nodes:[{id,w,h,parent?}], edges:[{id,source,target}]}`
 // plus the merged layout opts. This solver ignores ranking entirely and places every
 // node on a grid instead:
@@ -80,7 +80,7 @@
       nodes.forEach(function (n) {
         if (!n.container) return;
         isContainer.add(n.id);
-        // The shell flags EVERY container `container: true` (INTERNALS §M3), not only an
+        // The shell flags EVERY container `container: true` (INTERNALS "Layout"), not only an
         // actor — a nested block (an activation group inside a lifeline) carries the same
         // flag. Only a container with NO children of its own is an actor declared ahead of
         // its first activation, so only that one gets a column minted for it: a column for

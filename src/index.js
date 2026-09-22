@@ -917,7 +917,7 @@ export function mount(el, spec = {}, opts = {}) {
   };
 
   /** D6 — condense/split mint ids the solver has never seen, and an unknown id sorts after
-   *  everything known (INTERNALS: "append unknown ids in input order"), i.e. at the tail of
+   *  everything known (INTERNALS "Layout": unknown ids are appended in input order), i.e. at the tail of
    *  its rank. That flatly contradicts the choreography, which flies the new node out of the
    *  sources' old centroid: it blooms there and then jumps past every untouched sibling on
    *  the way to the end of the rank. Give the new ids the slot the sources held instead —

@@ -1,5 +1,5 @@
 // Pairwise proper-segment-intersection counter used by the crossing-count
-// non-regression assertion (INTERNALS §Tests). Shared segments at a common
+// non-regression assertion (INTERNALS "Layout gates"). Shared segments at a common
 // node (e.g. two edges meeting at the same target) are NOT counted: the
 // orientation test below only fires on a strict interior crossing.
 
@@ -21,7 +21,7 @@ function properlyIntersects(a1, a2, b1, b2) {
  *   countCrossings(Object.values(dagreLayout(fixtureDiamond(), OPTS).edges)
  *     .filter((e) => !e.reversed).map((e) => e.points));
  *
- * These are the M3 non-regression bar (INTERNALS §Gates): the in-house engine must draw
+ * These are the non-regression bar (INTERNALS "Layout gates"): the in-house engine must draw
  * each fixture with AT MOST this many crossings. Hard-coded on purpose — the bar must not
  * move when the engine does, and the test must not need dagre installed to run.
  */

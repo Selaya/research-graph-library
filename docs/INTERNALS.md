@@ -1,1494 +1,941 @@
-# smv internals — module contracts (M0/M1)
+# smv internals
 
-This file pins the internal interfaces so
-modules developed in parallel compose. **Do not change a contract here without updating
-every consumer.** Plain-JS ESM, no TypeScript, no framework. Browser-only APIs must be
-guarded so every module *imports* cleanly in Node (tests run under `node --test`).
+A contributor's map of `src/`: what each module owns, the contracts between modules, how
+data moves through them, and the invariants a change must not break. The public API is in
+[`API.md`](API.md); runs are in [`RUN.md`](RUN.md) (simulated) and [`LIVE.md`](LIVE.md)
+(live); storyboards, director ops and the recording CLIs are in
+[`RECORDING.md`](RECORDING.md). This file covers only what those leave out.
 
-Naming: npm `sparkle-motion-visualizer` · global `SparkleMotion` · prefix `smv`
-(`.smv-*` classes, `--smv-*` custom properties, `dist/smv.esm.js`, `dist/smv.iife.min.js`).
+The code is plain-JS ESM with no TypeScript and no framework. Types are hand-written in
+`types/`. Naming: npm `sparkle-motion-visualizer`, IIFE global `SparkleMotion`, prefix
+`smv` (`.smv-*` classes, `--smv-*` custom properties, `data-smv-*` markers).
 
-## Data flow (one way)
+Source comments still cite short tags such as `D7`, `G2` or `F37`. They are labels from
+the design history and do not point to a document. The invariant each one names is stated
+next to it in the code, and the load-bearing ones are listed below.
 
-spec mutation → view (M1: expand/collapse/meta-edges) → measure → `layout()` → keyed diff
-→ `scene.commit()` (animated) → renderer writes DOM per frame. Token engine is orthogonal:
-decorates from `stateAt(t)` inside the same rAF loop, never mutates the graph.
+## Module map
 
-## Existing modules (done — read them)
+| module | owns | DOM? | in the IIFE |
+|---|---|---|---|
+| `events.js` | `emitter()`: `{on(type, fn) → off, off, emit}`; `"*"` receives every event | no | yes |
+| `anim.js` | `EASE`, `createTicker()` (the one clock), `prefersReducedMotion()` | guarded | yes |
+| `path.js` | polyline geometry: Bézier sampling, Catmull-Rom, resample, `pointAt`, `clipEnds` | no | yes |
+| `diff.js` | `diffKeys(old, new) → {enter, update, exit}` | no | yes |
+| `store.js` | `Store` (validated flat spec, mutations, condense/split, snapshot), `GraphError`, `containmentClosure`, `isConvex` | no | yes |
+| `query.js` | `makeQuery(store)`, `cloneItem` | no | yes |
+| `cycles.js` | `breakCycles`, `isAcyclic` | no | yes |
+| `measure.js` | text measurement, `truncate`, `sizeNode`, node size constants | guarded | yes |
+| `viewstate.js` | expand/collapse state and the `view` handed to layout (meta-edges, container sizing) | no | yes |
+| `layout.js` | the layout shell: cycle breaking, arc routing, container padding, solver dispatch | no | yes |
+| `engine.js` | `engineSolve`, the default layered solver | no | yes |
+| `adapters/dagre.js` | `dagreSolver` / `dagreLayout` on `@dagrejs/dagre` | no | no (ESM subpath) |
+| `scene.js` | the DOM-free diff-and-tween core (`scene.visual`) | no | yes |
+| `render.js` | SVG element lifecycle, commit-time styling, per-frame geometry, culling | yes | yes |
+| `styles.js` | the injected stylesheet (`CSS`, `injectStyles`) | yes | yes |
+| `viewport.js` | pan/zoom/fit, anchored correction, camera tweens, pane chrome measurement | yes | yes |
+| `index.js` | `mount()`: wires everything, owns the relayout pipeline and the storyboard host | yes | yes |
+| `condense-anim.js` / `split-anim.js` | the three-phase condense and split choreographies | no | yes |
+| `director.js` | camera target resolution, emphasis/dim, captions, the `--smv-*` override layer, the pulse | guarded | yes |
+| `storyboard.js` | the pure step sequencer, op table, `timeline()` builder | no | yes |
+| `transport.js` | the `.smv-transport` control bar | yes | yes |
+| `run.js` | Mode A engine: `compileRun`, `parseDuration` | no | yes |
+| `run-live.js` | Mode B engine: `replayLive`, `liveBoundaries`, `liveFedTargets` | no | yes |
+| `run-transport.js` | the run handle (`g.run()`): clocks, play/seek/speed/step, the live log | no | yes |
+| `run-render.js` | the `g.smv-tokens` layer and per-node run attributes | yes | yes |
+| `interact.js` | tap-to-toggle and `nodeclick`/`edgeclick` | yes | yes |
+| `a11y.js` | ARIA tree roles and keyboard navigation | yes | yes |
+| `a11y-table.js` | linearised `<table>` fallback | yes | no (ESM subpath) |
+| `export.js` | `exportSVG`, `exportPNG` | yes | no (ESM subpath) |
+| `preset-pipeline.js` | the `pipeline` preset (duration chips, status glyphs, odometer, total bar) | yes | yes |
 
-- `src/events.js` — `emitter()` → `{on(type,fn)→off, off, emit}`; `"*"` listens to all.
-- `src/store.js` — `Store` (validated spec, mutations, `condense`, `snapshot/restore`),
-  `GraphError(code, msg)`, `isConvex`.
-- `src/cycles.js` — `breakCycles(nodes, edges, pinned:Set)→Set<edgeId>`, `isAcyclic`.
-- `src/measure.js` — `textWidth`, `truncate`, `sizeNode(node, measure?, ctx?)→{w,h,reserve}`
-  (deterministic estimator under Node, scaled by the font's px size), constants `NODE_H`,
-  etc. `measure` is `opts.layout.measure` = `{extraWidth, extraHeight}`, each a number or
-  `(node, ctx)=>number`, where `ctx = {nodes: Map<id,specNode>, cache}` is the whole node
-  set (a hook whose chrome depends on other nodes — a durationAgg rollup chip — needs it).
-  `extraWidth` widens the derived box **inside** the `NODE_MAX_W` clamp (a measured node
-  still never exceeds 220px; past that the label gives way) AND comes back as `reserve`,
-  which render.js subtracts from the label's room, so reserved chrome is never label room.
-  A node that declares both `w` and `h` opts out entirely (`reserve: 0`); one that declares
-  only `w` keeps that width and still gets the reserve. `viewstate.view().sizes[id]` carries
-  `{w, h, reserve}`; `createViewState(store, measureOf)` takes a live getter for it so
-  `g.layout({measure})` re-measures without rebuilding the view state.
-- `src/layout.js` — **frozen seam (D2)**:
-  `layout(view, opts) → { nodes:{id:{x,y,w,h}}, edges:{id:{points,reversed?}}, bounds:{x,y,w,h}, reversedEdgeIds:Set }`.
-  `view = {nodes:[{id,w,h,parent?}], edges:[{id,source,target,loop?,maxIterations?}]}`.
-  `opts = {dir:'LR'|'TB'|…, nodesep, ranksep, marginx, marginy, pinnedReversals:Set}`.
-  x,y are **centers**. Edge `points` always run source→target in true direction; back
-  edges/self-loops carry `reversed: true` and are routed as consistent-side arcs
-  (below for LR). Callers persist `reversedEdgeIds` and pass it back as
-  `pinnedReversals` next layout (FAS pinning, D3).
+"Guarded" means the module touches browser APIs only after feature-detecting them.
 
-## Contracts to implement
+## Global invariants
 
-### `src/path.js` (pure, no DOM)
+These hold across modules. Most bugs this codebase has had came from breaking one of them.
 
-- `sampleCubic(p0, c1, c2, p3, n)` → `n` points `{x,y}` on a cubic Bézier, endpoints included. (Already imported by layout.js.)
-- `catmullRom(points, per = 8)` → dense polyline through the given points (centripetal
-  or uniform CR; straight pass-through when `points.length < 3`).
-- `resample(points, n = 24)` → exactly `n` points uniformly spaced by arc length
-  (endpoints preserved; handles zero-length input by repeating the point).
-- `lerpPoints(a, b, t)` → pointwise lerp of two equal-length arrays.
-- `arcLength(points)` → number.
-- `pointAt(points, t)` → `{x, y, angle}` at normalized arc-length position `t∈[0,1]`
-  (`angle` in radians of the local direction; used for token pulses + arrowheads).
-- `pathString(points)` → `"M x y L …"` (numbers rounded to 2 decimals).
-- `clipEnds(points, srcRect, tgtRect)` → `{points, arrow:{x,y,angle}}` where rects are
-  `{x, y, w, h, r}` (x,y = **center**, `r` = corner radius). Trim the polyline so it
-  starts on the source border and ends on the target border (segment/rect intersection;
-  corner-radius approximation is fine), plus the arrowhead pose at the target end.
-  Must be cheap: it runs **per frame** during transitions (G7). If the two rects overlap
-  or the polyline is fully inside, return a degenerate short segment rather than NaN.
+1. **Every module imports cleanly under Node.** Tests run under `node --test` with no
+   browser, so browser APIs are feature-detected or reached only through an injected
+   `doc`. Tests that need a DOM use hand-rolled fakes; `getBoundingClientRect` and similar
+   may be missing.
+2. **One clock.** All choreographed motion (scene tweens, viewport tweens, condense/split
+   phases, storyboard waits, run playback, the pulse) is driven by one `createTicker()`
+   per instance. No per-element WAAPI, no `setTimeout` pacing, and no CSS transitions for
+   choreographed motion. CSS transitions are only for hover and focus affordances. This is
+   what makes `ticker: "manual"` recording deterministic.
+3. **Commit-time styling, frame-time geometry.** `data-*` attributes and `--smv-*`
+   properties are written only at style-commit time (`renderer.styleCommit`). The
+   per-frame path (`renderer.frame`) writes only geometry and opacity.
+4. **Size animates through `width`/`height`, never a group `scale()`.**
+5. **Anything suspended on the clock settles on teardown.** An awaitable that resolves from
+   inside a tick has to register `ticker.onDestroy()` and resolve `{canceled: true}` from
+   it, otherwise `g.destroy()` strands it forever. The condense and split phases, the
+   storyboard's `waitMs`, and viewport tweens all do this.
+6. **Reduced motion shrinks durations but keeps sequencing.** Under
+   `prefers-reduced-motion`, durations drop to about 1ms and phases still run in order.
+   `motion: "full"` overrides it. `prefersReducedMotion()` is read in `index.js` only;
+   modules receive a `reduced` flag or a computed duration.
+7. **Determinism.** The layout, the engines (`compileRun`, `replayLive`), the director's
+   pulse and the storyboard timing have no `Math.random` and read no wall clock. The same
+   inputs produce byte-identical output.
+8. **Copies out, never live refs.** `g.node()`, `g.edge()`, `g.spec()`, the query methods
+   and `run.state()` all hand back copies. Callers may mutate what they receive.
+9. **Every `g` mutation returns an awaitable.** It is a thenable
+   `{then, catch, finally, cancel}` resolving `{canceled, applied?}`, never a bare promise
+   and never `g`. The director state setters (`highlight`, `caption`, `props`, `style`)
+   return `g` and are not awaitable.
 
-### `src/diff.js` (pure)
+## Data flow
 
-`diffKeys(oldIterable, newIterable)` → `{enter: [], update: [], exit: []}` (arrays of keys;
-`update` = present in both). Accepts any iterables of keys.
-
-### `src/anim.js`
-
-- `EASE = { linear, cubicOut, cubicInOut, overshoot }` — `fn(t)→t'` (overshoot = back-out,
-  slight >1 excursion, used by condense reveal).
-- `createTicker()` → `{ now(), add(fn), remove(fn), destroy() }`. ONE rAF loop (D1);
-  callbacks get `now()` ms each frame. Clock source: a WAAPI `Animation` on a detached
-  element when `document`+`Element.animate` exist (read `currentTime`), else
-  `performance.now()`. The loop starts when the first callback is added, stops when the
-  last is removed. Under Node (no rAF) `add` still works and `now()` uses
-  `performance.now()`; a manual `tick(ms)` method advances time for tests
-  (`createTicker({manual: true})`).
-- `prefersReducedMotion()` → bool (false under Node). When true, callers shrink
-  durations to ≤ 1ms but preserve sequencing (G9).
-
-### `src/scene.js` (DOM-free diff-and-animate core, D9 interruption)
-
-```js
-createScene(ticker) → scene
-scene.visual = { nodes: Map<id,{x,y,w,h,opacity}>, edges: Map<id,{points, opacity, reversed}> }
-scene.onFrame(cb)          // cb(visual) after each interpolation step; also once per commit
-scene.commit(target, opts) → Transition
+```
+spec mutation (Store)
+  → viewstate.view()       visible nodes, meta-edges, sizes (measure.js)
+  → layout(view, opts)     shell + solver: rects, edge polylines, order/layers
+  → renderer.styleCommit   data-* / --smv-* (+ director.propsLayer())
+  → scene.commit(target)   keyed diff, one tween on the shared ticker
+  → renderer.frame(visual) per tick: geometry only
+  → viewport               anchored correction, auto-refit or camera shot, same duration
+  → bus "commit"           a11y, preset, director.reassert, run layer react
 ```
 
-- `target = { nodes:{id:{x,y,w,h}}, edges:{id:{points, reversed?}} }` (a layout result).
-- `opts = { duration=350, easing=EASE.cubicOut, enterFrom?:{id:{x,y}}, holdOpacity?:Set<id> }`.
-- Semantics: keyed diff of `scene.visual` vs `target`.
-  - update: tween x/y/w/h; edges: target points → `resample(catmullRom(pts), 24)`, then
-    lerp from current 24-pt geometry.
-  - enter: nodes start at `enterFrom[id]` (e.g. container centroid) or target position,
-    opacity 0→1, size from 60%→100%.
-  - exit: opacity →0, then delete from `visual`.
-- **Interruption = cancel-and-retarget (D9):** `commit()` while a transition is live
-  samples the *current interpolated* `visual` as the new "from", cancels the old
-  transition (its promise resolves with `{canceled: true}`), and starts one new
-  transition. Two transitions never write the same element.
-- `Transition = { promise, cancel(), done }` — promise resolves `{canceled: boolean}`.
-- Zero/short durations complete on the next tick (never synchronously re-entrant).
+The run engines are orthogonal to this flow. `run-render.js` samples
+`stateAt(t)` / `replayLive(…, t)` each tick and decorates the current `scene.visual`. It
+never mutates the graph.
 
-### `src/styles.js` (theme + injected CSS, D7)
+## Core primitives
 
-- `injectStyles(doc)` — one deduped global `<style data-smv-styles>` (G8).
-- CSS uses only `.smv-*` classes, `[data-*]` selectors, `--smv-*` custom properties.
-  Back edges: `.smv-edge[data-reversed] path.smv-edge-line { stroke-dasharray: 4 3; opacity:.7 }`.
-  Hover/focus affordances may use CSS transitions; **choreographed motion may not** (D1).
-- Light/dark via `:where()` defaults + `data-smv-theme="dark"` overrides on the mount root.
+### `anim.js`
 
-### `src/render.js` (DOM; only `mount()` touches it)
+- `createTicker({manual?}) → {now, add(fn), remove(fn), onDestroy(fn) → off, destroy, tick(ms)}`.
+  The rAF loop starts on the first `add` and stops on the last `remove`. The clock source
+  is a WAAPI `Animation`'s `currentTime` on a detached element when available, otherwise
+  `performance.now()`. `manual: true` never schedules frames: `tick(ms)` advances time and
+  fires callbacks, for tests and the recorder.
+- `EASE = {linear, cubicOut, cubicInOut, overshoot}`, each `fn(t) → t'`. `overshoot` is
+  back-out with a slight excursion past 1, used for the condense and split reveals.
 
-```js
+### `path.js`
+
+Pure, shared by `layout.js`, `scene.js`, `render.js` and `run-render.js`.
+
+- `sampleCubic`, `catmullRom(points, per = 8)` (straight pass-through below 3 points),
+  `resample(points, n = 24)` (arc-length uniform, endpoints kept, zero-length input
+  repeats the point), `lerpPoints`, `arcLength`, `pathString` (2-decimal `M…L…`).
+- `pointAt(points, t) → {x, y, angle}` at arc-length fraction `t`. Tokens, edge labels
+  and arrowheads use it.
+- `clipEnds(points, srcRect, tgtRect) → {points, arrow: {x, y, angle}}`, where rects are
+  centre-origin `{x, y, w, h, r}`. It runs **per frame** during transitions, so keep it
+  cheap and NaN-proof: overlapping rects produce a short degenerate segment, not NaN.
+
+## Store (`store.js`, `query.js`, `cycles.js`)
+
+`Store` holds the flat spec: `nodes: Map`, `edges: Map`, and `rev`, a counter bumped on
+every structural change that memo keys use. Cycles are allowed; nothing rejects them.
+Parent chains may not cycle. Errors are `GraphError(code, message)`; codes are listed in
+[API.md › Errors](API.md#errors).
+
+- `update(id, patch, {replace})`: `data` merges shallowly; an `undefined` value deletes
+  that key; `replace` swaps the payload; an emptied `data` is dropped so `spec()` still
+  round-trips through JSON.
+- `condense(ids, newNode)`: convexity and edge redirection are judged over
+  `containmentClosure(store, ids)`, which includes the children of condensed containers.
+  `isConvex()` skips `loop: true` edges, since a back edge re-entering the set is not a
+  path through it. `parent: null` on the merged node means "inherit". If the sources'
+  parents differ and no parent was named, `condense` warns. `index.js` and
+  `condense-anim.js` ask the same convexity question synchronously before starting the
+  choreography.
+- `split(id, {nodes, edges})`: `id` must exist and must not have children
+  (`split-container`). New ids must not collide (`dup-id`). Internal edges may only join
+  new nodes (`split-edge`). Entry parts are the new nodes with no internal in-edge, and
+  exit parts are those with no internal out-edge. Every former in-edge is redirected to
+  every entry part: the first keeps its id and clones get `id + ':' + targetId`. Out-edges
+  are redirected the same way from every exit part. `weight` is kept and self-loops on
+  `id` are dropped. Wiring with no entry or no exit (a cycle across every part) is rejected
+  up front (`split-no-entry` / `split-no-exit`), and only when there is something to
+  redirect. Returns `{added, addedEdges, removedEdges}`. `g.split()` runs the same guards
+  synchronously.
+- `snapshot()` is a JSON deep copy of `spec()` and `restore(snap)` replaces the state
+  wholesale. Condense and split compose from primitives, so both round-trip.
+
+`makeQuery(store)` returns `{nodes(filter?), edges(filter?), children(id),
+descendants(id), roots()}`. A filter is a predicate, or a match object whose top-level
+keys compare with `===` and whose `data` key matches shallowly. Results are `cloneItem`
+copies. `index.js` spreads the result onto `g`.
+
+`breakCycles(nodes, edges, pinned) → Set<edgeId>` picks edges to reverse so that ranking
+sees a DAG. `loop: true` edges and pinned edges (reversed by the previous layout) are
+reversed up front, and a DFS reverses whatever back edges remain. A pin that the DFS
+would not re-cut is released once the graph stays acyclic without it. Self-loops are
+ignored. Pinning is what stops an unrelated append from flipping which side a loop is
+drawn on.
+
+## View state (`viewstate.js`, `measure.js`)
+
+`createViewState(store, measureOf) → vs`, where `measureOf` is a live getter for
+`opts.layout.measure` so `g.layout({measure})` re-measures without rebuilding the view
+state.
+
+- `vs.collapsed: Set<id>`, seeded from `node.collapsed === true`. A node declared
+  collapsed before its children exist is tracked in `pendingCollapse`, and
+  `expand()`/`collapse()` own that bookkeeping.
+- `vs.expand(id)`, `vs.collapse(id)`, `vs.expandAll()` and `vs.collapseAll()` mutate the
+  set only and return what changed. `index.js` drives the relayout. `vs.containers()`
+  lists container ids parents-first. `vs.visibleAncestor(id)` maps a hidden id to the
+  ancestor drawn in its place, and the camera and highlight resolve ids through it.
+- `vs.view() → {nodes, edges, sizes, meta}` is the layout input:
+  - A node is visible when every ancestor is expanded. Children of expanded containers
+    carry `parent`.
+  - A container is any node with children, or one declared `container: true`. The
+    childless case is marked `empty`, which render writes as `data-empty`.
+  - A collapsed container is a plain node sized by `sizeNode`, plus room for its `×N`
+    badge.
+  - **Two edge remaps, not to be confused.** (1) An endpoint that is hidden re-attaches to
+    its nearest visible ancestor. The edge loses its identity and dedupes into
+    `meta:<src>-><tgt>` with `weight` = count. Self-referential results drop. A loop
+    wholly inside a collapsed container becomes a loop badge instead of an edge. (2) An
+    endpoint that is an expanded container re-attaches to that container's entry or exit
+    child and keeps its id, so it simply tweens across an expand. Remap (2) is why no edge
+    handed to the solver ever touches a container.
+  - `meta = {metaEdges: Map<metaId, {sources, weight}>, loopBadges: [{id, max}]}`.
+
+`measure.js`: `textWidth` uses canvas `measureText` in a browser and a deterministic
+per-glyph estimate scaled by font px under Node, which keeps golden files browser-free.
+`sizeNode(node, measure, ctx) → {w, h, reserve}`. `measure = {extraWidth, extraHeight}`,
+each a number or `(node, ctx) => number`, with `ctx = {nodes: Map, cache}` so a hook can
+depend on other nodes (for example a rollup chip). `extraWidth` is added **inside** the
+`NODE_MAX_W` (220px) clamp and returned as `reserve`, which `render.js` subtracts from the
+label's room: reserved chrome is never label room. A node declaring both `w` and `h` opts
+out (`reserve: 0`). One declaring only `w` keeps that width and still gets the reserve.
+How presets use this is in [PRESETS.md](PRESETS.md).
+
+## Layout (`layout.js`, `engine.js`, `adapters/dagre.js`)
+
+### The shell: `layout(view, opts)`
+
+```
+layout(view, opts) → {
+  nodes:  {id: {x, y, w, h}},          // x, y are CENTRES
+  edges:  {id: {points, reversed?}},   // points always run source → target
+  bounds: {x, y, w, h},
+  reversedEdgeIds: Set,                // persist → opts.pinnedReversals
+  order:  string[][],                  // persist → opts.prevOrder
+  layers: string[][],                  // persist → opts.prevLayers
+  slots?: {id: number},                // only when opts.componentOrder is an array
+}
+```
+
+- Cycle handling lives in the shell, not the solver. `breakCycles` runs with
+  `pinnedReversals`, and back edges and self-loops are withheld from the solver and
+  routed here as consistent-side arcs (below the flow for LR). They cannot flip sides
+  across re-layouts.
+- **Solver input invariant:** the edge set handed down is acyclic, and no edge touches a
+  node that has children. Solver nodes are `{id, w, h, parent?, container?, data?}`.
+  `container: true` marks every container, including an empty one. `data` is the node's
+  spec data, or `opts.hint(node)`'s return value when `hint` is a function. Every custom
+  key on the opts reaches the solver by spread.
+- The shell derives `opts.chromePad` from `CONTAINER_PAD` (`{top: 40, side: 12, bottom:
+  12}`: the 28px header strip plus a 12px gap, and 12px on the other sides) so the solver
+  reserves the padding `padContainers` adds afterwards. When `componentOrder` is an array
+  it also derives `opts.backLinks`, the withheld cycle edges as source/target pairs, so
+  connectivity is judged on the real graph rather than the acyclic one. Both are written
+  to the shell's own copy of the opts, never the caller's.
+- `padContainers` grows each container rect to its children plus `CONTAINER_PAD`. If the
+  solver returned no rect for a container, the rect comes from the children's bounding
+  box alone rather than being unioned with a `{0,0}` placeholder. Leaving containers to
+  the shell is a supported way to write a solver.
+- Neither the shell nor any default bundle imports dagre. `scripts/build.js` fails the
+  build if dagre appears in one.
+
+Writing a custom solver is documented in [API.md › Layout](API.md#layout) and
+[API.md › What a solver sees](API.md#what-a-solver-sees); `demo/sequence-solver.js` is a
+worked example.
+
+### The solver contract
+
+```
+solver(input, opts) → {nodes, edges: {id: {points}}, order, layers?, slots?}
+opts = {dir: 'LR'|'RL'|'TB'|'BT', nodesep, ranksep, marginx, marginy,
+        prevOrder?, prevLayers?, chromePad?, componentOrder?, componentOrderMemory?, backLinks?}
+```
+
+Container rects must strictly contain their children. Edge `points` include the bend
+chain (at least 2 points, source to target). `order` holds the final per-rank real-node
+sequences. Multi-edges and disconnected components must work.
+
+### `engineSolve` (`engine.js`)
+
+Pure, dependency-free and deterministic: stable sorts, no randomness. It works internally
+in TB and transposes or flips for the other directions. Passes:
+
+1. **Nesting.** Derive the cluster tree and keep each cluster's nodes on a contiguous rank
+   interval, using border ranks per cluster level.
+2. **Ranking.** Longest-path ranking, then one tightening pass that pulls nodes with slack
+   toward their successors.
+3. **Dummies.** Multi-rank edges are split into unit spans. Per-cluster border dummies on
+   every spanned rank keep foreign nodes out of a cluster's interval.
+4. **Ordering.** Initialise from `prevOrder` (unknown ids are appended in input order),
+   otherwise DFS. Then alternate median sweeps with transpose passes and keep the result
+   with the fewest crossings.
+5. **Coordinates.** The rank axis is cumulative max extent plus `ranksep`. In-rank
+   positions come from median-alignment relaxation sweeps with `nodesep` enforced in both
+   directions; dummies straighten first. Brandes–Köpf is not used on purpose.
+6. **Margins** are applied last.
+
+Invariants inside the engine:
+
+- **Fixed point.** `engineSolve(g, {prevOrder, prevLayers})` fed its own output
+  reproduces `order`, `layers`, `nodes` and `edges` exactly. `layers` is the same per-rank
+  sequence as `order` with edge dummies and spanning-container borders interleaved as
+  opaque tokens. Without it a re-layout re-derives bend positions, scores the arrangement
+  differently, and reshuffles ranks nobody touched. A solver that cannot produce `layers`
+  (dagre) omits it and the shell substitutes `[]`.
+- **Stability over crossings.** Ties and equal-crossing decisions prefer the previous
+  order. The only reshuffle allowed on an append is one that strictly reduces crossings
+  among the existing edges (`test/engine-parity.test.js`).
+- **The ordering search is idempotent, not just bounded.** It ends only when a full round
+  of sweeps from the best arrangement fails to improve on it. Stopping after a fixed count
+  leaves an order the next solve can still beat, which breaks the fixed point.
+- **A cluster's block order is global, not per-rank.** Which side of a sibling a container
+  sits on is decided once for all its ranks. Per-rank choices yield sibling rects that
+  each contain the other's children.
+- **Container chrome is reserved, not assumed.** A border dummy is at least as wide as the
+  padding the rect will grow by. Nested borders are separated by the nesting step, not a
+  full `nodesep`. Border alignment iterates until rects stop moving. Sibling containers
+  with overlapping rank spans are grown to their common window. `chromePad` is reserved on
+  the rank axis so the padded rect does not eat the next rank at small `ranksep`.
+- **`componentOrder` is a primary key.** `assignSlots` (union-find over edges, containment
+  and `backLinks`) gives each connected component the index of the first entry naming one
+  of its ids, or `spec.length` if none does. Only `sortRank` (item sort and
+  sibling-block reassignment lead with `slot`) and `transpose` (never swaps across slots)
+  enforce it, and no median, crossing count or previous order can move an item out of its
+  band. When the option is absent, `g.slot === null`, every slot is 0 and the drawing is
+  identical to one built without the feature. The solve emits `slots` only when the option
+  was active.
+- **`componentOrderMemory` is a fallback, never a rival.** It is applied strictly after
+  the list and only to components no listed id claimed. Folding it into the entries would
+  let a remembered id in entry `i` silently beat the same id listed explicitly in entry
+  `j > i`.
+
+### Order, layers and slot memory in `index.js`
+
+`relayout()` persists `reversedEdgeIds`, `order`, `layers` and `slots` from each result
+and feeds them back as `pinnedReversals`, `prevOrder`, `prevLayers` and
+`componentOrderMemory`. The memory is filtered to live ids, resolved through collapses,
+and never names the trailing unlisted slot. It belongs to one `componentOrder` list:
+`relayout()` compares the list's JSON with the one it stored and drops the memory when it
+changes. All four values are part of the storyboard snapshot (see
+[Storyboard host](#storyboard-host-indexjs)).
+
+`reseat(newIds, sourceIds)` is called by condense and split. It moves the ids those ops
+mint into the position their sources held in `order`, `layers` and the slot memory.
+Without it, an unknown id sorts to the end of its rank and the merged node jumps past
+every sibling after blooming at the sources' centroid.
+
+### `adapters/dagre.js`
+
+`dagreSolver(input, opts)` implements the solver contract on `@dagrejs/dagre` (compound
+graph, multigraph, rankdir mapping, `order` derived from dagre's result).
+`dagreLayout(view, opts) = layout(view, {...opts, solver: dagreSolver})`. dagre is an
+optional peer dependency, and this is the only file that imports it.
+
+## Scene and rendering (`scene.js`, `render.js`, `styles.js`, `viewport.js`)
+
+### `scene.js`
+
+```
+createScene(ticker) → scene
+scene.visual   {nodes: Map<id, {x, y, w, h, opacity}>, edges: Map<id, {points, opacity, reversed}>}
+scene.onFrame(cb)                 cb(visual) after each step, and once per commit
+scene.commit(target, opts) → {promise, cancel(), done}   promise → {canceled}
+scene.transition                  the live transition, or null
+opts = {duration = 350, easing, enterFrom?: {id: {x, y}}, exitTo?: {id: {x, y}},
+        easeOverride?: {id: fn}, holdOpacity?: Set}
+```
+
+- Keyed diff of `visual` against `target`. Updated nodes tween x/y/w/h. Every edge is
+  normalised to `EDGE_POINTS` (24) arc-length-uniform points (`resample(catmullRom(…))`),
+  so any two geometries lerp pointwise. Entering nodes start at `enterFrom[id]` or their
+  target, at 60% size and opacity 0. Exiting nodes fade out, or fly to `exitTo[id]` while
+  shrinking to 60%, and are then deleted from `visual`. `easeOverride` gives one node its
+  own easing (the overshooting reveal).
+- **Interruption is cancel-and-retarget.** A `commit()` during a live transition samples
+  the current interpolated `visual` as the new start, resolves the old promise with
+  `{canceled: true}`, and starts exactly one new transition. Two transitions never write
+  the same element.
+- Zero and short durations complete on the next tick, never synchronously.
+
+### `render.js`
+
+```
 createRenderer(rootEl, doc) → r
 r.svg, r.viewportG
-r.styleCommit(storeLike)   // at commit time only: data-* attrs + --smv-* props per element (D7)
-r.frame(visual)            // per frame: geometry only
+r.styleCommit(like)      commit time: data-* and --smv-* per element, label text/truncation
+r.frame(visual)          per tick: geometry only
+r.setCull(fn | null)
+r.mark(id, value)        data-condense="src"|"reveal"|null (choreography channel)
+r.emphasize(id, value)   data-emph   (director channel)
+r.dim(id, value)         data-dim    (director channel)
+r.node(id), r.edge(id), r.destroy()
 ```
 
-- DOM shape: `svg.smv > g.smv-viewport > (g.smv-edges > g.smv-edge*, g.smv-nodes > g.smv-node*)`.
-- Node: `<g class="smv-node" data-id><rect rx=8/><text/></g>`; per frame set
-  `transform=translate(x−w/2, y−h/2)`, rect `width/height` (**never** group scale, D1),
-  text centered at `(w/2, h/2)`, `opacity`.
-- Edge: `<g class="smv-edge" data-id><path class="smv-edge-line"/><path class="smv-edge-arrow"/></g>`;
-  per frame: `clipEnds(points, srcRect, tgtRect)` using the *current-frame* node rects
-  from `visual`, then set `d` and position/rotate the arrow path (a small filled
-  triangle, G6 — no `<marker>`).
-- Elements enter/exit the DOM keyed by id; renderer owns element lifecycle from the ids
-  present in `visual`.
-- Labels: `truncate(label, w − 2·NODE_PAD_X)` re-applied on styleCommit (not per frame).
+- DOM shape: `svg.smv > g.smv-viewport > (g.smv-edges > g.smv-edge*, g.smv-nodes >
+  g.smv-node*)`, and `run-render.js` appends `g.smv-tokens` after the nodes. A node is
+  `<g class="smv-node" data-id>` with a rect and text; containers get
+  `data-container`, header chrome and a top-left label, and are drawn before their
+  children. An edge is `<g class="smv-edge" data-id>` with `path.smv-edge-line` and
+  `path.smv-edge-arrow`: a hand-posed triangle, never `<marker>`.
+- Elements are created and removed keyed by the ids present in `visual`. A re-added id
+  gets a fresh `<g>`, so any state written outside the style commit (`data-emph`,
+  `data-dim`) must be re-asserted on `commit`; the director does this.
+- Per frame, `clipEnds` runs against the **current-frame** node rects from `visual`, so
+  edges track nodes mid-tween.
+- `styleCommit(like)` takes `{nodes, edges, reversed, style, sizes, props, edgeLabelMaxW}`
+  and writes `data-status`, `data-mode`, `data-container`, `data-collapsed`, `data-empty`,
+  `data-count`, `data-reversed`, `data-weight` and `data-pill`. It writes the user style
+  function's `--smv-*` output merged under the director's `props` layer; see
+  [Director](#director-directorjs). Only `--smv-*` keys are accepted. The label is
+  truncated to `w − 2·NODE_PAD_X − reserve`.
+- Edge labels: `edge.label` is a string or `{text, place, rotate, pill, maxW}`, normalised
+  at commit time to `{text, t, rotate, pill, w}` and cached on the element record so
+  `frame()` does no map lookups. The label is positioned per frame at `pointAt(clipped, t)`
+  with a perpendicular nudge. `rotate` is normalised into ±90°. `pill` inserts a
+  `rect.smv-edge-pill` behind the text. The truncation cap is `maxW`, then
+  `layout.edgeLabelMaxW`, then 90px, measured in the label's own 10px font. Labels do not
+  affect layout. A meta-edge aggregating two or more labelled edges drops the label.
+- `mark` and `emphasize`/`dim` are deliberately separate attributes, so a highlight that
+  outlives a merge does not fight the condense choreography.
 
-### `src/viewport.js` (DOM)
+### Culling
 
-```js
+- Above `CULL_THRESHOLD` (150) elements in `visual`, `frame()` asks `cullFn()` for the
+  visible world rect and sets `data-culled` (`display: none`) on groups entirely outside
+  it, skipping their geometry writes. Below that threshold the test costs more than it
+  saves.
+- `index.js` wires `setCull(() => viewport.visibleWorldRect())` and re-arms from
+  `viewport.onChange`, not pointer events, because `fitView()`, `zoomBy()`, the anchored
+  correction and every tween tick move the rect with no pointer event. The re-arm repaints
+  only when the transform actually changed, and skips while a scene transition is already
+  repainting.
+- Anything that reads the live DOM must account for culling. `export.js` clears culling on
+  its clone by default. `a11y.js` never parks the roving tabindex on a culled group, and
+  its arrow, Home and End keys walk only the focusable subset. The token layer is never
+  culled: `run-render.js` reads positions from `scene.visual`, which culling does not
+  touch.
+- There is no compositor-offload layer. `demo/m3-scale.html` and `test/e2e-m3.mjs`
+  measure synchronous pan cost on a 300-node graph. Adding one is justified only if the
+  headless median exceeds 8ms per frame.
+
+### `styles.js`
+
+`injectStyles(doc)` injects one deduplicated `<style data-smv-styles>` per document,
+however many instances mount. The CSS uses only `.smv-*` classes, `[data-*]` selectors
+and `--smv-*` properties, with defaults at zero specificity (`:where`) so user rules and
+`data-smv-theme="dark"` win. The full attribute and property reference is
+[THEMING.md](THEMING.md). Things a CSS edit must keep:
+
+- `[data-smv-record] *` disables every transition and animation during recording.
+- The status tint is `--smv-status-fill`, a `color-mix` of the status token over
+  `--smv-fill` behind `@supports`, so an inline fill composes with the tint instead of
+  hiding it.
+- The pulse is one rule, `stroke-width: calc(2.5px + var(--smv-pulse, 0) * 2px)` on
+  `[data-emph]`. An unset `--smv-pulse` renders exactly as without the pulse.
+- **The caption strip, the transport bar and the preset's total bar each position
+  themselves against the pane independently.** Any placement rule has to beat the
+  transport-aware offset by specificity: for example
+  `.smv-root.smv-has-transport .smv-caption[data-place="top"]{bottom:auto}` must outrank
+  `.smv-has-transport .smv-caption{bottom:46px}`, or a top caption stretches over the pane.
+  `test/caption-place.test.js` guards this. Fits avoid the chrome through `paneInsets()`
+  (below), not through CSS.
+- `a11y.js`, `a11y-table.js` and the preset inject their own deduplicated `<style>`
+  blocks rather than editing this file.
+
+### `viewport.js`
+
+```
 createViewport(svgEl, viewportG, ticker) → vp
-vp.fit(bounds, pad=24, animate=false)     // explicit only (D10)
-vp.transform                              // {x, y, k}
-vp.screenToWorld(pt), vp.worldToScreen(pt)
-vp.anchor(worldPtBefore, worldPtAfter, duration)  // translate-only correction, same clock
-vp.contains(bounds) → bool                // for the auto-refit-only-if-outside rule
-vp.destroy()
+vp.transform {x, y, k}            vp.target (where a live tween is heading, else transform)
+vp.userMoved (get/set)            vp.size() → {w, h}
+vp.fit(bounds, {pad = 24, duration = 0, ease, maxK = FIT_MAX_K, inset}) → Promise<{canceled}>
+vp.fit(bounds, pad, animate)      the older positional form, still accepted
+vp.moveTo({x?, y?, k?}, {duration = 0, ease}) → {promise, cancel}
+vp.anchor(worldBefore, worldAfter, duration)   translate-only correction on the shared clock
+vp.contains(bounds), vp.visibleWorldRect(pad = 200), vp.zoomBy(f, at?)
+vp.screenToWorld(pt), vp.worldToScreen(pt)     svg-local coordinates, not client
+vp.setInteractive(bool), vp.onChange(cb) → off, vp.destroy()
+paneBox(size, pad, inset) → {cx, cy, w, h}     PURE
+paneInsets(root, svgEl) → {top, right, bottom, left}
+normInset(number | partial) → {top, right, bottom, left}
+MIN_K = 0.1, MAX_K = 4, FIT_MAX_K = 1.5
 ```
 
-Pan: pointer drag. Zoom: wheel **only with ctrl/cmd** (never hijack page scroll) + pinch.
-`userMoved` flag once the user pans/zooms manually.
+- Zoom only with ctrl/cmd+wheel or pinch. Plain wheel is never intercepted, so the page
+  keeps scrolling. A manual pan or zoom sets `userMoved`, which turns auto-refit off.
+- `stopTween(canceled)` settles the tween's promise on every exit path: landing,
+  retarget, `setNow`, destroy, and clock teardown via `ticker.onDestroy`.
+- Relative camera moves compose onto `vp.target`, never onto a mid-tween sample.
+- `paneInsets()` measures the chrome the library mounts over the pane (`.smv-transport`,
+  `.smv-totalbar`, `.smv-caption`). Each bar is assigned to the top or bottom edge it
+  hugs and the deepest intrusion per side wins. Anything covering half the pane is treated
+  as a host panel and ignored, and top and bottom are each capped at 40%. Left and right
+  come only from a caller's `inset`. It returns zeros without `getBoundingClientRect`, so
+  fake-DOM tests fit as before. `fit()` and `resolveCameraTarget()` both frame through
+  `paneBox()`, so they agree by construction.
+- This file does not read `prefersReducedMotion()`. Callers pass the duration.
 
-### `src/index.js` — public API
+## The instance (`index.js`)
 
-```js
-export function mount(el, spec, opts) → g
-export const version
+`mount(el, spec, opts) → g` builds one of everything (store, view state, ticker, scene,
+renderer, viewport, director, bus) and wires them. The public surface is documented in
+[API.md](API.md). Internal contracts:
+
+### The relayout pipeline
+
+`relayout({focal, duration, enterFrom, exitTo, easeOverride, camera})`:
+
+1. `vs.view()`, then `layout(view, {...layoutOpts, pinnedReversals, prevOrder,
+   prevLayers, componentOrder*})`, persisting the result's channels.
+2. `renderer.styleCommit(…)` with sizes taken from the layout result, so containers get
+   their solver-computed boxes, while keeping each node's measured `reserve`.
+3. `scene.commit(…)` with `duration = reduced ? 1 : (duration ?? stepDur ?? baseDuration)`.
+4. Viewport: if a `camera` shot came with the mutation, resolve it against **this**
+   layout and `moveTo` it on the commit's own duration and easing, and set
+   `cameraOwned` and `userMoved`. Otherwise **anchor**: keep the focal node (or the bounds
+   centre) stationary on screen, and refit only if the user never moved and the new
+   bounds fall outside the pane. The refit uses the same duration and `chromeInset()`.
+5. Emit `commit` with `{nodes, edges, bounds, reversedEdgeIds, meta, focal, duration,
+   transition}`.
+
+`styleNow()` is the style-only commit behind `g.style()` and `g.props()`: same sizes, no
+relayout.
+
+`commitOrDefer(focal, extra, meta)`: inside `g.batch()`, ops accumulate `enterFrom`,
+`exitTo` and `easeOverride`, and the last `camera` wins, all feeding one relayout that
+every op in the batch shares as one awaitable. `settled()` is the awaitable for a no-op
+(`applied: false`).
+
+### The `{camera}` option on mutations
+
+`shotFor(camera, subject)` turns a mutation's `camera` option into a camera target:
+`true` frames the subject (one id → `{node}`, a list → `{nodes}`, none → `{fit: true}`).
+An object that names no box gets the subject added. `maxK: NODES_MAX_K` (1.5) is injected
+unless `k` or `maxK` is given, and `dur` is dropped because the shot rides the mutation's
+clock. `MUTATION_CAMERA_ARG` records which argument slot holds the options for each op;
+`hasCameraOp(steps)` uses it at storyboard build time. A no-op toggle that carries a shot
+still moves the camera, through `shotOnly()`. Condense and split pass the shot to their
+phase-2 relayout. User-facing semantics are in
+[API.md › Framing any mutation](API.md#framing-any-mutation).
+
+### `internals`
+
+The object handed to the choreography modules and the run layer. It contains everything
+they need and nothing DOM-shaped, so they run against fake hosts in tests:
+
+```
+{ticker, store, scene, renderer, bus, viewstate, reduced, lastLayout(), relayout, reseat, mark(ids, value)}
 ```
 
-- `opts = { theme:'auto'|'light'|'dark', layout:{dir:'LR',…}, animation:{duration:350, easing:'cubic-out'}, controls:false (M1) }`.
-- Instance `g`: `addNode(n, {after}?)`, `addEdge(e)`, `removeNode(id)`, `removeEdge(id)`,
-  `update(id, patch)`, `batch(fn)` (one relayout for many ops), `on/off`,
-  `fitView()`, `layout()` (re-run), `node(id)`, `spec()`, `destroy()`.
-  M1 adds: `expand/collapse/condense/run/storyboard`.
-- Every mutation returns the commit's `Transition.promise`-like awaitable (thenable
-  `{then, catch, finally, cancel}`) — awaitable, cancelable (§5.3).
-- `addNode(n, {after: 'x'})` sugar: also adds edge `{id: 'e:x->'+n.id, source:'x', target:n.id}`.
-- Relayout pipeline: view from store (M0: all nodes flat; skip nodes with `parent` whose
-  container logic lands in M1 — for M0 pass `parent` through to dagre as-is) →
-  `sizeNode` each → `layout(view, {…, pinnedReversals: this._rev})` → persist
-  `this._rev = result.reversedEdgeIds` → `renderer.styleCommit` → `scene.commit` →
-  anchored-viewport correction (D10): keep the mutation's focal node (added/updated node,
-  else layout-bounds center) stationary in screen space; if user never moved and content
-  lands outside viewport, refit.
-- IIFE global: `SparkleMotion = { mount, version }`.
+### Other wiring
 
-## Style commit (D7)
+- `g.validate(ops | fn)` dry-runs structural ops against `new Store(store.snapshot())`
+  and returns `{ok, errors}` without committing or laying out. The op whitelist is
+  storyboard's `STORYBOARD_OPS`. `expand`/`collapse` probes still report unknown ids.
+- A `collapsed` key in `g.update()` is routed through `expand()`/`collapse()`. The commit
+  still runs when that route changed nothing, so the rest of the patch renders.
+- `g.finished` is one deferred per instance, resolved by the storyboard's `done`,
+  `g.finish(reason)` or `destroy()`. `scripts/check-demos.mjs` waits on it through the
+  snippets in `scripts/finish-signal.mjs`, which are unit-tested without a browser.
+- Mount order matters: the preset must exist before the first `commit`, a11y and tap
+  toggle attach after it, and the mount-time fit runs after the transport mounts so there
+  is chrome to measure.
+- The IIFE global is exactly the default export `{mount, version, presetPipeline,
+  GraphError}`. `export.js`, `a11y-table.js` and the dagre adapter stay ESM-only.
 
-At commit time only, per element: `data-status`, `data-reversed`, `data-mode`,
-`data-weight` (meta-edges), plus user style-function output written as `--smv-*`
-properties. Nothing style-related is written per frame.
+## Choreography (`condense-anim.js`, `split-anim.js`)
 
-## Tests & tooling
+`runCondense(g, internals, ids, newNodeSpec, opts)` and
+`runSplit(g, internals, id, parts, opts)` each run three phases on the shared ticker,
+`{highlight: 150, converge|diverge: 450, reveal: 300}` (`CONDENSE_PHASES`,
+`SPLIT_PHASES`), 900ms in total:
 
-- `node --test test/` — files `test/*.test.js`.
-- Golden layout files under `test/golden/*.json`: `{nodes:{id:{x,y,w,h}}, edges:{id:points}}`
-  per fixture with **explicit node w/h** (determinism). Regenerate via
-  `node test/golden/update.js` only when a layout change is intended.
-- Crossing-count assertion: count pairwise forward-edge segment crossings in a fixture's
-  layout; assert `≤` the golden count.
-- `scripts/build.js` — esbuild: `dist/smv.esm.js` (external: `@dagrejs/dagre`? NO —
-  bundle dagre into both; ESM stays importable standalone), `dist/smv.iife.min.js`
-  (global `SparkleMotion`, minified). Also `dist/smv.core.esm.js` with dagre marked
-  external — used only for the core-size metric.
-- `scripts/size-budget.js` — builds, then gzip -9 sizes. HARD FAIL (exit 1) if:
-  core (dagre-external, minified+gzip) ≥ 40KB, or IIFE min+gzip ≥ 56KB (dagre era,
-  §8; tightens to 50KB at M3). Prints a table.
-- CI: `.github/workflows/ci.yml` — npm ci, test, size (which builds).
+1. **Highlight**: sources get `data-condense="src"`; geometry does not change.
+2. **Converge / diverge**: `store.condense()` / `store.split()`, `internals.reseat(…)`,
+   then one `relayout`. For condense, the sources fly to the merged node (`exitTo`) and
+   the merged node blooms from the sources' centroid. For split, the parts bloom from the
+   source's centre. The new nodes use `EASE.overshoot`. `condense`
+   (`{sources, target, sourceData, targetData}`) or `split` (`{source, targets,
+   sourceData}`) is emitted at the start of this phase. Listeners such as the preset's
+   odometer and the run layer's remap react here and never read the phase durations.
+3. **Reveal**: new nodes get `data-condense="reveal"` and it is removed at the end.
 
----
+Each returns `{promise, cancel}` resolving `{canceled}`, registers `ticker.onDestroy`, and
+under reduced motion keeps each phase at 1ms or more with the sequence intact. `g.condense`
+and `g.split` run the store's guards synchronously before starting, so errors throw at the
+call site. `durOf()` prices both at the phase sum (`CHOREO_MS`).
 
-# M1 contracts (expand/collapse · condense · tokens · storyboard · preset)
+## Runs (`run.js`, `run-live.js`, `run-transport.js`, `run-render.js`)
 
-M0 is DONE and green (71 tests, e2e). Do not regress it. New rules of engagement:
-scene.js/render.js/index.js/styles.js are edited ONLY by the agent explicitly assigned
-to them in its prompt; everything else is new files.
+User-facing semantics (duration grammar, pacing, joins, loops, retries, `statusAgg`, the
+live primitives, the event vocabulary) are specified in [RUN.md](RUN.md) and
+[LIVE.md](LIVE.md). Treat those as the behavioural contract; the tests in
+`test/run*.test.js` enforce them. This section covers the module boundaries.
 
-## Scene extensions (owned by the compound/condense agent)
+### The shared state shape
 
-- `opts.exitTo: {id:{x,y}}` — exiting nodes tween toward this point (w/h shrink to 60%)
-  while fading, instead of fading in place. Used by collapse (children → container
-  centroid) and condense converge.
-- Per-op easing: node ops accept `opts.easeOverride: {id: fn}` so the condensed target
-  node can enter with `EASE.overshoot` while everything else runs the commit easing.
-- Both are additive; existing tests must stay green.
+Both engines are **pure**: no DOM, no imports from render, index or scene, and no wall
+clock. Both produce the same state shape, so `run-render.js` has no mode branch:
 
-## `src/viewstate.js` — expand/collapse + meta-edges (D5)
-
-```js
-createViewState(store) → vs
-vs.collapsed            // Set<id> (initialized from node.collapsed === true for nodes that have children)
-vs.isContainer(id), vs.isVisible(id)
-vs.expand(id), vs.collapse(id)     // mutate the set only; relayout happens in index.js
-vs.view() → { nodes, edges, sizes, meta }
+```
+{ tokens: [{id, rate, at: {kind: 'node'|'edge', id, progress}}],
+  nodes:  {id: {status, progress, occupancy, …}},
+  edges:  {id: {traversed: 0..1}},
+  joins:  {nodeId: {arrived, needed, fired}},
+  loops:  {edgeId: {iteration, max}},
+  done }
 ```
 
-- `view()` output plugs into the existing `layout()` seam:
-  - visible node = every ancestor expanded. Expanded containers appear WITH `parent`
-    links on their children (dagre compound reserves the space — that is the dagre-era
-    implementation of D5's four-step; containers get `containerPad` {top:40 — the 28px
-    header strip plus a 12px gap above the first child, matching the other three edges —
-    side:12, bottom:12} passed via node w/h handling in dagre's cluster result).
-  - collapsed container = plain node sized by `sizeNode` + room for a ×N badge.
-  - meta-edges: an edge whose endpoint is hidden re-attaches to the nearest visible
-    ancestor; parallel meta-edges (same src→tgt) dedupe into id
-    `meta:<src>-><tgt>` carrying `weight` = count; self-referential results
-    (both endpoints map to the same container) drop; a loop wholly inside a collapsed
-    container becomes `meta.loopBadge = {containerId, max}` instead of an edge (D3).
-  - `meta` = { metaEdges: Map<metaId, {sources:[edgeId], weight}>, loopBadges: [{id, max}] }.
-- index.js gains `g.expand(id)` / `g.collapse(id)` returning the commit awaitable;
-  expand passes `enterFrom` = container's previous center for entering children;
-  collapse passes `exitTo` = container's new center. Events "expand"/"collapse".
-- Renderer: containers render as `.smv-node[data-container]` (label in the header strip
-  top-left, not centered; children drawn after parents — sort by containment depth);
-  meta-edges get `data-weight` when weight>1 (badge via preset/CSS).
-
-## `src/condense-anim.js` — condense choreography (D6), owned by the same agent
-
-`runCondense(g, internals, ids, newNodeSpec)` sequencing on the shared ticker
-(total ≤900ms; reduced-motion: each phase ≥1ms, sequencing preserved):
-1. highlight ~150ms: sources get `data-condense="src"` (CSS glow) — no geometry change.
-2. converge ~450ms: `store.condense()` then relayout commit with `exitTo` = the merged
-   node's new center for the removed sources, `enterFrom` = centroid of the sources'
-   previous rects for the merged node, `easeOverride` = overshoot for the merged node.
-3. reveal ~300ms: merged node `data-condense="reveal"` pulse class, removed after.
-Emits `condense` {sources, target, sourceData, targetData} on phase 2 start (C12 — core
-never reads durations). `g.condense(ids, spec)` returns an awaitable resolving after
-phase 3 (canceled:true if interrupted).
-
-## `src/run.js` — token engine Mode A (D4), PURE (no DOM, no imports from render/index)
-
-```js
-parseDuration("2h"|"45m"|"8s"|"300ms"|number(sec)) → seconds | null
-compileRun(spec, opts) → sim
-```
-
-- `spec` = a `store.spec()` snapshot. `opts = { iterations?: {[edgeId]: n} (≤ maxIterations),
-  rates?: [{t, scope: nodeId|'*', factor}], hopMs=300, dwell?: (sec|null, ctx) => ms,
-  entries?: [{id, at}] }`. `entries` are extra seed tokens (`run.inject`, F3); a node's own
-  `data.entry: true` / `data.startAt` declare the same thing in the spec (F3/F4). An edge's
-  `data.duration` is its hop time, paced by the node formula, `hopMs` otherwise (F8); a
-  container's `entry: [ids]`/`exit: [ids]` expand one spec edge into several engine edges
-  that keep its `id` and carry a unique `key` for cycle bookkeeping (F9) — a loop's
-  consumed-iterations bookkeeping stays keyed by `id`, so one arc into a multi-entry
-  container spends its budget once, not once per entry child. `data.fail` may be
-  `{reason, retries, recover}` and a `loop` edge may be `onFail: true`, which makes 'failed'
-  terminal only once the retry budget is spent (F1); the per-node attempt counter lives on
-  the token and is inherited by the children `fanOut` mints, so the budget is the branch's.
-- Default pacing: `dwellMs = 300 + 1200 * (sec / maxSecInGraph)`, 600 when the node has
-  no `data.duration`. Rates: a token entering node X multiplies its inherited rate by
-  every applicable rate event; rate divides dwell AND hop times for that token's branch
-  (children inherit). `scope:'*'` is global speed. Rate factor 0 freezes (used by
-  step({token})).
-- Semantics: source nodes (no in-edges, loop edges excluded) start with one token at t=0.
-  A node completes → spawns one child token per non-loop out-edge (implicit fan-out).
-  `join: "all"|"any"|{count:k}` on a node: dwell starts when the policy fires
-  (expected = # non-loop in-edges); later arrivals emit `drop` (ghost-fade) — except a retry
-  replaying through it (F1): a fired join never re-arms, so it lets exactly one retry token
-  per attempt back through, uncounted. Loop edge
-  `loop:true` A→B: token finishing A with iterations remaining traverses the arc ONCE
-  visually (iteration 1), then per further iteration a compressed in-place tick
-  (250ms/iter, no re-fly — D4) emitting `loop` {edgeId, iteration, max}; after the final
-  iteration the token proceeds through A's normal out-edges. Iterations =
-  `opts.iterations[edgeId] ?? maxIterations`.
-- `sim = { duration, events, boundaries, stateAt(t), nextBoundary(t, tokenId?) }`
-  - `events`: time-sorted `[{t, type: 'enter'|'start'|'finish'|'spawn'|'join'|'drop'|'loop'|'done', …}]`.
-  - `stateAt(t)` → `{ tokens: [{id, rate, at: {kind:'node'|'edge', id, progress}}],
-      nodes: {id: {status:'pending'|'active'|'done', progress, occupancy}},
-      edges: {id: {traversed: 0..1}},
-      joins: {nodeId: {arrived, needed, fired}},
-      loops: {edgeId: {iteration, max}}, done }`
-    Pure O(events) worst case is fine at our scale; make it deterministic.
-- `speed()`/`step({token})` are implemented by the TRANSPORT (below) as rate events +
-  recompile (cheap at tens of nodes); `nextBoundary(t, tokenId?)` supports `step()`.
-
-## `src/run-transport.js` + `src/run-render.js` — wiring (integration agent)
-
-- `g.run(opts)` → `run = { play, pause, playing, seek(ms), time(), speed(f, {branch}?),
-  step(opts?), on/off, state() (=stateAt(now)), duration, destroy, promise }`.
-  Driven by the shared ticker; `play({until: nodeId})` pauses when that node's status
-  becomes done (storyboard uses it). Recompiles via compileRun on speed/step; preserves
-  current virtual time. Emits 'join'/'loop'/'drop'/'done'/'tick'.
-- `run-render`: subscribes to ticker + scene.visual; draws into `g.smv-tokens` layer
-  (created after nodes): one pulse circle per token via `pointAt` on the CURRENT edge
-  geometry (follows mid-transition edges), per-node progress fill (a rect inset behind
-  the label, width = progress), occupancy `×n` badge, join slot pips `k/n`, loop badge
-  `iter i/n` near the loop arc / on the container (viewstate loopBadges), traversed-edge
-  `data-traversed` + `--smv-traversed` custom property. All from `stateAt(t)` inside the
-  single rAF (never per-token WAAPI). Token↔morph rule (D4): on `condense` involving
-  token-holding nodes the engine recompiles against the new spec; tokens remap to the
-  merged node carrying max(progress); tokens on removed nodes ghost-fade.
-
-## `src/storyboard.js` (pure sequencer) + `src/transport.js` (DOM bar)
-
-- `createStoryboard(host, steps)` where `host = { apply(step) → {promise?|run?},
-  snapshot() → any, restore(snap) → promise, }`; steps = the JSON op array (§5.5), ops:
-  `addNode|addEdge|removeNode|removeEdge|update|expand|collapse|condense|batch|
-   expandAll|collapseAll|layout|run (args = g.run opts)|run.reset|
-   run.play (args or {until})|run.step|run.seek|wait {ms}`; `label` entries are
-  zero-duration markers. `run`/`run.reset`/`layout` also check at build time that their
-  one argument, if present, is an options object (F5).
-- Snapshot BEFORE each step (G2); `sb.seek(indexOrLabel)`: restore that snapshot →
-  host.restore animates the diff from current visual state; then optionally replay to an
-  intra-step run time. `sb.play/pause/next/prev/seek/labels/position/on`.
-- index.js: `opts.storyboard` array + `opts.autoplay` (`true`, or `'auto'` = play only when
-  the page URL carries `?auto=1`, F36); host implementation lives in index.js
-  (snapshot = {spec: store.snapshot(), collapsed: [...vs.collapsed], runTime, runOpts,
-  runCompiled, layout: {...layoutOpts}} — the `layout` op mutates the instance-wide options
-  in place, so they are state a step moves and a backward seek has to put back; the `run` op
-  does the same to the compile inputs, and `runCompiled` keeps "no run yet" distinct from "a
-  run with no opts" so a restore does not leave a LATER compile's inputs behind for the next
-  implicit `ensureRun()`).
-  `g.finished` is one deferred per instance, resolved by the storyboard's `done` event,
-  `g.finish(reason)` or `destroy()` — the "story finished" signal check-demos waits on.
-  The two snippets the checker evaluates in the page (which hook is on offer, and the latch
-  that turns `g.finished` into a pollable flag) live in `scripts/finish-signal.mjs`, so they
-  are unit-tested without a browser (`test/finish-signal.test.js`).
-- `createRun()` keeps a `runSubs` set of every `run.on(type, fn)` a CALLER registered and
-  re-seats it on the fresh transport a `g.run(opts)` recompile builds (F6), keeping the
-  live undo on the sub so the unsubscriber `on()` returned still works after a recompile; the run layer's
-  own subscriptions (run-render's, the transport-bar notify hop) use the raw pre-wrap
-  `on()` and are rebuilt per compile. That same hop mirrors every run event onto the
-  instance bus as `run:<type>`.
-- `src/transport.js`: `createTransport(rootEl, controller)` — play/pause, step back/fwd,
-  scrubber (input range over the storyboard's cumulative timeline; within a run.play
-  step maps to run.seek), speed select (0.5/1/2/4), current label readout.
-  `.smv-transport` fixed at the bottom of the mount root; `opts.controls: true` enables.
-
-## `src/preset-pipeline.js` (own file; integration agent adds the single import)
-
-`applyPipelinePreset(g)` — subscribes via public `g.on` + DOM adornments only:
-- duration chip (top-right in-node `<text class="smv-chip">`) from `data.duration`;
-  `durationAgg: 'sum'|'max'` rollup for containers/collapsed groups (G5).
-- status glyphs via `data-status` CSS (clock/pulse/check), manual hand vs auto bolt badge
-  from `data.mode`.
-- on `condense`: odometer-roll the target's chip from aggregated source duration to the
-  target duration (e.g. `2h → 8s`), pop a transient `−99.9% · N× faster` delta badge,
-  update the total-duration bar (a slim bar under the graph, `.smv-totalbar`).
-- Enabled via `opts.preset: 'pipeline'` or `SparkleMotion.presetPipeline(g)`.
-
-## M1 exit (verify agent)
-
-`demo/pipeline.html` — ONE script tag (`../dist/smv.iife.min.js`), a storyboard playing
-§6 end to end: steps appear → token run with 3-way fan-out at visibly different rates +
-`join:"all"` firing converge-burst → retry loop ticking to 3/5 → expand "clean" into 3
-substeps → condense them into 1 automated step with the 2h→8s odometer → scrub backward
-and forward cleanly. `?auto=1` exposes `window.__smvM1 = {done, errors, checks:{...}}`.
-`test/e2e-m1.mjs` (playwright-core, chromium at /opt/pw-browsers/chromium) asserts:
-zero errors; 3 concurrent tokens observed with distinct branch progress; join fires after
-all 3; loop badge reaches 3/5; expand adds 3 substeps; condense leaves 1 node + odometer
-text lands on "8s"; scrub to "before automation" restores the 3 substeps then scrub to
-end re-condenses; no NaN anywhere.
-
----
-
-# Post-review contract additions (M1 hardening)
-
-- `anim.js`: `ticker.onDestroy(fn) → off` — teardown notification; any awaitable that
-  suspends on the clock (condense phases, storyboard waits) must register one so
-  `g.destroy()` settles it (resolving `{canceled: true}`) instead of stranding it.
-- `run-transport.js`: `run.reset(opts, time)` — in-place re-seat (recompile + silent
-  resync) preserving the transport's identity and listeners; used by storyboard restore.
-- `storyboard.js`: generation counters (`stepGen`/`loopGen`) make play/pause/seek safe
-  under interleaving; `seek()` always leaves the storyboard paused; the transport bar and
-  `seekTimeline` pause before moving the head.
-- `store.js`: exports `containmentClosure(store, ids)`; condense convexity + edge
-  redirection judge the closure (children of condensed containers), and the synchronous
-  guard in `index.js`/`condense-anim.js` asks the same question. `isConvex()` skips
-  `loop: true` edges (a back edge re-enters the set, it is not a path through it);
-  `condense()` reads `parent: null` on the merged spec as "inherit", and warns when the
-  sources' parents differ and no parent was named. `update(id, patch, {replace})`:
-  `data` merges, an `undefined` value deletes that key, `replace` swaps the payload, and
-  an emptied `data` is dropped entirely so spec() still round-trips through JSON.
-- `index.js`: `g.validate(ops|fn)` dry-runs the structural ops against
-  `new Store(store.snapshot())` and returns `{ok, errors}` — guarded wrappers collect the
-  `GraphError`s instead of throwing, nothing commits, no relayout. The op whitelist is
-  storyboard.js's own `STORYBOARD_OPS`; the `expand`/`collapse` probes are view-only but
-  still record `missing` for an unknown id, like the real methods throw. A `collapsed`
-  patch to `g.update()` is routed to `expand()`/`collapse()` for the view half only — the
-  commit still runs when the route changed nothing, so the rest of the patch renders;
-  `viewstate.expand()/collapse()` own the `pendingCollapse` bookkeeping for a container
-  whose children have not arrived yet.
-- `run.js`: the container failure rollup is per-container policy `statusAgg`
-  (`'earliest-fail'` default | `'latest'` | `'none'`), read off each container's own leaf
-  descendants; `'latest'` keeps an ascending `[{t, fail}]` mark list sampled in `stateAt`.
-- Storyboard `host.snapshot()` carries `reversals: [...pinnedReversals]`; restore
-  re-seats them (G2 fidelity: pins are part of the state a step moves).
-- `run.js` runs `breakCycles` over its (container-remapped) edges: untagged back edges
-  are zero-iteration loops — excluded from join arity and from token re-fly.
-
----
-
-# M2 contracts (live mode · split · a11y · exports · labels · query · types)
-
-M1 is DONE and green (200 tests, e2e-m0, e2e-m1, size budget). Do not regress it.
-
-**File ownership (hard rule — a file is edited ONLY by its owner):**
-
-| files | owner |
-|---|---|
-| `src/run-live.js` (new), `src/run-transport.js`, `test/run-live*.test.js` | live-mode agent |
-| `src/store.js`, `src/split-anim.js` (new), `src/query.js` (new), `test/split.test.js`, `test/query.test.js` | split/query agent |
-| `src/render.js`, `src/styles.js`, `src/viewstate.js`, `test/labels.test.js` | render-extras agent |
-| `src/a11y.js` (new), `src/a11y-table.js` (new), `test/a11y.test.js` | a11y agent |
-| `src/export.js` (new), `bin/smv-pack.mjs` (new), `docs/EMBED.md`, `test/export.test.js` | export agent |
-| `src/index.js`, `package.json`, `README.md` | integration agent |
-| `types/*.d.ts`, `docs/THEMING.md`, `scripts/*`, typescript devDep | types/docs agent |
-| `demo/m2.html`, `test/e2e-m2.mjs` | verify agent |
-
-All modules must import cleanly under Node (guard browser APIs); `node --test "test/*.test.js"`.
-
-## `src/run-live.js` — Mode B engine (D4), PURE (no DOM)
-
-```js
-replayLive(spec, events, t, opts = {}) → state   // same shape as compileRun's stateAt(t)
-liveBoundaries(events) → number[]                // sorted distinct event times (for step())
-```
-
-- `events`: append-only log, time-sorted (sort defensively on entry), entries:
-  `{t, type: 'start'|'finish'|'spawn', id, n?}` — `t` in ms of live time.
-  `start(id)`: node becomes `active`; it takes the token already waiting on the node, else
-  the one still flying toward it (see below), else a fresh one is created (source/entry
-  nodes). `finish(id)`: ALL tokens currently on `id` finish — node `done`,
-  each token fans out one child per non-loop out-edge, traveling its edge over
-  `opts.hopMs` (default 300) of live time, then WAITING at the target (target stays
-  `pending` until its own `start`). `{t, type:'finish', id, n:k}` finishes only `k`
-  tokens (k < occupancy leaves the node `active`). `spawn(id, n)`: place `n` additional
-  waiting tokens on node `id` (runtime fan-out; occupancy badge ×n).
-- **`hopMs` is a rendering travel time, never a gate on the feed.** A `start(target)`
-  stamped before the inbound hop lands CONSUMES that hop (its edge fill truncates to the
-  start instant, the wait collapses) instead of fabricating a second token and stranding
-  the real one — a real pipeline whose steps hand off in under 300ms is the normal case,
-  not an error. A landing that coincides exactly with a log event at the same `t` is
-  ordered BEFORE it: the landing is caused by an earlier `finish`, so it is causally prior.
-- `opts.bornAt` (Map edgeId → live ms, supplied by the transport): the log is history, so a
-  `finish` stamped before an edge existed never fans out over that edge.
-- Progress while `active`: `elapsed / declared-duration-estimate` clamped to 0.95 when
-  `data.duration` parses (`parseDuration` from run.js); else 0 (status pulse carries it).
-  Progress = 1 on finish.
-- Joins (`join:` policy): arrivals counted exactly as Mode A — including saturating at
-  `needed` (Mode A drops post-fire arrivals, so `arrived` never exceeds `needed`) — and
-  MERGED: an arrival at a fan-in is `held` (it occupies the node, nothing is released) until
-  `needed` of them have landed, at which point the group becomes ONE releasable occupant, so
-  a bare `finish` there mints one downstream token and not one per arrival (F10). Unlike
-  Mode A the join re-arms — each further group releases another token, which a long-running
-  fan-in needs. An explicit `start(id)` ALWAYS activates — the real log outranks the declared
-  policy, so it picks up a held arrival too — and `spawn()` injects outright (never held,
-  never counted). A `finish`/`fail` on a join that has NOT fired consumes the arrivals it is
-  holding as one piece of work: one token downstream for the held group, plus one per
-  released/active occupant. `joins` map reported the same way. Loop edges (`loop: true`) never
-  auto-fan-out; a repeated `start` of an already-done node re-activates it (that IS the live
-  loop iteration) and increments `loops[edgeId].iteration` for its loop in-edge if one exists.
-- `opts.minHopMs` (F14, default 0, clamped to `hopMs`): the shortest crossing a hop may be
-  squashed to when a `start()` claims it mid-flight — the claimed start is pushed out to
-  `hopStart + minHopMs` so a log whose `start` shares the upstream `finish`'s timestamp (a
-  real trace) still draws the crossing instead of teleporting the token. A `finish`/`fail`
-  stamped INSIDE that window is re-queued to the landing instant (real spans are routinely
-  shorter than the minimum hop), so a node is never painted done while its token is still
-  drawn on the wire; the dwell collapses instead.
-- `nodes[id]` carries three live-only keys beyond Mode A's: `waiting`/`active` (the occupancy
-  split, `waiting + active === occupancy`; a held join arrival counts as waiting) and
-  `overBudget` — the live dwell outran the declared `data.duration`, which in Mode B is an
-  expectation and never a schedule (F13). It survives the `finish` that closed the over-long
-  dwell and a fresh `start` on an EMPTY node clears it (a concurrent start cannot erase a
-  verdict another dwell earned); run-render writes it as `data-over-budget`.
-- Deterministic: same (spec, events, t) → same state. No wall clock inside; the caller
-  owns time.
-
-## `src/run-transport.js` — mode switch (live-mode agent owns this file)
-
-`createRunTransport(internals, opts)` gains `opts.mode: 'simulate'(default) | 'live'`
-and `opts.log` (initial event array, for re-seeding/tests). Mode A behavior unchanged
-— every existing test must stay green. In live mode:
-
-- The transport keeps a **frontier** clock: starts at 0 when the run is created (or at the
-  span of a log it was seeded with, so seeded events are reachable at all), and
-  advances with the shared ticker unconditionally (live time flows even while paused/
-  scrubbed). `run.now() → frontier ms`.
-- `run.start(id, {at, spawn}?)`, `run.finish(id, {at}?|{at,n}?)`, `run.spawn(id, n, {at}?)`
-  append to the log stamped at `at ?? frontier` (clamped to ≤ frontier). Emits the same-
-  named event.
-- `start()` guard (F11): on a NON-root with no `waiting` occupant, no token crossing towards
-  it and no `'done'`/`'failed'` attempt to retry, the call would mint a token out of nothing
-  — it warns `[smv:live]` and names `{ spawn: true }`, which declares the mint deliberate.
-  `opts.spawnOnStart: false` turns the warned-about start into a no-op (nothing is logged);
-  the default stays `true` (backward compatible). The guard is gated behind a cheap
-  per-node arrival counter (upstream `finish`/`spawn` credit it, `start`/`finish`/`fail`
-  drain it), so the streaming shape `finish(A); start(B)` never pays for a replay; the
-  counter only ever SUPPRESSES the exact check, so no warning it would not have made can
-  appear. "Root" is the engine's own notion (`liveFedTargets`, exported by `src/run-live.js`
-  so the two cannot drift): loop edges, self-edges **and the back edges `breakCycles` cuts**
-  do not feed their target, so a graph drawn as an untagged cycle still has a root the run
-  can be seeded on. `finish()`/`fail()`'s zero-occupancy warning counts a crossing towards the
-  node as occupied when `minHopMs` is set, since the engine defers such a call rather than
-  dropping it.
-- View time `t`: by default **follows** the frontier (`run.following === true`).
-  `seek(ms)` clamps to `[0, frontier]` and detaches (time-travel replay); `play()`
-  advances `t` at 1× (× global speed) and clamps at the frontier — you can NEVER scrub or
-  play past `now`; on catching up it re-attaches (`following` true again). `follow()`
-  re-attaches immediately.
-- `duration` getter = frontier (grows). `state()` = `replayLive(store.spec(), log, t)`,
-  memoized on `(t, store.rev, log revision)` — it is sampled every frame off the
-  unconditional `tick`, and a full replay is O(events); the memo hands out a private copy,
-  so callers may write into what they get.
-  `step()` walks `liveBoundaries`. `speed(f,{branch})` in live mode: global `f` scales
-  only replay playback (frontier is real time); per-branch is a no-op (documented).
-  `run.log() → [...events]` (copy). `reset(opts, time)` re-seeds log from `opts.log`, and
-  `options()` CARRIES that log — the pair is the storyboard snapshot/restore round trip
-  (G2), which must not delete a live run's history. `reset` also takes `{ now }` (F12) — an
-  explicit frontier epoch, so later `{ at }` stamps from a server clock are not clamped back
-  onto the seeded log's span (`options()` carries it too) — and `{ replay: true }`, which
-  re-emits every seeded entry through the handle's emitter in log order, each payload marked
-  `replay: true`.
-- `play({until})` waits on the node's status in BOTH modes. In live mode the view clock is
-  glued to the frontier by default, so `until` is consulted before the frontier — otherwise
-  every `play({until})` from the normal following state resolves on the spot.
-- Graph mutations hit the new spec lazily, as in Mode A, with two live-only rules the log
-  forces (the log is history, not a re-simulation input):
-  - `condense`/`split` on the host bus REWRITE the log — every entry naming a removed
-    source is re-pointed at the survivor (a split's entry part) — so the merged/entry node
-    inherits its sources' instants and re-fans over the redirected edges. `remap` is
-    emitted afterwards, as in Mode A. Without this the `nodes.has(e.id)` filter in
-    replayLive silently drops that history and `done` flips true mid-run.
-  - an edge is stamped with the frontier when it is added, and a `finish` older than that
-    stamp never travels it (no retroactive fan-out out of a node that finished long ago).
-
-## `src/store.js` — `split(id, parts)` (D6 inverse; split/query agent)
-
-`store.split(id, { nodes, edges = [] })`:
-- `id` must exist and must NOT be a container with children (named `GraphError('split-container')`).
-- `nodes`: ≥1 new node specs, ids unique and not colliding (`dup-id`); they inherit
-  `parent` from the split node unless they specify one. `edges`: internal edges among
-  the new nodes only (`split-edge` error otherwise).
-- Entry nodes = new nodes with no in-edge in `edges`; exit nodes = no out-edge in `edges`.
-  Every former incoming edge of `id` is redirected to EVERY entry node (first keeps its
-  id, clones get `id + ':' + targetId`); outgoing likewise from every exit node. Weights:
-  a redirected edge carrying `weight: N` keeps it. Self-loops on `id` are dropped.
-  Internal wiring that leaves NO entry (or no exit) — e.g. a cycle spanning every new node
-  — has nowhere to redirect to, so it is rejected up front with `GraphError`
-  `split-no-entry` / `split-no-exit` (only when there is actually something to redirect),
-  rather than deleting those edges and silently disconnecting their far ends. `g.split()`
-  asks the same question synchronously, like every other split guard.
-- The split node is removed. Returns `{ added: [nodeIds], addedEdges, removedEdges }`.
-- Snapshot/restore must round-trip it (it composes from existing primitives).
-
-## `src/split-anim.js` — split choreography (split/query agent)
-
-`runSplit(g, internals, id, parts)` — mirror of runCondense, total ≤900ms, reduced-motion
-≥1ms/phase with sequencing preserved:
-1. highlight ~150ms: source gets `data-condense="src"` (reuse the glow).
-2. diverge ~450ms: `store.split()` then relayout with `enterFrom` = the source's previous
-   center for every added node (they bloom outward), `easeOverride` overshoot for them.
-3. reveal ~300ms: added nodes get `data-condense="reveal"` pulse, removed after.
-Emits `split` `{source, targets, sourceData}` on phase-2 start. Returns
-`{promise, cancel}`; promise resolves `{canceled}`; must register `ticker.onDestroy`.
-
-## `src/query.js` — query sugar (split/query agent), PURE
-
-```js
-makeQuery(store) → { nodes(filter?), edges(filter?), children(id), descendants(id), roots() }
-```
-- `filter` = predicate `(item) => bool`, or a match object: top-level keys compare `===`
-  against the spec item; a `data` key matches shallowly against `item.data`.
-  `nodes({ data: { status: 'done' } })`, `edges({ loop: true })`.
-- Returns plain copies (same cloning discipline as `store.spec()`). `roots()` = nodes
-  with no parent. `descendants` includes nested children, not the node itself.
-
-## `src/render.js` + `src/styles.js` + `src/viewstate.js` — edge labels, collapseAll (render-extras agent)
-
-- **Edge labels:** `edge.label` renders as `<text class="smv-edge-label">` inside the
-  edge group, positioned per frame at `pointAt(clippedPoints, t)` with a small
-  perpendicular offset; content/truncation set at styleCommit only (D7). Labels do NOT
-  affect layout (documented simplification).
-  Meta-edges: when a collapsed boundary edge aggregates ≥2 labeled edges the label drops
-  (weight badge already carries the story). CSS: `.smv-edge-label` muted, 10px, paint-order
-  stroke halo for readability, in styles.js.
-- **Rich edge labels (F25/F26):** `edge.label` may instead be
-  `{text, place:'mid'|'start'|'end', rotate, pill, maxW}`. styleCommit normalizes it to
-  `{text, t, rotate, pill, w}` (`t` = the path fraction: .15/.5/.85) and caches it on the
-  element record as `e.lab`, so `frame()` reads no Map. `rotate` writes a
-  `rotate(deg,x,y)` transform normalized into ±90° (never upside down); `pill` adds a
-  `<rect class="smv-edge-pill">` inserted BEFORE the text (paints behind), sized from the
-  text measured in the label's own 10px font, and flags the group `data-pill` so CSS drops
-  the halo. Truncation cap: per-edge `maxW`, else `styleCommit({edgeLabelMaxW})` from
-  `opts.layout.edgeLabelMaxW`, else 90px.
-- **`vs.containers()`** → array of container ids in containment-depth order (parents
-  first). `vs.expandAll()` / `vs.collapseAll()` mutate the set only and return the ids
-  that changed (index.js drives the single relayout).
-- Existing tests + goldens must stay byte-green.
-
-## `src/a11y.js` — ARIA + keyboard (a11y agent), core (ships in the IIFE)
-
-```js
-attachA11y(g, { root, svg }) → { destroy() }
-```
-- Called by index.js on mount (always on; `opts.a11y: false` opts out).
-- Sets `role="application"` + `aria-roledescription="graph"` + `aria-label` on the svg;
-  `role="tree"` on the nodes group; per node `<g>`: `role="treeitem"`, `aria-level`
-  (containment depth+1), `aria-label` = `label · status`, `aria-expanded`
-  on containers (true/false from viewstate), `tabindex` roving (-1 everywhere, 0 on the
-  current item). Re-applied after every `commit` event (renderer reuses elements keyed by
-  `[data-id]` — query the DOM, do not touch render.js).
-- `status` in that name is the LIVE run status when a run is driving the node (the
-  `data-run` attribute run-render.js owns), else the design-time `data.status` from the
-  spec. Refreshed on the `runstatus` bus event, which fires per status transition (never
-  per frame) — a run is not a spec mutation, so no `commit` would otherwise announce it,
-  and a screen-reader user would get nothing at all while a run played.
-- The roving `currentId` tracks REAL DOM focus: a `focusin` listener on the svg re-seats it
-  whenever focus arrives by a route this module does not drive (a click on the `<g>`, an
-  external `.focus()`, a screen reader's virtual cursor), or Enter/Space and the arrows act
-  on a stale node. When a commit takes the focused node out of the visible set (its
-  container collapsed, a condense merged it away), focus is re-homed onto the new roving
-  stop — the browser would otherwise drop it on `<body>` once the element detaches.
-- Decoration carries no accessible text of its own: the `g.smv-tokens` layer (run-render.js),
-  edge labels and container chrome (stack/header/chevron/count badge) are all
-  `aria-hidden="true"`; the owning treeitem's `aria-label` is the authoritative name.
-- Keyboard (listener on the svg): ArrowRight/ArrowDown = next, ArrowLeft/ArrowUp = prev
-  in **reading order** (layout rank order: sort visible nodes by x then y from
-  `g.layoutResult()`), Home/End = first/last, Enter/Space = toggle expand/collapse on
-  containers, focus follows with `.focus()` on the `<g>`. Focused node gets a CSS ring:
-  a11y.js injects its OWN `<style data-smv-a11y>` (dedup-guarded) — do not edit styles.js.
-- Emits `g`'s bus nothing new; calls public `g.expand/collapse` only.
-
-## `src/a11y-table.js` — linearized fallback (ESM-only entry, a11y agent)
-
-`attachA11yTable(g, { visible = false }) → { el, destroy() }` — appends a `<table>`
-(caption, one row per visible node: label, status, duration, depth, outgoing targets)
-after the svg inside the mount root; `visible: false` applies a visually-hidden clip
-class (its own injected style). Updates on `commit`/`update` events. Package export
-`sparkle-motion-visualizer/a11y-table`.
-- The table and a11y.js's tree are two renderings of the same content, so exactly one is in
-  the accessibility tree at a time: while the interactive tree is attached (the default)
-  the table sets `aria-hidden="true"` and is a visual/structural fallback only; with
-  `mount(..., { a11y: false })` it is the accessible surface. Re-checked on every render.
-
-## `src/export.js` — exportSVG/exportPNG (ESM-only entry, export agent)
-
-- `exportSVG(g, { pad = 24, theme, width }?) → string` — standalone SVG document:
-  clone `g.renderer.svg`, strip transport/interaction cruft, set
-  `viewBox` from `g.bounds()` + pad, inline the smv CSS (import `CSS` from styles.js and
-  embed in a `<style>`) + resolved custom properties for the theme, `xmlns` correct.
-  Pure string-building where possible so Node tests can cover it with a fake clone.
-- `exportPNG(g, { scale = 2, background }?) → Promise<Blob>` — browser-only: SVG string
-  → `Image` → canvas → `toBlob`. Rejects cleanly under Node.
-- Package export `sparkle-motion-visualizer/export`. NOT in the IIFE (D11).
-
-## `bin/smv-pack.mjs` — single-file HTML CLI (export agent)
-
-`node bin/smv-pack.mjs spec.json [-o out.html] [--storyboard sb.json] [--title T]` —
-emits ONE self-contained HTML file: inlined `dist/smv.iife.min.js` (built if missing —
-just error with instructions, do not shell out), the spec JSON, a mount call with
-`controls: true` + optional storyboard. `docs/EMBED.md` documents both the CLI and the
-copy-paste recipe. package.json gains `"bin": {"smv-pack": "bin/smv-pack.mjs"}`
-(integration agent applies the package.json edit; export agent documents it).
-
-## `src/index.js` — integration agent
-
-- `g.split(id, parts)` — synchronous guards (missing id, container check via store, dup
-  ids) then `runSplit`; returns awaitable like condense.
-- `g.expandAll() / g.collapseAll()` — drive `vs.expandAll/collapseAll` inside ONE
-  relayout; enterFrom/exitTo per container center exactly like expand/collapse do;
-  emit `expandAll`/`collapseAll` with `{ids}`.
-- Query sugar: spread `makeQuery(store)` onto `g` (`nodes/edges/children/descendants/roots`
-  — note: `g.node/g.edge` singular already exist and stay).
-- a11y: `attachA11y` on mount unless `opts.a11y === false`; destroy on `g.destroy()`.
-- `g.run({mode:'live'})` passes through (transport owns the branch). Storyboard op table
-  unchanged (live mode is not storyboard-driven in v1 — document).
-- package.json: exports `"./export"`, `"./a11y-table"`, `"bin"`, `"types"`.
-- IIFE global additions: none beyond what index.js exports (export/a11y-table stay ESM).
-
-## `types/` + docs (types/docs agent, AFTER integration)
-
-- Hand-written `types/index.d.ts` (+ `types/export.d.ts`, `types/a11y-table.d.ts`)
-  covering the public surface (mount opts, instance g, run A+B, storyboard steps,
-  preset, errors). package.json `"types"` + per-export `"types"` conditions (the
-  integration agent leaves placeholders; types agent fills the files).
-- `npm run types` = `tsc --noEmit` over a `types/check.ts` exercising the surface
-  (typescript pinned as devDependency; the check file is the test).
-- `docs/THEMING.md`: every `--smv-*` property, every `data-*` attr, dark/light/auto,
-  worked example. README: new API sections.
-
-## M2 exit (verify agent)
-
-`demo/m2.html` (one script tag → `../dist/smv.iife.min.js`, plus an ESM block for
-export/a11y-table via `../src/`) + `test/e2e-m2.mjs` (playwright-core, chromium at
-/opt/pw-browsers/chromium, pattern of e2e-m1) asserting, with `?auto=1` and
-`window.__smvM2 = {done, errors, checks}`:
-- **live**: scripted feed (start/finish×N, one `spawn(id,3)`) drives tokens; occupancy
-  badge ×3 appears; `seek(pastT)` shows the earlier state (fewer done nodes);
-  `seek(1e9)` clamps to `now()`; after `follow()` new events land.
-- **split**: condensed→split round trip: 1 node becomes 3 with animated bloom; edges
-  redirected; store round-trips.
-- **labels**: an `edge.label` renders and tracks its edge through a relayout.
-- **collapseAll/expandAll** flip every container in one transition.
-- **a11y**: every node has `role=treeitem`; container toggles `aria-expanded`; ArrowRight
-  moves focus (activeElement data-id changes in rank order); Enter expands a container.
-- **exports**: `exportSVG` string contains a `<style>` + all visible node labels and
-  parses as XML; `exportPNG` resolves to an image/png blob, decoded dimensions match
-  bounds×scale.
-- **no regression**: zero console errors; `npm test`, `npm run size`, e2e-m0, e2e-m1 all
-  green.
-
-## `src/interact.js` — tap-to-toggle + click events (post-review M2 addition; F27)
-
-`attachTapToggle(g, {svg, toggle=true, emit}) → {destroy}` — pointerdown resolves the
-enclosing `.smv-node[data-id]` or `.smv-edge[data-id]` under the finger (before the
-viewport's setPointerCapture retargets the gesture); pointerup publishes
-`emit('nodeclick'|'edgeclick', {id, event})` and then toggles the container through public
-`g.expand/collapse` ONLY when the pointer stayed within a 6px slop and no second pointer
-joined (pinch) — one guard, both behaviours. index.js wires `emit` to the instance bus, so
-`g.on('nodeclick', …)` is the public surface; `opts.interaction.tapToggle === false` drops
-the toggle and `opts.interaction.click === false` drops the events (either alone still
-attaches the listeners). Containers get `cursor: pointer`. Ships in the IIFE.
-
-**F41 — `onToggle`.** Both `attachTapToggle` and `attachA11y` take an optional
-`onToggle(id)`; when present it replaces the bare `g.expand/collapse` call (the container
-check stays in each module). index.js hands the SAME `readerToggle` to both, built from
-`interaction.tapToggle.camera`: it calls `g.expand(id, {camera})` / `g.collapse(id,
-{camera})` and then puts `cameraOwned` back to what it was — `viewport.userMoved` flips
-(auto-refit off, as after a pan) but a storyboard never starts snapshotting the viewport
-because the reader tapped (D13). One function for both paths is the point: a page that
-hand-rolled the shot off `nodeclick` with `tapToggle:false` left Enter/Space on a11y.js's
-own bare toggle, which fired after the page's handler had already opened the box and
-closed it again.
-
----
-
-# M3 contracts (in-house layered engine · dagre adapter · size · culling)
-
-M2 is DONE and merged (351 tests, e2e-m0/1/2, size, types green). Do not regress it.
-
-**File ownership (hard rule — a file is edited ONLY by its owner):**
-
-| files | owner |
-|---|---|
-| `src/engine.js` + optional `src/engine/*.js` (new), `test/engine.test.js`, `test/engine-parity.test.js` | engine agent |
-| `src/render.js`, `src/viewport.js`, `test/cull.test.js` | culling agent |
-| `src/layout.js`, `src/adapters/dagre.js` (new), `src/index.js`, `package.json`, `scripts/*`, `types/*`, `test/golden/*`, `test/layout.test.js`, README | integration agent |
-| `demo/*`, `test/e2e-m3.mjs` | verify agent |
-
-## `src/engine.js` — the in-house layered solver (D2/M3), PURE, no deps
-
-```js
-engineSolve(input, opts) → { nodes: {id:{x,y,w,h}}, edges: {id:{points:[{x,y},…]}},
-                             order: string[][], layers: string[][] }
-```
-
-- `input = { nodes: [{id, w, h, parent?}], edges: [{id, source, target}] }` with two
-  invariants the caller (layout.js shell) guarantees: the edge set is **acyclic** (back
-  edges already withheld) and **no edge touches a node that has children** (viewstate's
-  entry/exit re-attachment, D5). Multi-edges (same endpoints, distinct ids) and
-  disconnected components must work.
-- `opts = { dir:'LR'|'RL'|'TB'|'BT', nodesep, ranksep, marginx, marginy,
-  prevOrder?: string[][], prevLayers?: string[][], chromePad?: number }`. Implement
-  internally for TB; transpose/flip for the others.
-- Output: x,y are **centers**; container nodes (those that are some node's `parent`)
-  get a rect covering their children (the shell's `padContainers` adds chrome after —
-  engine padding just needs children strictly inside). Edge `points` include the bend
-  chain (dummy positions), ≥2 points, running source→target. `order` = final per-rank
-  id sequences (real nodes only) — the caller persists it and passes it back as
-  `prevOrder` for order stability across re-layouts (the dagre `useDynamic` role).
-- **`layers` is the other half of that channel, and it is not optional.** `order` names
-  only the real nodes, and a drawing is *not* determined by those alone: every
-  multi-rank edge's bends sit between them, and a container that spans a rank without
-  holding anything there sits somewhere among them too. Re-deriving those on each solve
-  made a re-layout start from a differently-scored arrangement than the one it was
-  supposed to reproduce, so some sweep looked "strictly better" and ranks nobody had
-  touched got reshuffled. `layers` = the same per-rank sequences with those items
-  interleaved as opaque tokens; the caller persists it beside `order` and hands it back
-  as `prevLayers`. **Contract: `engineSolve(g, {prevOrder, prevLayers})` fed its own
-  output is a fixed point in `order`, `layers`, `nodes` AND `edges`.** A solver that
-  cannot produce `layers` (the dagre adapter) omits it, and the shell degrades to `[]`.
-- **`componentOrder` (opts) — `slot`, the primary in-rank ordering key, AHEAD of `pref`.**
-  Disconnected components have no edges between them, so crossing minimization has nothing
-  to say about their relative order and only `pref` (the previous drawing, read rank-major)
-  holds them apart — which a rank shift in one component defeats: the whole component then
-  carries keys smaller than its new rank-mates' and falls to the bottom, taking every id
-  added afterwards with it. `opts.componentOrder` is an array of slots, each entry a node id
-  or an array of alias ids; `assignSlots` (engine.js, straight after `indexInput`) does
-  union-find over every id — every edge, every containment link, plus `opts.backLinks` —
-  and hands each component the lowest entry index it holds an id for, `spec.length` if it
-  holds none. Unknown ids are ignored. `g.slot` is the id→slot map, and every layout node
-  carries a `slot`: a leaf its own, an edge dummy its source's, a border dummy its
-  cluster's. It is enforced in exactly two places — `sortRank` (both the item sort and the
-  sibling-block reassignment lead with `a.slot - b.slot`) and `transpose` (never swaps
-  across two slots) — and it is a PRIMARY key, so no median, no crossing count and no
-  previous order can move an item out of its band. **Inert when absent**: no
-  `componentOrder` means `g.slot === null`, every slot is 0, every comparison above is a
-  no-op, and the drawing is identical to one built without the feature. It is engine-only;
-  the dagre adapter reads the opts it knows and ignores this one.
-  The solve also EMITS `slots` (`{id: slotIndex}` over the real leaf/cluster ids) — just
-  `g.slot` serialized — and only when the option was active, so a result built without it
-  keeps exactly the shape it had. The engine stays pure: it remembers nothing between
-  calls, it only hands the caller what it decided.
-- `chromePad` is how much padding the CALLER will add around a container rect after the
-  solve (layout.js passes its `CONTAINER_PAD`). The solver reserves it in the rank axis;
-  without that the padded rect eats the neighbouring rank whenever `ranksep` is small.
-- Passes (plan D2/M3, keep it the simple heuristic ON PURPOSE):
-  1. **Nesting**: derive the cluster tree; constrain ranking so a cluster's nodes
-     occupy a contiguous rank interval (nesting border ranks: reserve a top/bottom
-     border rank contribution per cluster level, dagre-style, simplified is fine).
-  2. **Ranking**: longest-path, then one tightening pass (pull every node with slack
-     toward its tightest successor) so chains don't left-pack.
-  3. **Dummies**: split multi-rank edges into unit spans; per-cluster border dummies
-     per spanned rank so ordering keeps foreign nodes out of a cluster's interval.
-  4. **Ordering**: init from `prevOrder` (append unknown ids in input order), else DFS;
-     N≤8 alternating down/up **median** sweeps with transpose passes; **tie-breaks and
-     equal-crossing decisions always prefer the previous order** (stability beats one
-     crossing); keep the best-crossing result; cluster children stay contiguous within
-     a rank (sort by cluster block).
-     **A cluster's block order is global, not per-rank.** Which side of a sibling a
-     container's block sits on is decided once, for every rank it spans; letting each
-     rank pick from its own members lets a container sit left of a sibling on one rank
-     and right of it on the next, and since the emitted rect is the union of the
-     members' cells across all ranks, both siblings then get a rect spanning the whole
-     drawing — each containing the other's children.
-     **The search must be idempotent, not merely bounded**: it ends only once a full
-     run of sweeps started from the best arrangement fails to improve on it. Stopping
-     after a fixed sweep count leaves an order the next solve (which starts from that
-     best) can still beat, which is the fixed point above breaking.
-  5. **Coordinates**: rank axis = cumulative max-extent + ranksep; in-rank positions by
-     a few median-alignment relaxation sweeps (parent/child barycenter) with minimum
-     separation `nodesep` enforced left-to-right then right-to-left (priority: dummies
-     straighten first). NO Brandes–Köpf (plan explicitly ships the simpler heuristic).
-     Container chrome is **reserved, not assumed**: a border dummy is at least as wide
-     as the padding the rect grows by, its distance from the rect edge is what the
-     separation rule will demand of the first member inside, two nested borders are only
-     the nesting step apart (charging them a whole node's gap makes the alignment
-     targets unreachable at ≥2 levels and pools them instead), and the border-alignment
-     loop runs until the rects stop moving rather than for a fixed number of passes.
-     Two sibling containers whose rank spans overlap are grown to their common window,
-     so the band each reserves exists on every rank that can put them side by side.
-  6. Margins applied last; deterministic throughout (no Math.random, stable sorts).
-- Determinism: same input+opts → identical output, byte for byte.
-- Target ≤ ~10KB gzip alone. No imports beyond possibly `./cycles.js` helpers (should
-  need none).
-
-## `src/layout.js` — solver shell (integration agent)
-
-`layout(view, opts)` keeps its exact public shape and gains `opts.solver` (defaults to
-`engineSolve`), `opts.prevOrder` and `opts.prevLayers`; the result gains `order` and
-`layers` (alongside `reversedEdgeIds`) for the caller to persist — both, together.
-The shell also derives `opts.chromePad` from its own `CONTAINER_PAD` so the solver can
-reserve the padding `padContainers` is about to add. It likewise derives `opts.backLinks`
-(source/target pairs) whenever `opts.componentOrder` is an array: the edge set handed to the
-solver is the ACYCLIC one, every cycle-broken edge withheld, so a solver judging
-connectivity on it alone would tear a cyclic pipeline — or any component whose only link is
-a `loop:true` edge — into two components and slot them independently. `backLinks` names the
-withheld pairs so connectivity is judged on the real graph; the solver uses them for nothing
-else. Both are written onto the shell's own merged copy of the opts, never the caller's. The
-result passes the solver's `slots` straight through, key and all, or omits it.
-
-**Sticky slots live in `src/index.js`, not the engine.** A spec entry can only name ids, and
-the user who removes a pipeline's head has removed the id that named its slot — the
-component would drop into the trailing unlisted band, which is the reordering the option
-exists to prevent. So `relayout()` persists each result's `slots` (beside `prevOrder` /
-`prevLayers`, snapshotted and restored with them for the same G2 reason) and hands it back
-down as **`opts.componentOrderMemory`** (`{id: slot}`), filtered to ids the store still has,
-resolved through any collapse, and never naming the trailing unlisted slot. `assignSlots`
-applies it strictly AFTER the list and only to components no listed id claimed — memory is
-a fallback, never a rival. It is deliberately NOT merged into the entries: a remembered id
-folded into entry `i` would be seen first and silently beat the same id listed explicitly
-in entry `j > i`, so an explicit re-slot after two components split apart would not take.
-`reseat()` (the condense/split hook that already remaps `order`/`layers` through an id
-change) remaps the memory too, so a condense that consumes every remembered id of a
-component hands the merged node the lowest slot its sources held. The memory belongs to ONE
-list: `relayout()` compares a JSON of the raw `componentOrder` against the one it memorised
-and drops the memory whenever it changes (a non-array included).
-
-Everything else in the shell (breakCycles
-+ pinning, back-edge/self-loop arcs, `padContainers`, bounds) is UNCHANGED. The dagre
-import is REMOVED from this file.
-
-**What the solver sees (F32/F33).** Input nodes are `{id, w, h, parent?, container?, data?}`.
-`data` is the view node's own spec data, or `opts.hint(node)`'s return when `hint` is a
-function (return `undefined` to pass nothing) — the channel a placement-driven solver reads
-per-node hints from, instead of an out-of-band map the page must fill before every
-`addNode`. `container: true` marks any container, including one a spec declared with
-`container: true` before anything parents to it (viewstate.js ORs `kids.has(id)` with the
-flag and marks the childless case `empty`, which render.js turns into `data-empty`). Both
-keys are additive: a solver that reads neither is unaffected, and every custom key on the
-opts still reaches the solver untouched by the spread.
-
-**An omitted container rect (F35).** `layout()` collects the ids the solver returned no rect
-for and hands them to `padContainers`, which then computes those containers from the
-children's bbox + `containerPad` ALONE. Unioning with the `{x:0,y:0}` placeholder would drag
-the container (and the drawing's bounds) towards the origin; a solver that places children
-and leaves containers to the shell is a supported way to write one.
-
-## `src/adapters/dagre.js` — optional ESM adapter (integration agent)
-
-Exports `dagreSolver(input, opts)` (same solver contract, delegating to
-`@dagrejs/dagre` exactly as the M2-era layout.js did — compound graph, multigraph,
-rankdir mapping; returns `order` derived from dagre's result ordering) and
-`dagreLayout(view, opts) = layout(view, {...opts, solver: dagreSolver})`.
-Package export `"./adapters/dagre"` with a `types/adapters-dagre.d.ts`. `@dagrejs/dagre`
-moves from `dependencies` to `devDependencies` + `peerDependenciesMeta` optional —
-the IIFE and default ESM path must not pull it in at all.
-
-## Culling (culling agent)
-
-- `viewport.visibleWorldRect(pad = 200)` → world-space rect currently on screen.
-- `renderer.setCull(fn|null)` — when set, `frame(visual)` skips geometry writes AND sets
-  `display:none` (via a `data-culled` attr + CSS is fine) for node/edge groups fully
-  outside `fn()`; entering/exiting the rect restores them. Only engage when
-  `visual.nodes.size + visual.edges.size > 150` (below that the check costs more than
-  it saves). Token layer (`run-render`) reads positions from `scene.visual` — culling
-  must not corrupt tokens whose node is culled (skip drawing their pulse when outside).
-- index.js wires `renderer.setCull(() => viewport.visibleWorldRect())` after mount and
-  re-arms from **`viewport.onChange`**, not from the svg's pointer events (integration
-  agent). "Pan/zoom" includes `g.fitView()`, `viewport.zoomBy()`, the anchored
-  correction and every tick of their tweens — none of which fire a pointer event, and
-  all of which used to leave whatever the previous transform had hidden hidden for good.
-- Culling is live-DOM state, so anything that reads the live DOM has to account for it:
-  - `export.js` clones the live svg, so it **clears `data-culled`/`display:none` on the
-    clone**. A standalone export always draws the whole graph its viewBox claims.
-  - `a11y.js` never parks the roving tabindex on a culled group: `.focus()` on a hidden
-    element is a silent no-op, so committing `currentId` there strands real focus on the
-    element just demoted to `tabindex="-1"`. Arrow/Home/End walk the focusable subset.
-
-## Gates & budget (integration + verify)
-
-- `scripts/size-budget.js`: IIFE limit tightens **56 → 50KB** gzip (plan §8 M3 public
-  commitment); core stays 40KB.
-- Goldens: regenerate via `node test/golden/update.js` (intentional layout change).
-  “Parity” gate = structural invariants + crossing non-regression, because
-  coordinate-identical parity with dagre is not a meaningful target:
-  - every forward edge strictly advances along the rank axis;
-  - no two visible sibling nodes overlap; children strictly inside container rects
-    (post-padContainers);
-  - per-fixture crossing count ≤ the recorded dagre-era count (extend
-    `test/golden/crossing.js` fixtures with the dagre numbers as of M2, hard-coded);
-  - back edges below the flow (LR), self-loops side arcs — unchanged shell behavior.
-- `test/engine-parity.test.js` (engine agent): run BOTH solvers (dagre from
-  devDependencies) over the fixture set + randomized-but-seeded graphs (~40: chains,
-  diamonds, fan-out/in, multi-edges, disconnected, 2-level nesting, wide ranks);
-  assert the invariants above for engineSolve and crossings(engine) ≤
-  crossings(dagre) + 2 per fixture (small slack on non-goldens; goldens get ≤).
-- Stability: appending one node to a 30-node fixture with `prevOrder` passed changes no
-  existing rank's relative order (test).
-- e2e-m3 (verify agent): flagship `demo/pipeline.html` narrative runs on the in-house
-  engine (it does automatically once layout.js swaps) — assert the §6 storyline still
-  passes (reuse e2e-m1's checks), plus: no dagre chunk in dist (grep the IIFE for
-  "dagre"), pipeline stage order left→right matches the DAG, containers contain their
-  children, no overlaps/NaN, and a 300-node synthetic graph mounts with culling active
-  (fewer rendered-visible groups than total when zoomed in) at interactive frame cost.
-- Compositor offload (plan: only if profiling justifies): verify agent profiles the
-  300-node run; if median frame ≤ 8ms headless, record "not justified at v1 scale"
-  instead of building it. Gantt mode: skipped by default (no demand).
-
----
-
-# M4 contracts (director ops: camera · highlight · caption · declared timeline)
-
-M3 is DONE and green (435 tests, e2e-m0/1/2/3, size, types). Do not regress it. M4a lands
-the core director ops; the deterministic frame
-renderer is M4b and its plumbing (`opts.ticker/motion`, `data-smv-record`,
-`setInteractive`) is landed here so M4b touches no core file.
-
-## `src/director.js` — camera targeting + emphasis/caption state (D12–D14)
-
-Same `internals`-taking contract as condense-anim.js: no renderer import, no global
-document, runs against a fake host in tests.
-
-```js
-resolveCameraTarget(opts, layoutResult, size, current, resolveId?) → {x, y, k}   // PURE
-createDirector(internals) → d
-  internals = { root, lastLayout(), emphasize(id, value), dim(id, value), captions, resolveId }
-d.highlight(sel), d.clearHighlight(), d.caption(text, opts) , d.captionText()
-d.reassert()                       // apply(force): rewrite every data-emph/data-dim
-d.snapshot() → {emphasis, caption} / d.restore(snap), d.destroy()
-```
-
-- `resolveCameraTarget` resolution order, first match wins: absolute `x`/`y` (+`k`) →
-  `node` → `nodes` (union box) → `fit:true` (layout bounds) → relative `zoom`/`k` +
-  `by:{dx,dy}`. Boxes come from `layoutResult.nodes[id]` (centre-origin {x,y,w,h}); a box
-  target centres it, `k` on it is explicit scale, else fit with `pad` (default 24). Bare
-  `k`/`zoom` scale about the pane centre; `by` is a screen-px nudge applied after any
-  zoom. Relative moves compose onto `current` — index.js passes `viewport.target`, the
-  frame the move is written into, never a mid-tween sample (viewport.anchor's reasoning).
-  Unknown node ids resolve to "stay put". Every derived `k` (fitted, explicit-on-a-box,
-  `zoom`) is clamped to the viewport's own `MIN_K..MAX_K` BEFORE x/y are derived from it —
-  `setTo` clamps `k` but copies x/y verbatim, so an unclamped fit would centre the shot at
-  a scale the viewport never applies and land it off-screen by the clamp ratio. FIT_MAX_K
-  is structurally absent from the camera path.
-- **M5 (F15/F16/F17).** A box target is fitted and centred in `paneBox(size, pad, inset)`
-  (viewport.js, shared with `fit()`): `opts.inset ?? size.inset`, so index.js can pass the
-  MEASURED chrome through `size` while a target's own `inset` still wins (`0` opts out).
-  `maxK` lids a FITTED `k` only — an explicit `k` is a scale request — and index.js
-  supplies `maxK: 1.5` for a `nodes[]` union (`NODES_MAX_K`), which is why the pure
-  function itself stays unopinionated. `resolveId(id)` maps an id the layout did not draw
-  to the ancestor standing in for it (index.js passes `vs.visibleAncestor`); only an id
-  that resolves to nothing drawn still warns. `highlight()` resolves `sel.nodes` the same
-  way through `internals.resolveId` — edges are left alone (a hidden edge is a meta-edge,
-  a different id, not an ancestor).
-- Emphasis: `Map<id, variant>` + dim `Set`, replace-not-accumulate (D14). `apply()` diffs
-  desired vs a `written` shadow (Map + Set) and writes only what differs;
-  `apply(force)` clears the shadow first — that is `reassert()`, for elements the
-  renderer just rebuilt. `highlight({dim:true})` dims every id the last layout drew
-  (nodes AND edges) that is not emphasised.
-- Caption: lazily-created `div.smv-caption` on the mount root (transport.js pattern),
-  `role="status"`, never `aria-live="assertive"`; `data-place`/`data-variant` attrs.
-  Inert with no document. `internals.captions === false` suppresses the DOM only: the
-  caption stays state — snapshotted, restored, readable via `captionText()` for cues.
-
-## `src/viewport.js` additions
-
-```js
-vp.fit(bounds, {pad=24, duration=0, ease, maxK=FIT_MAX_K, inset}) → Promise<{canceled}>
-paneInsets(root, svgEl) → {top,right,bottom,left}     // PURE-ish: reads client rects only
-paneBox(size, pad, inset) → {cx, cy, w, h}            // PURE
-normInset(number | {top,right,bottom,left}) → {top,right,bottom,left}
-vp.fit(bounds, pad, animate)              // M0 spelling still works (object-vs-scalar sniff)
-vp.moveTo({x?,y?,k?}, {duration=0, ease}={}) → { promise, cancel }
-vp.setInteractive(bool)                   // attach/detach ALL pointer+wheel listeners
-vp.size() → {w, h}
-vp.target                                 // getter: where a live tween is heading, else state
-```
-
-- **`stopTween(canceled)` settles the tween's promise on every exit path** — landing,
-  retarget, `setNow`, destroy, clock teardown. Through M3 it dropped tweens silently;
-  that would strand `moveTo`'s awaitable (D9: a canceled move resolves `{canceled:true}`).
-  A `ticker.onDestroy` subscription covers the clock being torn down under a live tween
-  (`g.ticker` is public).
-- `tick()` uses the tween's own `ease` (default still cubicOut). `fit`'s `maxK` overrides
-  the FIT_MAX_K=1.5 auto-fit lid (`MAX_K`/`FIT_MAX_K` now exported). No
-  `prefersReducedMotion()` in this file — index.js owns `reduced` and passes the duration.
-- **M5 (F15).** `paneInsets()` measures the chrome the library itself mounts over the pane
-  (`.smv-transport`, `.smv-totalbar`, `.smv-caption`): each BAR is assigned to the pane edge
-  it hugs (top or bottom — every bar the library mounts is horizontal, and a taller element
-  is a host overlay), deepest intrusion per side wins, anything covering half the pane is a
-  host panel and is ignored, top/bottom each capped at 40%. Left/right are only ever an
-  `inset` the caller passes.
-  All zeros without `getBoundingClientRect`, so every fake-DOM test fits as before. `fit()`
-  and `resolveCameraTarget()` both frame through `paneBox()`, so they agree by construction.
-
-## `src/render.js` + `src/styles.js` + `src/storyboard.js`
-
-- `r.emphasize(id, value)` / `r.dim(id, value)` — lookup in nodeEls then edgeEls, write
-  `data-emph` / `data-dim` on the group. NOT folded into `mark()`: `data-condense` is the
-  condense choreography's channel and a highlight outliving a merge must not fight it.
-- CSS (M5/F18): status colour also writes `--smv-status-fill`, a `color-mix` of its token
-  over whatever `--smv-fill` resolved to, and the box paints
-  `var(--smv-status-fill, var(--smv-fill))`. Because the status rules also set `--smv-fill`,
-  an un-overridden node mixes a colour with itself (no visual change); an inline props/style
-  fill composes with the tint instead of hiding it. Guarded by `@supports color-mix` so an
-  old viewer keeps the plain fill.
-- CSS: `[data-emph]` variants (focus/warn/ok/mute) via a `--smv-emph` indirection over the
-  existing color vars; `.smv-node[data-dim],.smv-edge[data-dim]{opacity:.28}` (scoped, so
-  it can't leak onto host markup — the opacity property beats the per-frame presentation
-  attribute); `.smv-caption` with `data-place`/`data-variant` and a `.smv-has-transport`
-  bottom offset mirroring `.smv-totalbar`; the `[data-smv-record] *` transition/animation
-  kill-switch (D15). No transitions on any of it (D14).
-  - **Lesson (fixed):** the transport-aware bottom offset
-    (`.smv-has-transport .smv-caption{bottom:46px}`) used to outrank
-    `.smv-caption[data-place="top"]{bottom:auto}` by specificity, so a top-placed caption
-    under `controls: true` kept both `top` and `bottom` set and stretched over the whole
-    pane. The fix is a *more* specific transport-aware rule per placement
-    (`.smv-root.smv-has-transport .smv-caption[data-place="top"]{bottom:auto}` — one
-    attribute selector above the offset rule, which is why it wins), guarded by
-    `test/caption-place.test.js`. The general lesson: the caption strip, the transport bar
-    and the total-duration bar (`.smv-totalbar`) each position themselves independently
-    against the pane, with no single source of truth for how much chrome is stacked at top
-    or bottom — the same gap `fitView()`/`camera({ fit })` hit not accounting for that
-    chrome (F15). A single "pane chrome" layout — one place that knows the stacked heights
-    at each edge and hands them out to captions, `fitView`, and anything else that needs to
-    avoid them — would prevent the next collision instead of another rule fixed one
-    property pair at a time.
-- storyboard.js: `"camera" | "highlight" | "clearHighlight" | "caption"` join OPS and
-  NAMED — method-shaped, so applyStep's default branch dispatches them.
-
-## `src/index.js` — the director surface
-
-- `g.camera(o) → Awaitable` — `resolveCameraTarget(o, last, viewport.size(),
-  viewport.target)` → `viewport.moveTo(to, {duration, ease})`. Duration:
-  `stepDur ?? o.dur ?? 600` — step-first, the same order `durOf()` reads, so a step
-  declaring both durations cannot play at one length and be measured at the other —
-  reduced → 1, forward-scrub `instant` → 0. Ease: string key
-  into EASINGS, default cubic-in-out. First call sets `cameraOwned = true` AND
-  `viewport.userMoved = true` (reuses the auto-refit suppression signal, D13).
-  Deliberately not routed through `viewport.fit()` — see the FIT_MAX_K note above.
-- `g.highlight(sel)` / `g.clearHighlight()` / `g.caption(text, o?)` — thin delegates to
-  the director; return `g`.
-- **F37 — `{camera}` on a toggle.** `expand(id, o)` / `collapse(id, o)` / `expandAll(o)` /
-  `collapseAll(o)` (and `update()`'s `collapsed` route, which forwards its `opts`) run
-  `shotFor(o.camera, id)`: `true` → `{node: id}` (`{fit: true}` when there is no id), an
-  object is copied and given `node: id` when it names no box (`x`/`y`/`node`/`nodes`/`fit`),
-  and `maxK: NODES_MAX_K` is injected unless the target names `k` or `maxK`. The result
-  travels as `extra.camera` through `commitOrDefer` → `relayout({camera})` (inside a batch
-  it lands on `batchExtra.camera`, last writer wins). In `relayout`, a `camera` REPLACES the
-  D10 anchor + auto-refit branch: `resolveCameraTarget(camera, res, size, viewport.target,
-  vs.visibleAncestor)` against the layout just computed, then `viewport.moveTo(to,
-  {duration: dur, ease: EASINGS[camera.ease] || easing})` — the commit's own duration and
-  easing, so the camera and the FLIP are one tween. It also sets `cameraOwned = true` and
-  `viewport.userMoved = true`, exactly as `g.camera()` does, and `hasCameraOp()` reads the
-  option off the step's args (`TOGGLE_CAMERA_ARG` names the slot per op) so the step-0
-  snapshot already knows the script owns the viewport. A no-op toggle carrying a shot goes
-  through `shotOnly()` — `g.camera(shot)` with `applied: false` merged in — so the camera
-  still moves; `camera: false`/absent is the pre-F37 path byte-for-byte.
-- **F38 — `{camera}` on every relayout-producing op.** `addNode(n, o)` / `addEdge(e, o)` /
-  `removeNode(id, o)` / `removeEdge(id, o)` / `update(id, patch, o)` (its non-toggle
-  route) / `layout(lo, o)` run the same `shotFor(o.camera, subject)` and hand the result
-  to `commitOrDefer` as `extra.camera` — no new plumbing past that point. `shotFor`'s
-  second argument is now a SUBJECT: one id (`{node}`), a list (`{nodes}` — an edge's
-  endpoints, `[after, id]`), or null (`{fit: true}` — removes, layout, the -All toggles).
-  `MUTATION_CAMERA_ARG` (was `TOGGLE_CAMERA_ARG`) names the options slot per op so
-  `hasCameraOp()` sees a shot on any of them at build time; `update` no longer needs the
-  `collapsed` special case there, since the option is read on both routes. Inside a batch
-  every one of these lands on `batchExtra.camera`, last writer wins, exactly as toggles do.
-- **F39 — `{camera}` on condense/split.** `condense(ids, node, o)` / `split(id, parts, o)`
-  normalise `o.camera` with `shotFor` (subject: the merged id / the parts' ids) and pass
-  it as `opts.camera` to `runCondense` / `runSplit`, which forward it verbatim to their
-  phase-2 `relayout({camera})` — so it rides the converge/diverge duration and easing, is
-  resolved against the merged layout (the id exists by then), and never touches phases 1
-  or 3. `MUTATION_CAMERA_ARG` names slot 2 for both, so `hasCameraOp` sees it at build time.
-- **M5 (F15/F17/F18):** `chromeInset()` = `paneInsets(root, renderer.svg)`, read by
-  `fitView`, `camera` and relayout's auto-refit (and the one mount-time fit, which now runs
-  AFTER the transport mounts so there is chrome to measure). `g.camera` injects
-  `maxK: NODES_MAX_K` for a `nodes[]` target that names none, and passes
-  `vs.visibleAncestor` as the resolver. `g.props(map, opts)` forwards `{merge:true}` to the
-  director, which patches the override map instead of replacing it.
-- `g.cues() → [{kind:"label"|"caption", at, label?, text?, index}]` — absolute ms offsets
-  off the same `durOf()` table the scrubber reads (D12); truthful under `captions:false`.
-- **`durOf(step)`** replaces NOMINAL_STEP_MS: `step.dur` wins; else label 0, wait its ms,
-  camera `args[0].dur ?? 600`, highlight/clearHighlight/caption 0 (`props` joined the
-  zero list in M4d), `run.step`/`run.seek` 0
-  (instantaneous: nothing to await), condense/split `CHOREO_MS` (the CONDENSE_PHASES sum,
-  900), batch max of members (one commit, parallel), default `baseDuration`.
-  `run.play` slices still come from the run's own clock.
-- **F40 — a `dur` on a discrete step is a hold.** `durOf()` reads `step.dur` first for
-  every op, so `{op:"caption", dur:1600}` was always priced at 1600 on the scrubber and
-  the cue sheet — while `g.caption()` returned `g`, the sequencer had nothing to await,
-  and the story moved on at once (declared ≠ awaited). `applyStep` now checks
-  `holdFor(step, r)` after `applyOp`: when the step declared a positive `dur`, the op
-  handed back nothing awaitable (not a thenable, not a `run.play` `{run}` — note `g` itself
-  has a `run` *function*, hence the `typeof r.run === "object"` guard), and it is not
-  `run`/`run.reset` (priced 0 before `dur` is read), it returns `waitMs(stepDur)`. Skipped
-  while `scrubDepth > 0`, like every director tween on a forward scrub. The discrete ops
-  joined `PARALLEL_IN_BATCH` so a held child counts toward the batch's `durOf` exactly as
-  it is awaited (bare, they still cost 0 there).
-- **`stepDur` ambient (D12):** `applyStep` saves/sets `stepDur = step.dur ?? null` around
-  the op and restores after (a batch's `dur` survives its children); `relayout` reads
-  `duration ?? stepDur ?? baseDuration` (reduced → 1). Every mutation op gains per-step
-  pacing with zero signature churn.
-- **Snapshot gating (D13):** `host.snapshot()` always spreads `director.snapshot()`
-  (emphasis + caption, D14); `camera: viewport.target` + `userMoved` join it ONLY when
-  `cameraOwned` — set at `buildStoryboard` time by `hasCameraOp(steps)` (batches
-  recursed), because the step-0 snapshot is taken before any op runs. `restore()` drives
-  the camera AFTER `relayout()` returns, at duration 0 (relayout's anchor/auto-refit has
-  just written the viewport synchronously), then `director.restore(snap)`.
-- **Reassertion:** `bus.on("commit", () => director.reassert())` — render.js builds a
-  fresh `<g>` for a re-added id, so a commit reviving an emphasised node hands back a
+Mode B adds `waiting`, `active` (`waiting + active === occupancy`) and `overBudget` to
+`nodes[id]`.
+
+### Mode A: `compileRun(spec, opts) → sim`
+
+`sim = {duration, events, boundaries, stateAt(t), nextBoundary(t, tokenId?)}`. The whole
+schedule is compiled once as a discrete-event pass, and seek, scrub and step only sample
+it. Container edges are remapped to entry and exit children; a single spec edge can
+expand into several engine edges that keep its `id`, and loop-budget bookkeeping stays
+keyed by `id`. `breakCycles` runs over the remapped edges, and untagged back edges act as
+zero-iteration loops, excluded from join arity. Compilation is capped at `MAX_STEPS` so a
+pathological spec cannot hang the page. Unparseable input produces `warn` events, not
+exceptions.
+
+### Mode B: `replayLive(spec, events, t, opts) → state`
+
+It replays the append-only log up to `t` with no container remap. `opts = {hopMs = 300,
+minHopMs = 0, bornAt}`. `hopMs` is rendering travel time and never gates the feed. A
+`start` that arrives before the hop lands consumes it. A landing that coincides with a log
+event at the same `t` is ordered before it. `bornAt` (edge id to live ms) stops a `finish`
+from fanning out over an edge that did not exist yet. `liveFedTargets(nodes, edges)` is
+the engine's own definition of a non-root: loop edges, self-edges and edges cut by
+`breakCycles` do not feed. It is exported so the transport's start guard cannot drift
+from it. `liveBoundaries(events)` returns sorted distinct event times, which `step()`
+walks.
+
+### The transport: `createRunTransport(internals, opts) → run`
+
+It owns everything time-shaped: `play/pause/seek/speed/step/timeOf/reset`, and in live
+mode `start/finish/fail/spawn/follow/now/log`. See [RUN.md › The run
+handle](RUN.md#the-run-handle) and [LIVE.md › The primitive
+surface](LIVE.md#the-primitive-surface).
+
+- **Mode A:** `speed()` and `step()` are not engine features. `speed()` appends a rate
+  event and recompiles against the same spec at the current virtual time. The past is
+  unchanged because a rate is applied only when a token enters a node at or after the
+  event's `t`.
+- **Mode B:** a **frontier** clock advances with the ticker unconditionally, and view
+  time `t` follows it until a `seek` detaches it. The view can never pass the frontier.
+  `state()` is memoised on `(t, store.rev, log revision)` and returns a private copy,
+  because the state is sampled every frame and a replay is O(events).
+- `reset(opts, time)` re-seats **the same handle** (identity and listeners intact), and
+  `options()` returns what `reset` needs, including the live log. The storyboard
+  snapshot/restore round trip depends on this pair and must not lose live history.
+- Graph mutations reach the engines lazily through the new spec. On `condense`/`split`,
+  Mode A recompiles and emits `remap`, and tokens move to the survivor. Mode B **rewrites
+  the log** so entries naming a removed source point at the survivor (or a split's entry
+  part). Without that, `replayLive` drops the history and `done` flips mid-run. An edge
+  added in live mode is stamped with the frontier in `bornAt`.
+- `index.js`'s `createRun()` keeps `runSubs`, the set of every `run.on()` a caller
+  registered, and re-seats it on the fresh transport each `g.run(opts)` recompile builds,
+  so caller listeners and their unsubscribers survive. The run layer's own subscriptions
+  use the raw `on()` and are rebuilt per compile. The same hop mirrors every run event
+  onto the instance bus as `run:<type>`.
+
+### `run-render.js`
+
+`createRunRender(internals, run)` draws into `g.smv-tokens` inside the shared tick: one
+pulse per token, placed with `pointAt` on the **current** edge geometry so it follows
+edges mid-transition; a per-node progress fill; the occupancy badge; join pips; loop
+badges; and `data-traversed` / `--smv-traversed` on edges. It writes the live status to
+`data-run` and `data-over-budget` on node groups, and emits `runstatus` on the bus **per
+status transition, never per frame**. `a11y.js` and `a11y-table.js` refresh on
+`runstatus`, since a run is not a spec mutation and fires no `commit`. The layer is
+`aria-hidden`.
+
+## Storyboard and timeline
+
+### `storyboard.js`
+
+`createStoryboard(host, steps)` is a pure sequencer with no DOM and no ticker.
+`host = {apply(step) → awaitable | {run} | null, snapshot(), restore(snap) → awaitable}`.
+It snapshots **before** every step, and `seek(i)` restores snapshot `i`. Label-only
+entries are zero-duration markers. The sequencer exposes
+`play/pause/next/prev/seek/labels/position/on/off`.
+
+- `STORYBOARD_OPS` is the op whitelist. `validate()` checks every step at build time,
+  recursing into batches with dotted indexes: unknown ops, `props` keys that are not
+  `--smv-*`, and `run`/`run.reset`/`layout` arguments that are not options objects all
+  fail at their own step index.
+- `stepGen` and `loopGen` generation counters make interleaved play/pause/seek safe. A
+  `seek()` always leaves the storyboard paused.
+- `timeline(g)` is the fluent builder (`NAMED` maps method names to ops). The array it
+  builds is the only primitive.
+
+The op table and step fields are documented in
+[RECORDING.md › The op reference](RECORDING.md#the-op-reference).
+
+### Storyboard host (`index.js`)
+
+- **`applyStep`** sets the ambient `stepDur = step.dur ?? null` around the op and restores
+  it afterwards, so a batch's `dur` survives its children, and `relayout` reads it. This
+  gives every mutation per-step pacing with no signature change. During a forward scrub,
+  the director ops (`DIRECTOR_OPS`) run instantly; mutations keep their real timing.
+- **Holds.** If a step declares a positive `dur` and its op returns nothing awaitable
+  (not a thenable and not `{run}`; note that `g` has a `run` *function*), `applyStep`
+  waits `dur` on the ticker. `run`/`run.reset` are excluded, and so is any step during a
+  scrub.
+- **Batches** await the shared commit together with every child that returns its own
+  awaitable. `PARALLEL_IN_BATCH` lists the ops that keep their own clock inside a batch.
+- **`durOf(step)` is the declared timeline, and the scrubber, `g.cues()`, `smv-record`
+  and `smv-fit` all read it.** Labels cost 0. `run`/`run.reset` cost 0, decided before
+  `dur` is read. Otherwise `step.dur` wins. Otherwise: `wait` costs its ms, `camera` its
+  `dur` or `CAMERA_MS` (600), the director ops and `run.step`/`run.seek` cost 0, `condense`
+  and `split` cost `CHOREO_MS`, a batch costs the maximum of its `PARALLEL_IN_BATCH`
+  members and `baseDuration`, and everything else costs `baseDuration`. `run.play` slices
+  come from the run's own clock (`stepSlices()`, which subtracts the run time already
+  spent). **What a step is priced at must be what it is awaited for**; a change to either
+  side has to change both, and `bin/smv-fit.mjs` as well (see [CLIs](#clis-bin)).
+- **`host.snapshot()`** captures everything a step can move: `spec`, `collapsed`,
+  `reversals`, `order`, `layers`, `slots`/`slotsKey`, `layout` (the `layout` op mutates
+  instance options), `runTime`, `runCompiled`, `runOpts`, and `director.snapshot()`
+  (emphasis, caption, props, pulse). It also captures `camera` and `userMoved`, **but
+  only when `cameraOwned`**. That flag is set at build time by `hasCameraOp(steps)`,
+  because the step-0 snapshot precedes every op. Snapshotting the camera unconditionally
+  would undo a reader's pan on every seek.
+- **`host.restore()`** order: store, view state, pins, order, layers and slots, layout
+  opts, **then `director.restore()` before `relayout()`** (the props layer is read inside
+  the style commit), then `relayout()`, **then the camera at duration 0** (after, because
+  relayout's anchoring writes the viewport synchronously), then the run: `runCtl.reset()`
+  on the same handle, a fresh compile, or `disposeRun()` with the compile inputs put back.
+  `runCompiled: false` is distinct from "compiled with no options", so a backward seek
+  never leaves a later step's inputs behind.
+- **`seekTimeline(ms)`** pauses, finds the owning step (a label exactly at `ms` wins),
+  `sb.seek(idx)`s, then `run.seek`s inside a `run.play` step. `scrubDepth` is a counter,
+  not a boolean, because drag seeks overlap.
+- The director's state re-asserts on every `commit` event, because a re-added id gets a
   blank element.
-- **Forward scrub:** `seekTimeline` raises a `scrubDepth` counter (a depth, not a boolean:
-  a drag seeks on every `input`, so scrubs overlap and an earlier one settling must not
-  lower the flag under a newer replay); `applyStep` snaps ONLY the
-  four director ops to `instant` (duration 0). Mutations keep their real timing —
-  test/e2e-m3's scrubForward leans on the condense choreography; widening is a
-  deliberate later decision.
-- **Record plumbing (D15):** `opts.ticker === "manual"` → `createTicker({manual:true})` +
-  `data-smv-record` on the root; `opts.motion === "full"` → `reduced = false`;
-  `opts.captions` → director. `g.ticker` is public. `fitView` and relayout's auto-refit
-  pass the reduced-computed duration into `fit`'s opts form (through M3 that tween ran a
-  flat 350ms whatever the environment asked).
 
-## M4b (deterministic frame renderer) — landed
+### `transport.js`
 
-`bin/smv-record.mjs` + `scripts/harness.mjs` + `test/e2e-m4.mjs`. Everything the renderer
-needs was already public after M4a — manual ticker, `motion:"full"`, `data-smv-record`,
-`setInteractive(false)`, `g.ticker`, `g.scene`, `g.viewport`, `g.timeline()`, `g.cues()` —
-so M4b is all `bin/`, at no cost against the size budget. The one core change it forced is
-in `applyOp`/`durOf`: a batch step now awaits its children's awaitables alongside the shared
-commit, and `durOf('batch')` stops counting a child `dur` that playback ignores (see D12).
-Without it a heterogeneous batch put every later step — and every cue offset after it —
-~450ms ahead of the cue sheet the frame renderer shares.
+`createTransport(rootEl, controller)` mounts the `.smv-transport` bar (play/pause, step,
+scrubber over `controller.timeline()`, speed 0.5/1/2/4, label readout) when
+`controls: true`. `controller = {play, pause, next, prev, seek(ms), speed(f),
+timeline(), on}` is defined in `index.js`, and seeking pauses before moving the head.
 
-- **`scripts/harness.mjs`** — `findChromium()` / `serveRoot(root = ROOT)` / `ROOT`. The
-  four e2e scripts each carried a byte-identical private copy; they now import this one.
-  `serveRoot` gained the `root` parameter (default: the repo) because the recorder serves
-  a temp directory holding one packed page, not the checkout.
-- **`bin/smv-pack.mjs --record`** — the D15 mount variant: `{controls:false,
-  captions:true, autoplay:false, ticker:"manual", motion:"full"}` (+ `--theme`), and
-  `window.__smv = SparkleMotion.mount(...)`, the CLI's only handle into the page. Autoplay
-  is deliberately OFF: the recorder starts the story itself, after `document.fonts.ready`
-  and after the interaction interlock, so frame 0 is the same frame every time. Without
-  `--record` the emitted bytes are unchanged (asserted in test/record-cli.test.js).
-- **`bin/smv-record.mjs`** — pack → serve → chromium at `{width, height,
-  deviceScaleFactor: scale}` → `document.fonts.ready` (text metrics decide node boxes, so
-  the layout is only reproducible once the fonts are) → `viewport.setInteractive(false)`
-  → measure `timeline()`/`cues()` → `storyboard().play()` → per frame:
-  `ticker.tick(frameMs)`, settle, `page.screenshot({clip: root box})`.
-  Defaults: fps 60, 1920×1080 @2x, tail 1200ms; `--png-dir` clears stale `frame-*.png`
-  first. `parseArgs` and `findLiveRun` are exported so test/record-cli.test.js covers the
-  flag grammar and the Mode B check without a browser.
-- **Measuring a `run.play` story.** `stepSlices()` prices a run step off the run
-  transport's own clock, and that transport only exists once a `run.*` op created it —
-  but the record pack does not autoplay, so at measuring time it does not. Measuring first
-  therefore priced a whole simulated run at one mutation's `baseDuration` and cut the take
-  off inside step 1, at exit 0. So when the storyboard contains a `run.play` (batches
-  walked), the CLI calls `g.run()` in the same evaluate, before `timeline()` — exactly what
-  `applyStep`'s `ensureRun()` does at the step. It also creates the token layer at frame 0,
-  which is a deliberate, visible change to frame 0's pixels.
-- **How long a take is.** The declared timeline is the **floor**, not the cut. Each async
-  phase boundary resolves on the first tick at or past its duration and the next phase's
-  `t0` is that tick, so a story of N boundaries runs up to N frames past `timeline().total`
-  (condense's highlight/converge/reveal chain ends ~58ms past its declared 900ms). Cutting
-  at `ceil((total + tail)/frameMs)` dropped the end-of-choreography state flip — with
-  `--tail 0` every written frame still carried `data-condense="reveal"` — and spent the
-  tail on the overrun instead of on the finished picture. The loop therefore shoots at
-  least `ceil(total/frameMs)` frames, then keeps going while `stepFrame` reports the story
-  unfinished (`storyboard().position().done` and no live `scene.transition`), capped at
-  2000ms past the declared total (a warning on stderr if that cap bites), and only then
-  writes `ceil(tail/frameMs)` held frames. Still wall-clock-free: every bound is ticks.
-- **Settling.** A step boundary lands on a promise chain (a transition resolving hands the
-  storyboard its next op), never on a timer, so one macrotask turn drains everything the
-  tick released. The loop turns at least 2 times (one drains, one proves nothing new was
-  queued) and at most 8, stopping as soon as the observable signature —
-  `timeline().index/time/steps`, the live transition, `viewport.transform` — repeats. Frame 0 is `tick(0)` + settle: play()'s first ops land, the clock does not move.
-- **Refusals.** Mode B is rejected before the browser launches — a live run replays a real
-  event log against real time. The check is scoped to a `run.play` step's own options
-  (`{op,args:[{mode}]}` or `{op,mode}`, batches recursed): node/edge `data` is an arbitrary
-  user payload the store preserves verbatim and `data:{mode:"live"}` is this project's own
-  pipeline idiom, so a deep walk refused perfectly recordable Mode A stories. (M4b also
-  owed the user a message for `--out` with no encoder behind it; M4c wired the pipe, and
-  that message is now only the genuinely-no-ffmpeg case — see below.)
-- **Direct-invocation guard.** Both bins compare `import.meta.url` against
-  `pathToFileURL(realpathSync(process.argv[1]))`, not against `` `file://${process.argv[1]}` ``:
-  npm installs `bin.smv-record` as a symlink (argv[1] is the link, `import.meta.url` the
-  realpath) and a space in the path is percent-encoded on one side only. Either divergence
-  made the documented `npx smv-record …` invocation a silent no-op at exit 0.
-- **Cleanup.** The mkdtemp serve directory holds the whole packed story (spec + the 128KB
-  IIFE), so it is created *inside* the try that also opens the browser: the paths the code
-  explicitly anticipates — no playwright-core, no chromium binary, a launch that rejects —
-  used to leak a copy of it per run. The finally is guarded, since it can now run before
-  the server and browser exist.
-- **e2e-m4** renders the fixture (`test/fixtures/record-demo.{spec,sb}.json`: camera,
-  highlight+dim, captions, condense, labels) twice at 10fps/480×270 and asserts every frame
-  is byte-identical across the two takes, that the frame count is at least the declared
-  timeline's (2900ms + 200ms tail) and within one frame per step boundary of it, that the
-  last two frames are identical (the tail holds a *settled* picture), that a `run.play`
-  story is measured at the compiled run's duration rather than 350ms, and the refusals.
+## Director (`director.js`)
 
-## M4c (publishing: mp4, cue sheets, ranges, pinned fonts) — landed
+`createDirector(internals)` takes `{root, captions, ticker, reduced, lastLayout(),
+resolveId, emphasize, dim}`. It imports no renderer and touches no global document, and
+tests run it against a fake host.
 
-Still all `bin/` except one ESM-only export path, so still zero bundle cost. What M4b
-rendered, M4c publishes: `--out story.mp4` (the ffmpeg pipe), `--cues` (three formats),
-`--from/--to` (one chapter), `--font` (cross-machine layout), and
-`exportSVG(g, {viewport:true})` (the matching still).
+- **`resolveCameraTarget(opts, layout, size, current, resolveId?) → {x, y, k}`** is pure.
+  The first matching form wins: absolute `x`/`y`(+`k`), then `node`, then `nodes` (union
+  box), then `fit: true`, then relative `k`/`zoom` + `by: {dx, dy}`. Relative moves
+  compose onto `current` (`viewport.target`). A box is fitted into
+  `paneBox(size, pad, inset ?? size.inset)`. `maxK` caps only a *fitted* `k`; an explicit
+  `k` is honoured. Every derived `k` is clamped to `MIN_K..MAX_K` **before** x and y are
+  derived from it, otherwise the shot lands off-centre by the clamp ratio. Unknown ids
+  resolve through `resolveId` (`vs.visibleAncestor`); an id that resolves to nothing drawn
+  warns and the camera stays put. `g.camera()` goes through `viewport.moveTo`, not
+  `viewport.fit`, so `FIT_MAX_K` never applies to it.
+- **Emphasis:** a `Map<id, variant>` plus a dim `Set`, replaced rather than accumulated on
+  each `highlight()`. `apply()` diffs the desired state against a `written` shadow and
+  writes only differences. `reassert()` clears the shadow first, for elements the renderer
+  rebuilt. `highlight({dim: true})` dims every drawn id (nodes and edges) that is not
+  emphasised. Node ids resolve through `resolveId`; edges do not, because a hidden edge's
+  stand-in is a meta-edge with a different id.
+- **Captions:** a lazily-created `div.smv-caption` with `role="status"` (never
+  assertive), `data-place` and `data-variant`. With `captions: false` the caption is still
+  state (snapshotted, restored, readable via `captionText()` for cues), but no DOM is
+  written.
+- **Props layer:** `props(map, {merge})` validates the whole map (only `--smv-*`
+  keys) before writing anything, so a rejected map leaves the previous layer in place.
+  `propsLayer()` returns `Map<id, {key: value | null}>` and advances its own `wroteP`
+  shadow, so **it must be read exactly once per style commit**; `relayout` and `styleNow`
+  are its only callers. Keys the previous layer set arrive as `null`. In the renderer's
+  `mergeProps`, `null` removes a property only if the style function is not setting it,
+  so `g.props(null)` returns to the styled picture. `false` from the caller always removes.
+  The renderer also applies the layer at `ensureNode()`, so re-added elements need no
+  commit hook.
+- **Pulse:** `highlight({pulse: true})` registers one ticker callback that writes one root
+  property, `--smv-pulse`, quantised to 12 steps over a 1400ms cycle so a frame's markup
+  does not depend on tick arithmetic. It is not a CSS animation, which is what keeps it
+  deterministic under the manual ticker. It is removed from the ticker on
+  `clearHighlight()`, on restoring a snapshot without a pulse, and on `destroy()` (before
+  the `destroyed` flag is set). Under reduced motion it never registers and holds the peak
+  value statically.
 
-- **`--out` / the ffmpeg pipe.** One long-lived
-  `ffmpeg -y -f image2pipe -framerate <fps> -i - -c:v libx264 -pix_fmt yuv420p -crf 18 <out>`
-  reading screenshots off stdin, so no intermediate sequence is written and `--png-dir` is
-  no longer on the critical path. `page.screenshot()` now returns the buffer instead of
-  taking a `path`, and the two outputs are *sinks*: `--out`, `--png-dir`, or both. Three
-  things the pipe has to get right, all of them load-bearing: **backpressure** — a 4K frame
-  is megabytes and the encoder is slower than the capture loop, so a `write()` that returns
-  false is awaited to `drain` or the whole take buffers in RSS; **a dead encoder** — every
-  wait races the child's `close`, or a drain that will never come hangs the CLI; and
-  **why** — ffmpeg's own stderr is the only thing that knows, so the last 12 lines are kept
-  and surfaced on a nonzero exit. Failure aborts with SIGKILL, not SIGTERM (a terminated
-  ffmpeg finalizes what it has, and half a story that looks whole is worse than no file)
-  and unlinks the partial output; the sinks join the existing single `finally`.
-  `$SMV_FFMPEG` overrides the binary, which is also how the tests exercise the
-  no-encoder path on a machine that has one.
-- **Ctrl+C is a path the `finally` does not cover**, and it is the way a long take normally
-  ends early. A terminal delivers the signal to the whole process *group*, so ffmpeg used to
-  get it first-hand, finalize what it had, and leave a valid, playable 0.4s clip of a 3.4s
-  story — the finalized half-story the abort path exists to prevent — while node exited
-  through playwright's own handler without unwinding anything (the mkdtemp serve dir leaked
-  too). Three pieces: ffmpeg is spawned `detached` (its own group, so only the recorder ever
-  decides that file's fate; deliberately not `unref`'d, or `closed` would stop resolving),
-  chromium is launched with `handleSIGINT/SIGTERM/SIGHUP: false` (playwright's handlers
-  `process.exit()` out from under both the finally and ours), and `record()` registers one
-  handler per signal that does what the finally does — but **synchronously**, since a
-  handler that awaits races process exit and can lose. Hence `sink.abortSync()` beside
-  `abort()`: `child.kill("SIGKILL")` + `rmSync(out)` with no await in between. Exit 130 for
-  SIGINT, 143 for SIGTERM, one stderr line naming what was removed and what survived
-  (`--png-dir` frames are individually complete — that is the salvageable take). The
-  handlers come off in the finally so an importing test is not left holding them.
-- **`--cues` (`bin/cues.mjs`).** Formatting lives in `bin/` — a subtitle serializer is a
-  publishing concern the 50KB budget should not pay for — and imports nothing from `src/`.
-  The extension picks the format so a filename cannot lie: `.json` is `g.cues()` verbatim
-  plus render metadata (`fps/width/height/scale/total/range`), `.srt` turns captions into
-  spans (each runs to the next caption, a `caption(null)` clear, or the story end) timed
-  `HH:MM:SS,mmm`, `.txt` is a YouTube chapter list off the labels. The two text formats
-  annotate the *media file*, so a `--from/--to` take clips and rebases them onto the range
-  (and pins the first chapter to `00:00`, or YouTube drops the list); `.json` stays on the
-  story's clock and carries `range` to rebase with. Written *before* the frame loop: it is
-  a function of the declared timeline alone, so an interrupted take still leaves one.
-  The media is longer than the story, which the `.srt` has to know: the recorder passes
-  `mediaEnd = total + tailFrames·frameMs` (equal to `total` under `--to`, which spends no
-  tail) and that, not `total`, closes the last open caption span. Otherwise a caption issued
-  as the story's **last** step — captions are zero-duration ops, so it sits at exactly
-  `total` — becomes the span `[total, total)`, which `clip()`'s `!(end > start)` guard drops
-  as a same-frame replacement, while the pixels show it for every frame of the tail. The
-  guard is right; the span's end was wrong.
-- **`--from/--to`.** Labels → absolute ms through the same cue sheet (D12) → frame indices
-  (`ceil(ms/frameMs - 1e-9)`; the epsilon is float hygiene — `600/16.666…` lands a hair
-  under 36 and would otherwise cost a whole frame). Capture starts at `--from`'s frame and
-  ends on the first frame at or past `--to`, inclusive; a `--to` take spends no tail (the
-  story is not finished there). The story is **not** seeked: the take plays from step 0
-  with the identical tick cadence and only the capture window moves. A seek would replay
-  director ops instantly and skip the tweens they were meant to leave behind — the first
-  frame would show a state the story never held. Label *existence* is checked against the
-  storyboard file before a browser launches; the offsets come from the page, because a
-  `run.play` step's length depends on a compiled run only the browser can build.
-- **Skipped frames still get a compositor frame.** Measured, not assumed: fast-forwarding
-  by ticking without capturing made the first captures after the gap differ from the same
-  frames of a full render — ~92dB PSNR, a few antialiased pixels, only on frames inside a
-  camera tween. The JS state is identical (the ticks are); the raster is not, because a
-  screenshot forces a paint and shooting every frame leaves Skia somewhere else than
-  shooting one in eight. One `requestAnimationFrame` round-trip per skipped frame restores
-  the cadence at a fraction of a screenshot's cost and makes a slice byte-identical to the
-  full render's matching frames — which is the only reason to render a range separately.
-- **`--font`.** The face is copied next to the served page (relative URL, same origin —
-  not a data: URI in a file that already carries the spec and the 128KB IIFE) and
-  `buildHTML` grows a record-only layer: `@font-face` + a `font-family` override, and the
-  mount is deferred behind `document.fonts.load(...)` because node boxes are measured
-  *during* mount. It pins both pipelines. CSS alone pins only what is drawn: `system-ui`
-  is a generic family keyword `@font-face` may not redefine, and `src/measure.js` sizes
-  every node box with canvas `measureText` against `500 13px system-ui, …`. So the record
-  page also patches the 2D-context `font` setter to swap the family list for the injected
-  face — scoped to this generated harness page, and the difference is visible: pinning
-  Liberation Serif moved the fixture's node widths from 41/47/49/45px to 36/41/43/41px.
-  Without it `--font` would restyle the glyphs while the *layout* stayed machine-dependent,
-  which is the one thing the flag exists to fix. **The pin is verified**, because failing to
-  apply it is silent: `document.fonts.ready` resolves for a face that errored, smv-pack
-  mounts on `.then(go, go)` by design, and chromium reports a decode failure as a console
-  *warning*, which the pageErrors collector does not keep — so a bad face used to render a
-  whole take at exit 0 in the machine's default font. Two checks: the file's first four
-  bytes must agree with its extension (`wOF2`/`wOFF`/`OTTO`/`\x00\x01\x00\x00`/`true`/`ttcf`
-  — the two sfnt flavours are one bucket, since CFF outlines in a `.ttf` decode fine, while a
-  WOFF2 named `.ttf` makes the injected `format("truetype")` hint skip the src), which
-  catches the everyday git-lfs-pointer and renamed-file accidents before a browser launches;
-  and after the mount, the page is asked whether a face of that family reached it and
-  decoded (`status === "error"` tells "failed to decode" apart from "never asked for"),
-  which catches a truncated but correctly-signed file. The second check is inside the take's
-  try, so the sinks abort and no truncated mp4 survives the refusal.
-- **`exportSVG(g, {viewport:true})`** (`src/export.js`, ESM-only entry, not in the IIFE).
-  Keeps the live `.smv-viewport` transform AND the live culling state, with the pane as the
-  `viewBox` (`g.viewport.size()`, falling back to the element box, then 800×600) and `pad`
-  ignored. Both are deliberate inversions of the default path, and the code says so: the
-  defaults exist because a whole-graph document showing only what was on screen is a bug
-  (a near-empty file whenever the user was zoomed in), while shot mode asks for the
-  opposite document, where the transform *is* the framing and culled elements are by
-  definition outside it. Un-culling there would add nothing visible and pour every
-  off-screen node into a document that clips them anyway. Change one, change the other.
-- **e2e-m4 (M4c half)** probes a real mp4 (h264 stream, `nb_frames` equal to the frames the
-  take shot, duration = frames/fps), reads back `cues.json`, renders `--from focus --to
-  automate` and asserts all 8 frames are byte-identical to frames 7–14 of the full take
-  with the chapter file rebased onto the slice, and renders `--font` twice (identical to
-  each other, different from the unpinned take — the only proof from outside the page that
-  the face reached both the drawing and the measurement), asserts a story whose last step is
-  a caption keeps that caption in the `.srt` (held for the tail), and interrupts a take
-  mid-flight with a real process-group SIGINT to prove the mp4 is gone, the exit is nonzero,
-  the `--png-dir` frames survive and no serve dir is left behind. ffmpeg and a pinned font
-  file are environment, not contract: those sections **skip with a printed notice** rather
-  than fail when the machine has neither. The ffmpeg gate probes `-encoders` for `libx264`,
-  not just `ffmpeg -version`: the pipe hardcodes `-c:v libx264`, and a build without it
-  (Fedora/RHEL `ffmpeg-free`) answers `-version` perfectly well and then fails the encode —
-  which is an environment the recorder cannot fix, so it must skip, with the reason named.
+## Interaction and accessibility
 
-## M4d (voice-over fitting · property overrides · the pulse) — landed
+### `interact.js`
 
-The half of the loop M4c left open. `--cues` tells a narrator *when* each beat is; M4d
-takes the timestamps the read actually landed on and moves the story to them. Plus the two
-small core additions the milestone reserved: a per-step `--smv-*` override layer (D16) and
-an emphasis pulse (D17). Both stay inside channels that already exist, and together they
-cost ~0.6KB gzip of the core budget.
+`attachTapToggle(g, {svg, toggle = true, emit, onToggle})`. On `pointerdown` it resolves
+the `.smv-node`/`.smv-edge` under the pointer, before the viewport's
+`setPointerCapture` retargets the gesture. On `pointerup` it emits
+`nodeclick`/`edgeclick` and toggles containers, but only within a 6px slop and with no
+second pointer (pinch). `interaction.tapToggle === false` drops the toggle and
+`interaction.click === false` drops the events.
 
-### `bin/smv-fit.mjs` — VO-first hold fitting
+### `a11y.js`
 
-```
-smv-fit script.sb.json --vo marks.json [-o fitted.sb.json] [--base 350]
-```
+`attachA11y(g, {root, svg, emit, onToggle})` is attached by default and skipped with
+`a11y: false`.
 
-Pure JSON→JSON, no browser, no `src/` import, zero bundle cost. `marks.json` is either
-`{"intro":0,"focus":4200}` (key order is the file's, which `JSON.parse` preserves) or
-`[{"label":…,"ms":…}]`. Exports `durOf`, `labelOffsets`, `parseMarks`, `fit`, `parseArgs`
-so the whole transform is testable without a CLI.
+- `role="application"` with `aria-roledescription="graph"` on the svg, `role="tree"` on
+  the nodes group, and on each node `role="treeitem"`, `aria-level`, `aria-label =
+  label · status`, `aria-expanded` on containers, and a roving `tabindex`. Roles are
+  re-applied after every `commit` by querying the DOM; this module never reaches into
+  `render.js`.
+- The status in the label is the live `data-run` value when a run drives the node,
+  otherwise `data.status`. It refreshes on `runstatus`.
+- The roving focus follows **real** DOM focus through `focusin`. When a commit removes the
+  focused node, focus is re-homed to the new roving stop instead of falling to `<body>`.
+- Tokens, edge labels and container chrome are `aria-hidden`; the treeitem's label is the
+  authoritative name.
+- Keys: arrows move through `readingOrder(layoutResult)`, which infers the rank axis from
+  `order` (falling back to x then y), Home/End jump to the ends, and Enter/Space toggle a
+  container.
 
-- **The pricing is a copy, and the copy is gated.** `durOf()` here is `src/index.js`'s
-  table verbatim — a fit computed off a different clock than the scrubber, the cue sheet
-  and the frame renderer read would be worse than no fit. It cannot be *imported*: the
-  library's `durOf` is a closure over `baseDuration` and the run transport inside `mount()`.
-  So `test/fit-cli.test.js` mounts `test/fixtures/record-demo.{spec,sb}.json` through the
-  DOM shim and asserts `labelOffsets(steps)` equals the `kind:"label"` half of a real
-  `g.cues()`, plus totals against `g.timeline().total`. That test is the seam's contract.
-- **Anchors.** The story start is an implicit anchor at 0ms, so the run-up to the first
-  marked label is fitted like any other segment (and a mark on a label that is *not* step 0
-  works without special-casing). Marks are resolved to label indices and re-ordered by
-  where they sit in the SCRIPT, not by the marks file, then checked monotonic against that
-  order — a VO tool's key order is the narrator's.
-- **Per segment:** `floor` = what the segment's non-`wait` steps cost, the shortest it can
-  possibly be; `budget` = the requested gap minus that floor, handed to the segment's waits
-  in proportion to what they already hold (integer shares, remainder on the last, so the
-  sum is exactly `budget`). A segment with no wait gets one inserted immediately before the
-  label. That is also what makes the transform **idempotent**: a re-fit finds a wait holding
-  exactly `budget`, asks for `budget` again, and writes it back unchanged (proportional
-  shares of `T` out of a total that is already `T` are the same integers).
-- **The walk is backwards**, so an inserted wait never shifts an anchor index not yet used.
-  Steps are mutated in place on a fresh `JSON.parse`, so key order and step identity
-  survive; the only key ever added to an existing step is `ms` on a wait that declared
-  neither `ms` nor `args[0]`. A wait carrying `dur` is repriced on `dur` too, because that
-  is the field `durOf()` reads first.
-- **Refusals, all exit 1 before anything is written:** a mark naming a label the storyboard
-  does not have (with the known labels listed), marks that run backwards against script
-  order, a negative or non-numeric ms, a duplicate mark, and a gap smaller than the
-  segment's floor — named with the label, the floor and the gap asked for. Also `run.play`:
-  its length is measured off the compiled run transport inside the browser, so a segment
-  containing one cannot be priced statically and the CLI says so rather than guessing.
-- Unmarked labels ride along on whatever the fit did around them; everything after the last
-  marked label is untouched. The script goes to `-o` or to stdout (report on stderr, so the
-  transform pipes).
+### One toggle for both paths
 
-### `{"op":"props"}` — the override layer (D16)
+`attachTapToggle` and `attachA11y` both take `onToggle(id)`. `index.js` passes the same
+`readerToggle` to both, built from `interaction.tapToggle.camera`. It calls
+`g.expand/collapse(id, {camera})` and then restores `cameraOwned`: the reader's tap sets
+`userMoved`, but it does not hand the camera to a storyboard. Keeping one function for
+both paths prevents Enter/Space and tap from disagreeing.
 
-`g.props({id: {"--smv-*": value}})`, `g.props(null)` to clear; `"props"` joins OPS/NAMED and
-`durOf()`'s zero list. State lives in the director (`props` Map + a `wroteP` shadow), which
-is why it snapshots and restores with emphasis for free.
+### `a11y-table.js`
 
-- **It rides the style commit, not a second write path.** `director.propsLayer()` is read at
-  the two `renderer.styleCommit()` call sites (`relayout` and the new `styleNow()` behind
-  `g.style()`/`g.props()`) and nowhere else — it rolls its own shadow forward, so exactly one
-  read per commit is the contract. `render.js` merges it over `styleFn(n)` per node, and
-  applies it to edges too (the user style function is node-scoped, §5.6). Because
-  `styleCommit` runs *before* the elements exist, a re-added id's fresh `<g>` gets the
-  override out of `nodeStyle` at `ensureNode()` — no commit hook needed, unlike `data-emph`.
-- **A dropped key has to arrive as an explicit `null`.** `setProps()` only removes what it
-  is handed, so an inline property would outlive the override that wrote it; `propsLayer()`
-  therefore starts every id with nulls for the keys the LAST layer set. In `mergeProps` a
-  null removes the property only when the style function is not setting the same key — that
-  is what makes `g.props(null)` a return to the styled picture rather than a stripped one.
-  (`false` is the caller's own "remove this" and does clobber the style function.)
-- Validation is D7's: only `--smv-*` keys, and the whole map is validated before anything is
-  written, so a rejected map leaves the previous layer standing.
-- **`host.restore()` now restores the director BEFORE `relayout()`**, where it used to run
-  after. The property layer is read by the style commit *inside* relayout, so restoring it
-  afterwards would leave the outgoing step's overrides on screen for a whole commit.
-  Emphasis is re-asserted off the `"commit"` event either way, so moving the whole call up
-  costs nothing. The camera stays after relayout, for the reason it always was.
+`attachA11yTable(g, {visible = false}) → {el, destroy}` renders one row per visible node
+(label, status, duration, depth, outgoing targets) and updates on `commit`, `update` and
+`runstatus`. Only one rendering is in the accessibility tree at a time: while `a11y.js`
+is attached the table is `aria-hidden`, and with `a11y: false` the table is the
+accessible surface.
 
-### `highlight({pulse: true})` — the attention pulse (D17)
+## Preset (`preset-pipeline.js`)
 
-Spelled as a modifier, not a fifth `variant`: the four variants are colours, and a warning
-that breathes is still a warning, so `pulse` is orthogonal to `variant` exactly like `dim`.
+`applyPipelinePreset(g, opts)` works through public `g.on` subscriptions and DOM
+adornments only. It adds duration chips with `durationAgg` rollups, status and mode
+glyphs, the condense odometer and delta badge, and the `.smv-totalbar`. It reserves chip
+room through `PIPELINE_MEASURE` (`layout.measure`) and injects its own styles. Applied
+after mount, it back-fills the current layout synchronously so it matches
+`preset: 'pipeline'` at mount. The boundary rules a preset must follow are in
+[PRESETS.md](PRESETS.md).
 
-- The director registers ONE callback on the shared ticker (D1) and writes ONE root custom
-  property, `--smv-pulse` — `round(((1 - cos(2π·phase)) / 2) · 12) / 12` over a 1400ms
-  cycle. Bucketed on purpose: a raw float would make a frame's markup depend on the exact
-  tick arithmetic, and 12 stops quantize with the frame loop. The CSS is one changed rule,
-  `stroke-width: calc(2.5px + var(--smv-pulse, 0) * 2px)` on the existing `[data-emph]`
-  selectors, so an unset property is byte-for-byte the picture M4a shipped.
-- **Not a CSS animation, deliberately.** `data-smv-record` (D15) exists to kill wall-clock
-  transitions; a pulse that needed it would be a pulse that could not be *tested* under the
-  manual ticker either. Under manual ticks the same tick sequence produces identical DOM —
-  `test/director.test.js` asserts that against a second director, and `test/e2e-m4.mjs`
-  proves it end to end: the record fixture's highlight now carries `pulse:true`, so the 33
-  byte-identical frames of the determinism gate include it, and frames 12/13 (1.2s/1.3s — a
-  `wait` where nothing else is moving) must *differ*, which is the pulse doing per-frame
-  work inside a gate that would have caught any nondeterminism in it.
-- It comes off the ticker on `clearHighlight()`, on a restore into a snapshot without one,
-  and on `destroy()` (before the `destroyed` flag, or the guard would block its own
-  teardown), so the rAF loop can idle. G9: under reduced motion it never registers at all
-  and holds the peak statically — the motion shrinks, the emphasis is not skipped.
+## Export (`export.js`)
+
+- `exportSVG(g, {pad = 24, theme, width, viewport})` clones the live svg, strips
+  transport and interaction residue, inlines `CSS` from `styles.js` plus resolved theme
+  properties, and returns a standalone SVG string. It builds strings where possible so
+  Node tests can use a fake clone. The default document is the **whole graph**: the
+  viewBox is `g.bounds()` plus `pad`, the viewport transform is dropped, and culling is
+  cleared on the clone.
+- `viewport: true` inverts both defaults on purpose: the pane is the viewBox, and the live
+  transform and culling are kept, because the transform is the framing and culled
+  elements are outside it. **If you change one default, change the other.**
+- `exportPNG(g, {scale = 2, background})` renders SVG to an `Image`, then a canvas, then a
+  `Blob`. It is browser-only and rejects cleanly under Node.
+
+## CLIs (`bin/`)
+
+Usage is documented in [EMBED.md](EMBED.md) (`smv-pack`) and
+[RECORDING.md](RECORDING.md) (`smv-record`, `--cues`, `smv-fit`). No `bin/` file costs
+bundle size, and `cues.mjs` and `smv-fit.mjs` import nothing from `src/`. Invariants a
+change there must keep:
+
+- **Direct-invocation guard.** Every bin compares `import.meta.url` with
+  `pathToFileURL(realpathSync(process.argv[1]))`, because npm installs bins as symlinks
+  and paths with spaces are percent-encoded on one side only.
+- **`smv-pack --record`** emits the recording mount (`controls: false, captions: true,
+  autoplay: false, ticker: "manual", motion: "full"`, and `window.__smv`). Without
+  `--record` the output bytes are unchanged, which `test/record-cli.test.js` asserts.
+- **`smv-record` is wall-clock free.** It waits for `document.fonts.ready` (node boxes
+  depend on text metrics), disables interaction, measures `timeline()`/`cues()`, then
+  alternates `ticker.tick(frameMs)`, settle, and screenshot. A story containing a
+  `run.play` is measured only after calling `g.run()`, because the record page does not
+  autoplay and `run.play` slices come from the compiled run. Settling turns the macrotask
+  queue 2 to 8 times until the observable signature repeats. The declared timeline is the
+  **floor** of a take, not its cut: the loop continues while the story is unfinished, up
+  to 2000ms past the total, then writes the tail. Mode B stories are refused before
+  launch; the check looks only at `run.play` step options, never at node `data`.
+- **Ranges** (`--from`/`--to`) play from step 0 and move only the capture window;
+  seeking would skip tweens. Skipped frames still get one `requestAnimationFrame`
+  round-trip each, so a slice is byte-identical to the matching frames of a full render.
+- **The ffmpeg sink** honours backpressure (awaits `drain`), races every wait against the
+  child's `close`, surfaces ffmpeg's last stderr lines, and aborts with SIGKILL and
+  unlinks the partial file, never leaving a finalised half-story. Ctrl+C takes the same
+  path synchronously: ffmpeg is spawned `detached`, chromium's own signal handlers are
+  off, and `sink.abortSync()` runs from the signal handler. The exit code is 130 or 143.
+  `$SMV_FFMPEG` overrides the binary.
+- **`--font`** pins both drawing and measurement. The record page injects `@font-face`
+  and also patches the 2D-context `font` setter, because `measure.js` sizes boxes with
+  canvas `measureText` against `system-ui`, which CSS cannot redefine. The pin is
+  verified twice, by the file's magic bytes before launch and by the page's
+  `document.fonts` status after mount, because a failed face otherwise renders silently.
+- **Cue sheets** (`cues.mjs`) are written before the frame loop. `.srt` spans close at
+  `mediaEnd` (story plus tail), so a caption on the last step survives. `.srt` and `.txt`
+  rebase onto a `--from/--to` range; `.json` stays on the story clock and carries `range`.
+- **`smv-fit`'s `durOf` is a copy of `index.js`'s**, since the original is a closure
+  inside `mount()`. `test/fit-cli.test.js` mounts `test/fixtures/record-demo.*` and
+  asserts that `labelOffsets()` equals the label half of a real `g.cues()`. That test is
+  the contract between the two copies. Fitting walks backwards, distributes budget to
+  waits proportionally (integer shares), and is idempotent.
+
+## Build, size and tests
+
+- `scripts/build.js` bundles `src/index.js` with esbuild into `dist/smv.esm.js` and
+  `dist/smv.iife.min.js` (global `SparkleMotion`), plus `build/smv.core.esm.js`, a metric
+  bundle with `./engine.js` external that is never published. Template-literal
+  stylesheets are run through esbuild's CSS minifier for the minified bundles.
+  `assertNoDagre()` fails the build if dagre reaches any default bundle.
+- `scripts/size-budget.js` builds, then hard-fails if min+gzip reaches **50KB** for the
+  core metric or **55KB** for the IIFE. Raise a budget deliberately, never to hide a leak.
+  README's size table reports the current numbers.
+- `scripts/check-doc-versions.mjs` fails if a doc pins a version other than
+  `package.json`'s.
+- `npm run check` runs tests, build, size and doc versions. `npm run types` type-checks
+  `types/` against `types/check.ts`, which exercises the public surface; update both when
+  the API changes. CI (`.github/workflows/ci.yml`) runs `npm ci`, `npm test` and
+  `npm run size`.
+
+### Layout gates
+
+- Golden layouts (`test/golden/*.json`) use fixtures with explicit node `w`/`h`, which
+  keeps `sizeNode` out of the loop. Regenerate them with `node test/golden/update.js`,
+  and only when a layout change is intended.
+- Coordinate parity with dagre is **not** a goal. The gates are structural: every forward
+  edge advances along the rank axis, visible siblings never overlap, children sit strictly
+  inside container rects after padding, back edges are drawn below the flow (LR), and
+  self-loops are side arcs. Crossings must not regress: each golden fixture's crossing
+  count stays at or below `DAGRE_CROSSINGS` in `test/golden/crossing.js`. Those numbers
+  are hard-coded on purpose, so the bar never moves with the engine and the tests need no
+  dagre. If the bar fails, fix the engine, not the bar.
+- `test/engine-parity.test.js` runs both solvers over the fixtures and about 40 seeded
+  synthetic graphs, asserts the invariants above, allows the engine at most dagre's
+  crossings + 2 on non-goldens, and checks append stability with `prevOrder`.
+
+### End-to-end scripts
+
+The browser scripts are not part of `npm test`. Run them directly with `node`. They use
+`scripts/harness.mjs` (`findChromium`, `serveRoot`) and need chromium (the pre-installed
+one at `/opt/pw-browsers/chromium` is found automatically).
+
+| script | page / fixture | asserts |
+|---|---|---|
+| `test/e2e-m0.mjs` | `demo/m0.html` | no errors; back edge keeps its side across overlapping appends; finite positions |
+| `test/e2e-m1.mjs` | `demo/pipeline.html` | the flagship story: fan-out at distinct rates, `all` join, retry loop to 3/5, expand, condense with odometer, clean backward/forward scrub |
+| `test/e2e-m2.mjs` | `demo/m2.html` | live run (occupancy, seek clamped at `now`, `follow`), condense/split round trip, edge labels through relayout, collapseAll/expandAll, keyboard/ARIA, SVG/PNG export |
+| `test/e2e-m3.mjs` | `demo/pipeline.html`, `demo/m3-scale.html` | the flagship story on the in-house engine, no dagre in the IIFE, structural parity, 300-node culling, pan-frame cost |
+| `test/e2e-m4.mjs` | `test/fixtures/record-demo.*` | two `smv-record` takes byte-identical frame for frame (pulse included), frame count against the declared timeline, settled tail, mp4/cues/range/font/SIGINT paths; ffmpeg and font sections skip with a notice when the environment lacks them |
+
+`node scripts/check-demos.mjs --all` smoke-tests every demo page. It waits for
+`g.finished` (or the older `window.__smvExit`) and fails on page errors, console errors,
+`[smv:` warnings, or non-finite geometry.
