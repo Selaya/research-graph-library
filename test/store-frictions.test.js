@@ -1,4 +1,4 @@
-// Regression tests for the store / structural-op frictions F28-F31 (docs/API-FRICTIONS.md):
+// Regression tests for the store / structural-op frictions F28-F31:
 //   F28 — condense() takes `parent: null` as "inherit", and loop edges are not paths
 //         through the condensed set (store-level coverage lives in test/store.test.js).
 //   F29 — g.update() can unset a data key, and a `collapsed` patch routes to

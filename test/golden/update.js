@@ -6,8 +6,7 @@
 // engine (src/engine.js). Coordinates AND point counts differ from the dagre era by
 // design — an adjacent-rank edge is now 2 points, dagre always emitted 3 because it
 // doubles ranks to make room for edge labels. The gate that survives the swap is the
-// crossing non-regression against DAGRE_CROSSINGS, not coordinate identity
-// (docs/DEVIATIONS.md §parity).
+// crossing non-regression against DAGRE_CROSSINGS, not coordinate identity.
 
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

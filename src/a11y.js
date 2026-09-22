@@ -1,4 +1,4 @@
-// M2 — ARIA + keyboard navigation (PLAN.md M2 "non-negotiable before 1.0"). Ships in the
+// ARIA + keyboard navigation. Ships in the
 // IIFE (core), always on unless `opts.a11y === false` (index.js's concern).
 //
 // Queries the live DOM by `[data-id]` on `.smv-node` under the svg the renderer owns —

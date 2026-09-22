@@ -1,4 +1,4 @@
-// docs/API-FRICTIONS.md F10–F14 — Mode B (live) engine + transport.
+// Mode B (live) engine + transport regressions.
 //
 //   F10  joins are honoured in live mode: N arrivals release ONE token, not N.
 //   F11  start() on a non-root with nothing waiting warns ([smv:live]); waiting/active counts.
